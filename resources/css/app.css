@@ -183,7 +183,6 @@ body {
     .nav-material {
         background: color-mix(in srgb, var(--canvas) 80%, transparent);
         backdrop-filter: saturate(180%) blur(20px);
-        -webkit-backdrop-filter: saturate(180%) blur(20px);
         border-bottom: 1px solid var(--hairline);
     }
 
@@ -337,7 +336,6 @@ body {
     height: 48px;
     background: rgba(0, 0, 0, 0.8);
     backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
     border-bottom: 1px solid rgba(255, 255, 255, 0.10);
 }
 .glass-bar a,
@@ -376,7 +374,6 @@ body {
     z-index: 50;
     background: color-mix(in srgb, var(--surface) 78%, transparent);
     backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
     border-top: 1px solid var(--hairline);
     padding-bottom: env(safe-area-inset-bottom, 0px);
 }
