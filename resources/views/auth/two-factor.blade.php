@@ -1,11 +1,11 @@
 <x-layout title="两步验证">
-    <div class="auth-scene flex items-center justify-center px-4 py-12" x-data="otpFlow()" x-cloak>
+    <div class="auth-scene flex items-center justify-center px-4 py-12" x-data="otpFlow()">
         <div class="grain"></div>
 
         <div class="w-full max-w-[400px]">
             <div class="text-center mb-7">
                 <div class="auth-mark mb-5">
-                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+                    <i data-lucide="shield-check" class="w-[26px] h-[26px] label-secondary"></i>
                 </div>
                 <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight">两步验证</h1>
                 <p class="auth-quiet text-[15px] mt-1.5">

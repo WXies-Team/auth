@@ -1,10 +1,10 @@
 <x-layout>
-    <div class="auth-scene flex items-center justify-center px-4" x-cloak>
+    <div class="auth-scene flex items-center justify-center px-4">
         <div class="grain"></div>
 
         <div class="text-center">
             <div class="auth-mark mb-6">
-                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2.5"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                <i data-lucide="lock" class="w-[30px] h-[30px] text-white" stroke-width="1.8"></i>
             </div>
             <h1 class="text-[34px] font-semibold tracking-[-0.9px]">统一登录网关</h1>
 

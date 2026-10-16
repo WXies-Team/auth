@@ -7,7 +7,7 @@
     <title>授权请求 · 统一登录网关</title>
     @vite(['resources/css/app.css'])
 </head>
-<body class="auth-scene flex items-center justify-center px-4 py-10" x-cloak>
+<body class="auth-scene flex items-center justify-center px-4 py-10">
     <div class="grain"></div>
 
     <div class="w-full max-w-[400px]">
@@ -33,7 +33,7 @@
                         <li class="flex items-start gap-3 text-[15px] text-white/90">
                             <span class="mt-0.5 w-5 h-5 rounded-full flex-shrink-0 flex items-center justify-center"
                                   style="background: rgba(48,209,88,0.16)">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                                <i data-lucide="check" class="w-3 h-3" style="color: var(--success-ink)"></i>
                             </span>
                             <span>{{ $scope->description }}</span>
                         </li>
