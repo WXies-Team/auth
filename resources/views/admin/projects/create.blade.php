@@ -1,6 +1,6 @@
 <x-layout title="新建项目">
-    <x-top-nav active="admin" />
-    <div class="max-w-lg mx-auto py-12 px-4">
+    <x-app-shell active="admin">
+    <div class="py-12 px-4">
         <a href="{{ route('admin.dashboard') }}" class="text-[15px] label-secondary hover:underline">← 项目列表</a>
         <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-6">新建项目</h1>
 
@@ -28,4 +28,5 @@
             </div>
         </form>
     </div>
+</x-app-shell>
 </x-layout>

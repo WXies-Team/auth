@@ -1,6 +1,6 @@
 <x-layout title="用户管理">
-    <x-top-nav active="admin" />
-    <div class="max-w-3xl mx-auto py-12 px-4">
+    <x-app-shell active="admin">
+    <div class="py-12 px-4">
         <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-8">用户管理</h1>
 
         @if (session('status'))
@@ -36,4 +36,5 @@
 
         <div class="mt-4">{{ $users->links() }}</div>
     </div>
+</x-app-shell>
 </x-layout>

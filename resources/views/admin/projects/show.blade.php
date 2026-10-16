@@ -1,6 +1,6 @@
 <x-layout title="{{ $project->name }}">
-    <x-top-nav active="admin" />
-    <div class="max-w-3xl mx-auto py-12 px-4">
+    <x-app-shell active="admin">
+    <div class="py-12 px-4">
         <a href="{{ route('admin.dashboard') }}" class="text-[15px] label-secondary hover:underline">← 项目列表</a>
 
         <div class="flex items-center justify-between mt-2 mb-8">
@@ -123,4 +123,5 @@
             </form>
         @endcan
     </div>
+</x-app-shell>
 </x-layout>

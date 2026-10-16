@@ -1,6 +1,6 @@
 <x-layout title="审计日志">
-    <x-top-nav active="admin" />
-    <div class="max-w-5xl mx-auto py-12 px-4">
+    <x-app-shell active="admin">
+    <div class="py-12 px-4">
         <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-8">审计日志</h1>
 
         <div class="card overflow-x-auto" style="border-color: var(--color-separator)">
@@ -40,4 +40,5 @@
 
         <div class="mt-4">{{ $logs->links() }}</div>
     </div>
+</x-app-shell>
 </x-layout>

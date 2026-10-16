@@ -1,6 +1,6 @@
 <x-layout title="安全设置">
-    <x-top-nav active="security" />
-    <div class="max-w-xl mx-auto py-10 px-4">
+    <x-app-shell active="security">
+    <div class="py-10 px-4">
         <h1 class="text-[28px] font-semibold tracking-[-0.5px] mb-6">安全设置</h1>
 
         <section class="card p-5 flex items-center gap-4 mb-4">
@@ -116,4 +116,5 @@
             </div>
         </section>
     </div>
+</x-app-shell>
 </x-layout>

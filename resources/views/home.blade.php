@@ -1,7 +1,7 @@
 <x-layout>
     @auth
-        <x-top-nav active="home" />
-        <div class="max-w-[440px] mx-auto px-4 py-10">
+        <x-app-shell active="home">
+        <div class="py-1">
             {{-- 资料卡 --}}
             <div class="card p-6 flex items-center gap-4">
                 <div class="w-14 h-14 rounded-full flex items-center justify-center text-white text-[22px] font-semibold shrink-0"
@@ -38,6 +38,7 @@
 
             <p class="text-center text-[13px] label-tertiary mt-8">统一登录网关 · 一次登录，通行所有项目</p>
         </div>
+        </x-app-shell>
     @else
         <div class="auth-scene flex items-center justify-center px-4">
             <div class="grain"></div>

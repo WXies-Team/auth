@@ -1,6 +1,6 @@
 <x-layout title="已登录设备">
-    <x-top-nav active="sessions" />
-    <div class="max-w-xl mx-auto py-10 px-4">
+    <x-app-shell active="sessions">
+    <div class="py-10 px-4">
         <div class="flex items-center justify-between mb-6">
             <h1 class="text-[28px] font-semibold tracking-tight">已登录设备</h1>
             <form method="POST" action="{{ route('sessions.destroy-others') }}"
@@ -42,4 +42,5 @@
             @endforelse
         </div>
     </div>
+</x-app-shell>
 </x-layout>

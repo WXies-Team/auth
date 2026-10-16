@@ -328,3 +328,76 @@ body {
     .auth-ghost:active { transform: none; }
     html { scroll-behavior: auto; }
 }
+
+/* ═══ 签名玻璃顶栏（apple.com 惯用语：48px / rgba(0,0,0,.8) / saturate180 blur20 / 常驻吸顶） ═══ */
+.glass-bar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    height: 48px;
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+}
+.glass-bar a,
+.glass-bar button {
+    color: #f5f5f7;
+    font-size: 13px;
+    letter-spacing: -0.08px;
+}
+
+/* 桌面侧栏（macOS 系统设置惯例）：激活项胶囊 */
+.side-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-size: 15px;
+    color: var(--ink-2);
+    text-decoration: none;
+    transition: background 140ms ease, color 140ms ease;
+}
+.side-link:hover { background: var(--fill-2); color: var(--ink); }
+.side-link.active {
+    background: var(--accent);
+    color: #fff;
+    font-weight: 500;
+}
+.side-link.active svg { color: #fff; }
+
+/* 移动端底部标签栏（iOS 惯例：玻璃材质 + 图标文字双层） */
+.tab-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--surface) 78%, transparent);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-top: 1px solid var(--hairline);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.tab-link {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 7px 0 6px;
+    font-size: 10px;
+    color: var(--ink-3);
+    text-decoration: none;
+}
+.tab-link.active { color: var(--accent); }
+.tab-link.active svg { stroke: var(--accent); }
+
+/* 卡片阴影调至 Apple bento 柔影（单层、极轻） */
+.card {
+    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.05);
+}
+@media (prefers-color-scheme: dark) {
+    .card { box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35); }
+}

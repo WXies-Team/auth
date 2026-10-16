@@ -1,6 +1,6 @@
 <x-layout title="管理后台">
-    <x-top-nav active="admin" />
-    <div class="max-w-3xl mx-auto py-12 px-4">
+    <x-app-shell active="admin">
+    <div class="py-12 px-4">
         <div class="flex items-center justify-between mb-8">
             <div>
                 <h1 class="text-[28px] font-semibold tracking-tight">管理后台</h1>
@@ -44,4 +44,5 @@
 
         <a href="{{ route('home') }}" class="inline-block mt-6 text-[15px] label-secondary hover:underline">← 返回首页</a>
     </div>
+</x-app-shell>
 </x-layout>
