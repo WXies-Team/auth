@@ -1,0 +1,156 @@
+@import 'tailwindcss';
+
+/* ── 设计令牌（apple-hig：系统字体栈 + 自动光学字号；44pt 最小触控区） ── */
+@theme {
+    --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'PingFang SC',
+        'Helvetica Neue', system-ui, sans-serif;
+
+    /* iOS/macOS 系统色（light） */
+    --color-brand: #007aff;
+    --color-brand-dark: #0a84ff;
+    --color-fill: #f2f2f7;
+    --color-surface: #ffffff;
+    --color-surface-secondary: rgba(118, 118, 128, 0.08);
+    --color-label: #1c1c1e;
+    --color-label-secondary: rgba(60, 60, 67, 0.6);
+    --color-label-tertiary: rgba(60, 60, 67, 0.3);
+    --color-separator: rgba(60, 60, 67, 0.18);
+    --color-green: #34c759;
+    --color-red: #ff3b30;
+    --color-amber: #ff9500;
+
+    /* 弹簧缓动（apple-design：critically damped，response≈0.35s 的 CSS 近似） */
+    --ease-spring: linear(0, 0.112 8.1%, 0.272 16.3%, 0.477 24.5%, 0.715 32.9%, 0.822 41%, 0.906 49.4%, 0.962 58.1%, 0.991 67.2%, 1.007 77.2%, 1.012 88.5%, 1.004 100%);
+}
+
+/* 暗色令牌（跟随系统） */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+    color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --color-brand: #0a84ff;
+        --color-fill: #000000;
+        --color-surface: #1c1c1e;
+        --color-surface-secondary: rgba(118, 118, 128, 0.24);
+        --color-label: #ffffff;
+        --color-label-secondary: rgba(235, 235, 245, 0.6);
+        --color-label-tertiary: rgba(235, 235, 245, 0.3);
+        --color-separator: rgba(84, 84, 88, 0.65);
+        --color-green: #30d158;
+        --color-red: #ff453a;
+        --color-amber: #ff9f0a;
+    }
+
+    body {
+        background: #000;
+        color: #fff;
+    }
+}
+
+body {
+    background: var(--color-fill);
+    color: var(--color-label);
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* ── 组件 ── */
+@layer components {
+    /* 44pt 触控高度；按下即刻反馈（apple-design §1：pointer-down 响应） */
+    .btn,
+    .btn-primary,
+    .btn-secondary,
+    .btn-destructive {
+        @apply inline-flex items-center justify-center gap-2 rounded-xl text-[17px] font-medium
+            min-h-11 px-5 select-none cursor-pointer;
+        transition: transform 100ms ease-out, opacity 100ms ease-out;
+    }
+    .btn:active,
+    .btn-primary:active,
+    .btn-secondary:active,
+    .btn-destructive:active {
+        transform: scale(0.97);
+    }
+    .btn:disabled,
+    .btn-primary:disabled,
+    .btn-secondary:disabled,
+    .btn-destructive:disabled {
+        opacity: 0.4;
+        cursor: default;
+    }
+
+    .btn-primary {
+        @apply text-white;
+        background: var(--color-brand);
+    }
+    .btn-primary:active {
+        opacity: 0.85;
+    }
+
+    .btn-secondary {
+        background: var(--color-surface-secondary);
+        color: var(--color-label);
+    }
+
+    .btn-destructive {
+        @apply text-white;
+        background: var(--color-red);
+    }
+
+    .input {
+        @apply w-full rounded-xl border px-3.5 text-[17px] min-h-11
+            placeholder:text-[17px] focus:outline-none;
+        background: var(--color-surface);
+        border-color: var(--color-separator);
+        color: var(--color-label);
+        transition: border-color 150ms ease, box-shadow 150ms ease;
+    }
+    .input:focus {
+        border-color: var(--color-brand);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-brand) 20%, transparent);
+    }
+
+    .card {
+        @apply rounded-2xl;
+        background: var(--color-surface);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .card {
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.5);
+        }
+    }
+
+    /* 半透明悬浮导航（apple-design §12：backdrop-filter 材质） */
+    .nav-material {
+        background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+        backdrop-filter: saturate(180%) blur(20px);
+        -webkit-backdrop-filter: saturate(180%) blur(20px);
+    }
+
+    .label-secondary {
+        color: var(--color-label-secondary);
+    }
+    .label-tertiary {
+        color: var(--color-label-tertiary);
+    }
+    .separator {
+        border-color: var(--color-separator);
+    }
+}
+
+/* 减弱动效：去掉弹簧与缩放，只留不透明度过渡（apple-design §14） */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        transition-duration: 150ms !important;
+    }
+    .btn:active {
+        transform: none;
+    }
+}
