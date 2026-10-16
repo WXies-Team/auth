@@ -36,9 +36,15 @@ jobs:
 
       # 依赖安装在 runner 本地做（构建产物 = vendor + public/build）。
       # composer 用用户目录的新版（系统 /usr/bin/composer 过旧，见仓库提交说明）。
+      # **必须显式给 HOME**：self-hosted runner 的 step 进程无 HOME（build.yml 坑19），
+      # composer 的缓存目录与 npm 的用户目录都依赖它；只设在这两个 step，
+      # 不提到 job 级。HOME 指向工作区旁持久目录，缓存跨 run 留存。
       - name: Install PHP dependencies
+        env:
+          HOME: ${{ github.workspace }}/../runner-home
         run: |
           set -euo pipefail
+          mkdir -p "$HOME"
           COMPOSER_BIN=$(command -v composer || true)
           if [ -z "$COMPOSER_BIN" ] || ! "$COMPOSER_BIN" --version 2>/dev/null | grep -qE 'Composer (2\.(2|1[0-9])|[3-9])'; then
             COMPOSER_BIN="$HOME/.local/bin/composer"
@@ -47,8 +53,11 @@ jobs:
           "$COMPOSER_BIN" install --no-dev --optimize-autoloader --no-interaction --no-progress
 
       - name: Build frontend
+        env:
+          HOME: ${{ github.workspace }}/../runner-home
         run: |
           set -euo pipefail
+          mkdir -p "$HOME"
           npm ci --no-audit --no-fund
           npm run build
 
