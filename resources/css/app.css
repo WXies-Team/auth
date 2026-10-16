@@ -154,3 +154,201 @@ body {
         transform: none;
     }
 }
+
+/* ══════════════════════════════════════════════════════
+   Auth scene —— 登录场景：深空底 + 极光光斑 + 玻璃卡片
+   意象「门与光」：网关是光汇聚的入口。
+   ══════════════════════════════════════════════════════ */
+[x-cloak] {
+    display: none !important;
+}
+
+.auth-scene {
+    position: relative;
+    min-height: 100vh;
+    background: #05060c;
+    color: #fff;
+    overflow: hidden;
+    isolation: isolate;
+}
+
+/* 极光光斑：两团缓慢漂移的辉光，构成立体纵深 */
+.auth-scene::before,
+.auth-scene::after {
+    content: "";
+    position: fixed;
+    z-index: -2;
+    border-radius: 50%;
+    filter: blur(90px);
+    pointer-events: none;
+}
+.auth-scene::before {
+    width: 55vmax;
+    height: 55vmax;
+    top: -18vmax;
+    left: -12vmax;
+    background: radial-gradient(circle at 30% 30%, rgba(56, 130, 246, 0.55), rgba(99, 102, 241, 0.25) 55%, transparent 72%);
+    animation: aurora-a 24s ease-in-out infinite alternate;
+}
+.auth-scene::after {
+    width: 48vmax;
+    height: 48vmax;
+    bottom: -16vmax;
+    right: -10vmax;
+    background: radial-gradient(circle at 70% 70%, rgba(6, 182, 212, 0.4), rgba(139, 92, 246, 0.22) 55%, transparent 72%);
+    animation: aurora-b 30s ease-in-out infinite alternate;
+}
+@keyframes aurora-a {
+    from { transform: translate3d(0, 0, 0) scale(1); }
+    to   { transform: translate3d(9vmax, 7vmax, 0) scale(1.15); }
+}
+@keyframes aurora-b {
+    from { transform: translate3d(0, 0, 0) scale(1.1); }
+    to   { transform: translate3d(-8vmax, -6vmax, 0) scale(0.95); }
+}
+
+/* 噪点薄膜：让渐变有颗粒质感，不发塑料光 */
+.auth-scene .grain {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    opacity: 0.5;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* 玻璃卡片：上缘受光的厚材质（apple-design §12：Bigger surfaces read as thicker） */
+.auth-card {
+    background: rgba(20, 21, 31, 0.58);
+    backdrop-filter: blur(36px) saturate(150%);
+    -webkit-backdrop-filter: blur(36px) saturate(150%);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.10),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.03),
+        0 32px 64px -16px rgba(0, 0, 0, 0.7),
+        0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* 文本层级（场景内固定使用暗色语义，不依赖系统主题） */
+.auth-quiet  { color: rgba(235, 235, 245, 0.60); }
+.auth-faint  { color: rgba(235, 235, 245, 0.35); }
+.auth-line   { background: rgba(255, 255, 255, 0.10); }
+
+/* 场景内输入框：暗玻璃 + 聚焦辉光 */
+.auth-input {
+    width: 100%;
+    min-height: 46px;
+    padding: 0 16px;
+    font-size: 17px;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+    outline: none;
+    transition: border-color 160ms ease, box-shadow 200ms ease, background 160ms ease;
+}
+.auth-input::placeholder { color: rgba(235, 235, 245, 0.35); }
+.auth-input:focus {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(96, 165, 250, 0.7);
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.22), 0 0 24px rgba(59, 130, 246, 0.18);
+}
+
+/* 主按钮：渐变玻璃体，顶缘受光，按下压感 */
+.auth-primary {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 46px;
+    font-size: 17px;
+    font-weight: 600;
+    color: #fff;
+    border: none;
+    border-radius: 14px;
+    cursor: pointer;
+    background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25), 0 8px 24px -6px rgba(79, 108, 246, 0.55);
+    transition: transform 100ms ease-out, filter 160ms ease;
+}
+.auth-primary:hover { filter: brightness(1.08); }
+.auth-primary:active { transform: scale(0.975); }
+.auth-primary:disabled { opacity: 0.55; cursor: default; transform: none; }
+
+/* 次按钮：暗玻璃 */
+.auth-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    width: 100%;
+    min-height: 46px;
+    font-size: 16px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.92);
+    border-radius: 14px;
+    cursor: pointer;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    transition: transform 100ms ease-out, background 160ms ease;
+    text-decoration: none;
+}
+.auth-ghost:hover { background: rgba(255, 255, 255, 0.11); }
+.auth-ghost:active { transform: scale(0.975); }
+
+/* 提示条（错误 / 状态） */
+.auth-note-error {
+    background: rgba(255, 69, 58, 0.14);
+    border: 1px solid rgba(255, 69, 58, 0.30);
+    color: #ff7b72;
+}
+.auth-note-ok {
+    background: rgba(48, 209, 88, 0.12);
+    border: 1px solid rgba(48, 209, 88, 0.28);
+    color: #4ade80;
+}
+
+/* OTP 分格：暗玻璃格子，聚焦点亮 */
+.otp-box {
+    width: 46px;
+    height: 54px;
+    text-align: center;
+    font-size: 24px;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 13px;
+    outline: none;
+    caret-color: #60a5fa;
+    transition: border-color 160ms ease, box-shadow 200ms ease, background 160ms ease;
+}
+.otp-box:focus {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(96, 165, 250, 0.75);
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.22), 0 0 24px rgba(59, 130, 246, 0.20);
+}
+
+/* 品牌辉光标：悬浮的钥匙孔光徽 */
+.auth-mark {
+    width: 64px;
+    height: 64px;
+    border-radius: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.9), rgba(139, 92, 246, 0.9));
+    box-shadow: 0 10px 32px -6px rgba(99, 102, 241, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    margin-inline: auto;
+}
+
+/* 减弱动效：光斑静止，只留最轻反馈 */
+@media (prefers-reduced-motion: reduce) {
+    .auth-scene::before,
+    .auth-scene::after {
+        animation: none !important;
+    }
+}
