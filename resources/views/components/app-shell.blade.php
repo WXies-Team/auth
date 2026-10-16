@@ -10,7 +10,6 @@
                 <span class="text-white font-medium">统一登录网关</span>
             </a>
             <div class="flex items-center gap-4">
-                <span class="hidden sm:inline text-white/70 truncate max-w-[180px]">{{ auth()->user()?->email }}</span>
                 <form method="POST" action="{{ route('logout') }}">
                     @csrf
                     <button class="flex items-center gap-1.5 hover:text-white/80 transition no-underline">

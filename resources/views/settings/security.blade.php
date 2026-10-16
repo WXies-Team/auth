@@ -27,7 +27,7 @@
         <section class="card p-6 mb-4">
             <div class="flex items-start justify-between mb-5">
                 <div>
-                    <h2 class="font-semibold text-[17px]">两步验证（TOTP）</h2>
+                    <h2 class="font-semibold text-[17px]">两步验证</h2>
                     <p class="text-[15px] label-secondary mt-0.5">登录时还需输入验证器应用的动态验证码</p>
                 </div>
                 <span class="text-[13px] font-medium px-2.5 py-1 rounded-full"
@@ -102,19 +102,20 @@
             <p data-passkey-error class="text-[15px] mt-2 hidden" style="color: var(--color-red)"></p>
         </section>
 
-        <section class="card p-6">
-            <h2 class="font-semibold text-[17px] mb-1">社交账号</h2>
-            <p class="text-[15px] label-secondary mb-4">绑定后可用其一键登录</p>
-            <div class="flex flex-wrap gap-2.5">
-                @if (config('services.github.client_id'))
-                    <a href="{{ route('social.redirect', ['provider' => 'github', 'intent' => 'link']) }}" class="btn-secondary">绑定 GitHub</a>
-                @endif
-                @if (config('services.google.client_id'))
-                    <a href="{{ route('social.redirect', ['provider' => 'google', 'intent' => 'link']) }}" class="btn-secondary">绑定 Google</a>
-                @endif
-                <a href="{{ route('sessions.index') }}" class="btn-secondary">管理已登录设备</a>
-            </div>
-        </section>
+        @if (config('services.github.client_id') || config('services.google.client_id'))
+            <section class="card p-6">
+                <h2 class="font-semibold text-[17px] mb-1">社交账号</h2>
+                <p class="text-[15px] label-secondary mb-4">绑定后可用其一键登录</p>
+                <div class="flex flex-wrap gap-2.5">
+                    @if (config('services.github.client_id'))
+                        <a href="{{ route('social.redirect', ['provider' => 'github', 'intent' => 'link']) }}" class="btn-secondary">绑定 GitHub</a>
+                    @endif
+                    @if (config('services.google.client_id'))
+                        <a href="{{ route('social.redirect', ['provider' => 'google', 'intent' => 'link']) }}" class="btn-secondary">绑定 Google</a>
+                    @endif
+                </div>
+            </section>
+        @endif
     </div>
 </x-app-shell>
 </x-layout>

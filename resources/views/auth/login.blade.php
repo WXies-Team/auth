@@ -43,7 +43,7 @@
                            class="auth-input">
 
                     <label class="flex items-center gap-2.5 text-[15px] label-secondary cursor-pointer select-none">
-                        <input type="checkbox" name="remember" value="1" class="rounded w-4 h-4 accent-[var(--accent)]">
+                        <input type="checkbox" name="remember" value="1" class="rounded w-[18px] h-[18px] accent-[var(--accent)]">
                         记住我
                     </label>
 
@@ -79,9 +79,6 @@
                 @endif
             </div>
 
-            <p class="text-center text-[13px] auth-faint mt-6 mat stagger-5">
-                在邮箱框可直接使用浏览器保存的 Passkey 登录
-            </p>
         </div>
     </div>
 </x-layout>

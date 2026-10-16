@@ -41,8 +41,6 @@
                 <div class="p-10 text-center label-tertiary text-[15px]">还没有项目</div>
             @endforelse
         </div>
-
-        <a href="{{ route('home') }}" class="inline-block mt-6 text-[15px] label-secondary hover:underline">← 返回首页</a>
     </div>
 </x-app-shell>
 </x-layout>

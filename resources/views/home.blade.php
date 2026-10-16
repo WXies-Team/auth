@@ -17,19 +17,19 @@
             {{-- 入口列表（分组行 + Lucide 图标 + chevron，iOS 设置惯例） --}}
             <div class="card mt-4 divide-y separator overflow-hidden mat stagger-3">
                 <a href="{{ route('security.show') }}" class="flex items-center gap-3.5 px-5 py-3.5 no-underline hover:bg-[var(--fill-2)] transition">
-                    <i data-lucide="shield-check" class="w-5 h-5 text-[var(--accent)]"></i>
+                    <i data-lucide="shield-check" class="w-5 h-5 label-secondary"></i>
                     <span class="flex-1 text-[17px] text-[var(--ink)]">安全设置</span>
                     <span class="text-[15px] label-tertiary">{{ auth()->user()->hasTwoFactorEnabled() ? '已开启' : '未开启两步验证' }}</span>
                     <i data-lucide="chevron-right" class="w-4 h-4 label-tertiary"></i>
                 </a>
                 <a href="{{ route('sessions.index') }}" class="flex items-center gap-3.5 px-5 py-3.5 no-underline hover:bg-[var(--fill-2)] transition">
-                    <i data-lucide="monitor" class="w-5 h-5 text-[var(--accent)]"></i>
+                    <i data-lucide="monitor" class="w-5 h-5 label-secondary"></i>
                     <span class="flex-1 text-[17px] text-[var(--ink)]">已登录设备</span>
                     <i data-lucide="chevron-right" class="w-4 h-4 label-tertiary"></i>
                 </a>
                 @can('access-admin')
                     <a href="{{ route('admin.dashboard') }}" class="flex items-center gap-3.5 px-5 py-3.5 no-underline hover:bg-[var(--fill-2)] transition">
-                        <i data-lucide="settings" class="w-5 h-5 text-[var(--accent)]"></i>
+                        <i data-lucide="settings" class="w-5 h-5 label-secondary"></i>
                         <span class="flex-1 text-[17px] text-[var(--ink)]">管理后台</span>
                         <i data-lucide="chevron-right" class="w-4 h-4 label-tertiary"></i>
                     </a>

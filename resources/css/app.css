@@ -359,11 +359,10 @@ body {
 }
 .side-link:hover { background: var(--fill-2); color: var(--ink); }
 .side-link.active {
-    background: var(--accent);
-    color: #fff;
+    background: var(--fill-2);
+    color: var(--ink);
     font-weight: 500;
 }
-.side-link.active svg { color: #fff; }
 
 /* 移动端底部标签栏（iOS 惯例：玻璃材质 + 图标文字双层） */
 .tab-bar {
