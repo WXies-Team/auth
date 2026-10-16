@@ -123,7 +123,7 @@ jobs:
           trap 'rm -f "$KEY"' EXIT
 
           ssh -i "$KEY" -p "$SSH_PORT" -o BatchMode=yes "$SERVER_USER@$SERVER_HOST" \
-            "bash -s" <<'EOS'
+            "bash -s -- $(printf '%q' "$OAUTH_DIR")" <<'EOS'
           set -euo pipefail
           cd "$1"
           PHP=/www/server/php/84/bin/php
