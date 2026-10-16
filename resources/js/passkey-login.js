@@ -6,6 +6,28 @@ function follow(redirect) {
     }
 }
 
+// ── 安全设置页：注册新 Passkey ──
+const registerButton = document.querySelector('[data-passkey-register]');
+registerButton?.addEventListener('click', async () => {
+    const nameInput = document.querySelector('[data-passkey-name]');
+    const errorBox = document.querySelector('[data-passkey-error]');
+    const name = nameInput?.value?.trim() || 'Passkey';
+
+    registerButton.disabled = true;
+    errorBox?.classList.add('hidden');
+
+    try {
+        await Passkeys.register({ name });
+        window.location.reload();
+    } catch (error) {
+        if (error?.name !== 'NotAllowedError' && errorBox) {
+            errorBox.textContent = '添加失败：' + (error?.message || '请重试');
+            errorBox.classList.remove('hidden');
+        }
+        registerButton.disabled = false;
+    }
+});
+
 if (Passkeys.isSupported()) {
     const button = document.querySelector('[data-passkey-login]');
 

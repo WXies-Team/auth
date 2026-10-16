@@ -10,7 +10,7 @@
                 <div class="auth-mark mb-5">
                     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2.5"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                 </div>
-                <h1 class="text-[30px] font-semibold tracking-[-0.6px] leading-tight">统一登录网关</h1>
+                <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight">统一登录网关</h1>
                 <p class="auth-quiet text-[15px] mt-1.5">一次登录，通行所有项目</p>
             </div>
 

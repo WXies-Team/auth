@@ -7,7 +7,7 @@
                 <div class="auth-mark mb-5">
                     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
                 </div>
-                <h1 class="text-[30px] font-semibold tracking-[-0.6px] leading-tight">两步验证</h1>
+                <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight">两步验证</h1>
                 <p class="auth-quiet text-[15px] mt-1.5">
                     {{ $useRecoveryCode ? '输入一个未使用的恢复码' : '输入验证器应用中的 6 位验证码' }}
                 </p>

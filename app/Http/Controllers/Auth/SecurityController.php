@@ -37,6 +37,7 @@ class SecurityController extends Controller
             'enabled' => $user->hasTwoFactorEnabled(),
             'pendingSecret' => $pendingSecret,
             'recoveryCodes' => $request->session()->get('recovery_codes'),
+            'passkeys' => $user->passkeys()->orderByDesc('created_at')->get(),
         ]);
     }
 

@@ -65,9 +65,38 @@
             @endif
         </section>
 
+        <section class="card p-6 mb-6">
+            <h2 class="font-semibold text-[17px] mb-1">Passkey</h2>
+            <p class="text-[15px] label-secondary mb-4">用指纹、面容或屏幕锁登录，无需密码</p>
+
+            @if ($passkeys->isNotEmpty())
+                <div class="divide-y separator mb-4">
+                    @foreach ($passkeys as $passkey)
+                        <div class="flex items-center justify-between py-3 gap-3">
+                            <div class="text-[15px] min-w-0">
+                                <span class="font-medium">{{ $passkey->name ?: 'Passkey' }}</span>
+                                <div class="text-[13px] label-tertiary mt-0.5">添加于 {{ $passkey->created_at?->format('Y-m-d') }}</div>
+                            </div>
+                            <form method="POST" action="{{ route('passkey.destroy', $passkey) }}">
+                                @csrf @method('DELETE')
+                                <button class="text-[15px] hover:underline" style="color: var(--color-red)">删除</button>
+                            </form>
+                        </div>
+                    @endforeach
+                </div>
+            @endif
+
+            <div class="flex gap-2">
+                <input data-passkey-name placeholder="设备名称（如：我的 MacBook）" class="input flex-1"
+                       autocomplete="off">
+                <button type="button" data-passkey-register class="btn-primary whitespace-nowrap">添加 Passkey</button>
+            </div>
+            <p data-passkey-error class="text-[15px] mt-2 hidden" style="color: var(--color-red)"></p>
+        </section>
+
         <section class="card p-6">
-            <h2 class="font-semibold text-[17px] mb-1">Passkey 与社交账号</h2>
-            <p class="text-[15px] label-secondary mb-4">Passkey 管理界面即将上线；社交账号绑定后可用其一键登录</p>
+            <h2 class="font-semibold text-[17px] mb-1">社交账号</h2>
+            <p class="text-[15px] label-secondary mb-4">绑定后可用其一键登录</p>
             <div class="flex flex-wrap gap-2.5">
                 @if (config('services.github.client_id'))
                     <a href="{{ route('social.redirect', ['provider' => 'github', 'intent' => 'link']) }}" class="btn-secondary">绑定 GitHub</a>

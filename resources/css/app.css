@@ -1,263 +1,238 @@
 @import 'tailwindcss';
 
-/* ── 设计令牌（apple-hig：系统字体栈 + 自动光学字号；44pt 最小触控区） ── */
+/* ═══════════════════════════════════════════════════════════
+   Apple.com 实测令牌系统（designlang 提取 + apple-design 规范）
+   画布 #F5F5F7 / 墨 #1D1D1F / 次灰 #86868B / 发丝 #D2D2D7
+   唯一强调色 Apple 蓝 #0071E3（暗色 #2997FF）
+   零渐变、零发光：层次靠质感（film grain）与克制阴影
+   ═══════════════════════════════════════════════════════════ */
 @theme {
     --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'PingFang SC',
         'Helvetica Neue', system-ui, sans-serif;
 
-    /* iOS/macOS 系统色（light） */
-    --color-brand: #007aff;
-    --color-brand-dark: #0a84ff;
-    --color-fill: #f2f2f7;
+    --color-canvas: #f5f5f7;
     --color-surface: #ffffff;
-    --color-surface-secondary: rgba(118, 118, 128, 0.08);
-    --color-label: #1c1c1e;
-    --color-label-secondary: rgba(60, 60, 67, 0.6);
-    --color-label-tertiary: rgba(60, 60, 67, 0.3);
-    --color-separator: rgba(60, 60, 67, 0.18);
-    --color-green: #34c759;
-    --color-red: #ff3b30;
-    --color-amber: #ff9500;
-
-    /* 弹簧缓动（apple-design：critically damped，response≈0.35s 的 CSS 近似） */
-    --ease-spring: linear(0, 0.112 8.1%, 0.272 16.3%, 0.477 24.5%, 0.715 32.9%, 0.822 41%, 0.906 49.4%, 0.962 58.1%, 0.991 67.2%, 1.007 77.2%, 1.012 88.5%, 1.004 100%);
+    --color-ink: #1d1d1f;
+    --color-ink-2: #6e6e73;
+    --color-ink-3: #86868b;
+    --color-hairline: #d2d2d7;
+    --color-fill-2: #e8e8ed;
+    --color-accent: #0071e3;
+    --color-accent-link: #0066cc;
+    --color-danger: #d70015;
+    --color-success: #1d8a3e;
 }
-
-/* 暗色令牌（跟随系统） */
-@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
     color-scheme: light dark;
+    --accent: #0071e3;
+    --accent-strong: #0066cc;
+    --canvas: #f5f5f7;
+    --surface: #ffffff;
+    --ink: #1d1d1f;
+    --ink-2: #6e6e73;
+    --ink-3: #86868b;
+    --hairline: #d2d2d7;
+    --fill-2: #e8e8ed;
+    --focus: rgba(0, 113, 227, 0.28);
+    --danger-bg: #fdf1f1;
+    --danger-line: #f6d3d5;
+    --danger-ink: #d70015;
+    --success-bg: #eef7f0;
+    --success-line: #cde9d5;
+    --success-ink: #1d8a3e;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 32px -16px rgba(0, 0, 0, 0.16);
 }
 
+/* Apple 暗色：真黑画布、#1c1c1e 抬升面、#2997ff 强调——无彩虹光斑 */
 @media (prefers-color-scheme: dark) {
     :root {
-        --color-brand: #0a84ff;
-        --color-fill: #000000;
+        --accent: #2997ff;
+        --accent-strong: #53a8ff;
+        --canvas: #000000;
+        --surface: #1c1c1e;
+        --ink: #f5f5f7;
+        --ink-2: #a1a1a6;
+        --ink-3: #86868b;
+        --hairline: rgba(255, 255, 255, 0.14);
+        --fill-2: rgba(255, 255, 255, 0.08);
+        --focus: rgba(41, 151, 255, 0.35);
+        --danger-bg: rgba(255, 69, 58, 0.12);
+        --danger-line: rgba(255, 69, 58, 0.28);
+        --danger-ink: #ff7b72;
+        --success-bg: rgba(48, 209, 88, 0.12);
+        --success-line: rgba(48, 209, 88, 0.28);
+        --success-ink: #4ade80;
+        --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px -16px rgba(0, 0, 0, 0.6);
+        --color-canvas: #000000;
         --color-surface: #1c1c1e;
-        --color-surface-secondary: rgba(118, 118, 128, 0.24);
-        --color-label: #ffffff;
-        --color-label-secondary: rgba(235, 235, 245, 0.6);
-        --color-label-tertiary: rgba(235, 235, 245, 0.3);
-        --color-separator: rgba(84, 84, 88, 0.65);
-        --color-green: #30d158;
-        --color-red: #ff453a;
-        --color-amber: #ff9f0a;
-    }
-
-    body {
-        background: #000;
-        color: #fff;
+        --color-ink: #f5f5f7;
+        --color-label: #f5f5f7;
+        --color-label-secondary: #a1a1a6;
+        --color-label-tertiary: #86868b;
+        --color-separator: rgba(255, 255, 255, 0.14);
+        --color-brand: #2997ff;
     }
 }
+
+/* 向后兼容的旧令牌引用（admin/settings 页在用） */
+:root {
+    --color-label: #1d1d1f;
+    --color-label-secondary: #6e6e73;
+    --color-label-tertiary: #86868b;
+    --color-separator: #d2d2d7;
+    --color-brand: #0071e3;
+    --color-green: #1d8a3e;
+    --color-red: #d70015;
+    --color-fill: #f5f5f7;
+    --color-surface-secondary: rgba(0, 0, 0, 0.04);
+    --color-amber: #b25000;
+}
+
+html { scroll-behavior: smooth; }
 
 body {
-    background: var(--color-fill);
-    color: var(--color-label);
+    background: var(--canvas);
+    color: var(--ink);
     font-optical-sizing: auto;
     -webkit-font-smoothing: antialiased;
+    transition: background 200ms ease;
 }
 
-/* ── 组件 ── */
+[x-cloak] { display: none !important; }
+
+/* ── 质感：film grain 代替渐变做层次（唯一的"装饰"，克制到几乎不可见） ── */
+.grain {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0.05;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark) {
+    .grain { opacity: 0.09; }
+}
+
+/* ═══════════════ 共享组件（admin / settings / 通用） ═══════════════ */
 @layer components {
-    /* 44pt 触控高度；按下即刻反馈（apple-design §1：pointer-down 响应） */
+    /* 按钮：Apple 胶囊（980px），单一强调色，无渐变无发光 */
     .btn,
     .btn-primary,
     .btn-secondary,
     .btn-destructive {
-        @apply inline-flex items-center justify-center gap-2 rounded-xl text-[17px] font-medium
-            min-h-11 px-5 select-none cursor-pointer;
-        transition: transform 100ms ease-out, opacity 100ms ease-out;
+        @apply inline-flex items-center justify-center gap-2 font-semibold
+            min-h-11 px-6 select-none cursor-pointer;
+        font-size: 17px;
+        border-radius: 980px;
+        transition: transform 120ms ease-out, background 160ms ease, opacity 160ms ease;
     }
     .btn:active,
     .btn-primary:active,
     .btn-secondary:active,
-    .btn-destructive:active {
-        transform: scale(0.97);
-    }
+    .btn-destructive:active { transform: scale(0.96); }
     .btn:disabled,
     .btn-primary:disabled,
     .btn-secondary:disabled,
-    .btn-destructive:disabled {
-        opacity: 0.4;
-        cursor: default;
-    }
+    .btn-destructive:disabled { opacity: 0.45; cursor: default; transform: none; }
 
     .btn-primary {
-        @apply text-white;
-        background: var(--color-brand);
+        background: var(--accent);
+        color: #fff;
     }
-    .btn-primary:active {
-        opacity: 0.85;
-    }
+    .btn-primary:hover { background: var(--accent-strong); }
 
     .btn-secondary {
-        background: var(--color-surface-secondary);
-        color: var(--color-label);
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--hairline);
     }
+    .btn-secondary:hover { background: var(--fill-2); }
 
     .btn-destructive {
-        @apply text-white;
-        background: var(--color-red);
+        background: transparent;
+        color: var(--danger-ink);
+        border: 1px solid var(--danger-line);
     }
+    .btn-destructive:hover { background: var(--danger-bg); }
 
+    /* 输入框：白面 + 发丝线 + 蓝色聚焦环（无发光扩散） */
     .input {
-        @apply w-full rounded-xl border px-3.5 text-[17px] min-h-11
-            placeholder:text-[17px] focus:outline-none;
-        background: var(--color-surface);
-        border-color: var(--color-separator);
-        color: var(--color-label);
-        transition: border-color 150ms ease, box-shadow 150ms ease;
+        @apply w-full px-3.5 text-[17px] min-h-11 focus:outline-none;
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--hairline);
+        border-radius: 12px;
+        transition: border-color 160ms ease, box-shadow 160ms ease;
     }
+    .input::placeholder { color: var(--ink-3); }
     .input:focus {
-        border-color: var(--color-brand);
-        box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-brand) 20%, transparent);
+        border-color: var(--accent);
+        box-shadow: 0 0 0 4px var(--focus);
     }
 
+    /* 卡片：白面 + 发丝线 + 克制阴影（零玻璃零发光） */
     .card {
-        @apply rounded-2xl;
-        background: var(--color-surface);
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: 18px;
+        box-shadow: var(--shadow-card);
     }
 
-    @media (prefers-color-scheme: dark) {
-        .card {
-            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.5);
-        }
-    }
-
-    /* 半透明悬浮导航（apple-design §12：backdrop-filter 材质） */
+    /* 导航材质：Apple 招牌磨砂只用于浮层，不用于卡片 */
     .nav-material {
-        background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+        background: color-mix(in srgb, var(--canvas) 80%, transparent);
         backdrop-filter: saturate(180%) blur(20px);
         -webkit-backdrop-filter: saturate(180%) blur(20px);
+        border-bottom: 1px solid var(--hairline);
     }
 
-    .label-secondary {
-        color: var(--color-label-secondary);
-    }
-    .label-tertiary {
-        color: var(--color-label-tertiary);
-    }
-    .separator {
-        border-color: var(--color-separator);
-    }
+    .label-secondary { color: var(--ink-2); }
+    .label-tertiary { color: var(--ink-3); }
+    .separator { border-color: var(--hairline); }
 }
 
-/* 减弱动效：去掉弹簧与缩放，只留不透明度过渡（apple-design §14） */
-@media (prefers-reduced-motion: reduce) {
-    * {
-        animation-duration: 0.01ms !important;
-        transition-duration: 150ms !important;
-    }
-    .btn:active {
-        transform: none;
-    }
-}
-
-/* ══════════════════════════════════════════════════════
-   Auth scene —— 登录场景：深空底 + 极光光斑 + 玻璃卡片
-   意象「门与光」：网关是光汇聚的入口。
-   ══════════════════════════════════════════════════════ */
-[x-cloak] {
-    display: none !important;
-}
-
+/* ═══════════════ 登录场景（Apple.com 惯用语：大字 + 留白 + 平面） ═══════════════ */
 .auth-scene {
     position: relative;
+    z-index: 1;
     min-height: 100vh;
-    background: #05060c;
-    color: #fff;
+    background: var(--canvas);
+    color: var(--ink);
     overflow: hidden;
-    isolation: isolate;
 }
 
-/* 极光光斑：两团缓慢漂移的辉光，构成立体纵深 */
-.auth-scene::before,
-.auth-scene::after {
-    content: "";
-    position: fixed;
-    z-index: -2;
-    border-radius: 50%;
-    filter: blur(90px);
-    pointer-events: none;
-}
-.auth-scene::before {
-    width: 55vmax;
-    height: 55vmax;
-    top: -18vmax;
-    left: -12vmax;
-    background: radial-gradient(circle at 30% 30%, rgba(56, 130, 246, 0.55), rgba(99, 102, 241, 0.25) 55%, transparent 72%);
-    animation: aurora-a 24s ease-in-out infinite alternate;
-}
-.auth-scene::after {
-    width: 48vmax;
-    height: 48vmax;
-    bottom: -16vmax;
-    right: -10vmax;
-    background: radial-gradient(circle at 70% 70%, rgba(6, 182, 212, 0.4), rgba(139, 92, 246, 0.22) 55%, transparent 72%);
-    animation: aurora-b 30s ease-in-out infinite alternate;
-}
-@keyframes aurora-a {
-    from { transform: translate3d(0, 0, 0) scale(1); }
-    to   { transform: translate3d(9vmax, 7vmax, 0) scale(1.15); }
-}
-@keyframes aurora-b {
-    from { transform: translate3d(0, 0, 0) scale(1.1); }
-    to   { transform: translate3d(-8vmax, -6vmax, 0) scale(0.95); }
-}
-
-/* 噪点薄膜：让渐变有颗粒质感，不发塑料光 */
-.auth-scene .grain {
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    opacity: 0.5;
-    pointer-events: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-/* 玻璃卡片：上缘受光的厚材质（apple-design §12：Bigger surfaces read as thicker） */
 .auth-card {
-    background: rgba(17, 18, 27, 0.66);
-    backdrop-filter: blur(36px) saturate(150%);
-    -webkit-backdrop-filter: blur(36px) saturate(150%);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.10),
-        inset 0 -1px 0 rgba(255, 255, 255, 0.03),
-        0 32px 64px -16px rgba(0, 0, 0, 0.7),
-        0 2px 8px rgba(0, 0, 0, 0.35);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 18px;
+    box-shadow: var(--shadow-card);
 }
 
-/* 文本层级（场景内固定使用暗色语义，不依赖系统主题） */
-.auth-quiet  { color: rgba(235, 235, 245, 0.60); }
-.auth-faint  { color: rgba(235, 235, 245, 0.52); }
-.auth-line   { background: rgba(255, 255, 255, 0.10); }
+.auth-quiet { color: var(--ink-2); }
+.auth-faint { color: var(--ink-3); }
+.auth-line { background: var(--hairline); }
 
-/* 场景内输入框：暗玻璃 + 聚焦辉光 */
 .auth-input {
     width: 100%;
     min-height: 46px;
     padding: 0 16px;
     font-size: 17px;
-    color: #fff;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 14px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
     outline: none;
-    transition: border-color 160ms ease, box-shadow 200ms ease, background 160ms ease;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
 }
-.auth-input::placeholder { color: rgba(235, 235, 245, 0.45); }
+.auth-input::placeholder { color: var(--ink-3); }
 .auth-input:focus {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(96, 165, 250, 0.7);
-    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.22), 0 0 24px rgba(59, 130, 246, 0.18);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px var(--focus);
 }
 
-/* 主按钮：渐变玻璃体，顶缘受光，按下压感 */
+/* 主操作：Apple 蓝胶囊（CTA 惯用语），160ms 克制动效 */
 .auth-primary {
-    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -268,17 +243,16 @@ body {
     font-weight: 600;
     color: #fff;
     border: none;
-    border-radius: 14px;
+    border-radius: 980px;
     cursor: pointer;
-    background: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 8px 24px -6px rgba(55, 74, 220, 0.6);
-    transition: transform 100ms ease-out, filter 160ms ease;
+    background: var(--accent);
+    transition: transform 120ms ease-out, background 160ms ease, opacity 160ms ease;
 }
-.auth-primary:hover { filter: brightness(1.08); }
-.auth-primary:active { transform: scale(0.975); }
-.auth-primary:disabled { opacity: 0.55; cursor: default; transform: none; }
+.auth-primary:hover { background: var(--accent-strong); }
+.auth-primary:active { transform: scale(0.96); }
+.auth-primary:disabled { opacity: 0.45; cursor: default; transform: none; }
 
-/* 次按钮：暗玻璃 */
+/* 次操作：白面发丝线胶囊 */
 .auth-ghost {
     display: inline-flex;
     align-items: center;
@@ -286,69 +260,71 @@ body {
     gap: 9px;
     width: 100%;
     min-height: 46px;
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 500;
-    color: rgba(255, 255, 255, 0.92);
-    border-radius: 14px;
+    color: var(--ink);
+    border-radius: 980px;
     cursor: pointer;
-    background: rgba(255, 255, 255, 0.07);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    transition: transform 100ms ease-out, background 160ms ease;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    transition: transform 120ms ease-out, background 160ms ease;
     text-decoration: none;
 }
-.auth-ghost:hover { background: rgba(255, 255, 255, 0.11); }
-.auth-ghost:active { transform: scale(0.975); }
+.auth-ghost:hover { background: var(--fill-2); }
+.auth-ghost:active { transform: scale(0.96); }
 
-/* 提示条（错误 / 状态） */
+/* 提示条：语义色（Apple 系统红/绿的淡底用法） */
 .auth-note-error {
-    background: rgba(255, 69, 58, 0.14);
-    border: 1px solid rgba(255, 69, 58, 0.30);
-    color: #ff7b72;
+    background: var(--danger-bg);
+    border: 1px solid var(--danger-line);
+    color: var(--danger-ink);
 }
 .auth-note-ok {
-    background: rgba(48, 209, 88, 0.12);
-    border: 1px solid rgba(48, 209, 88, 0.28);
-    color: #4ade80;
+    background: var(--success-bg);
+    border: 1px solid var(--success-line);
+    color: var(--success-ink);
 }
 
-/* OTP 分格：暗玻璃格子，聚焦点亮 */
+/* OTP 分格 */
 .otp-box {
     width: 46px;
     height: 54px;
     text-align: center;
     font-size: 24px;
     font-weight: 600;
-    color: #fff;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 13px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
     outline: none;
-    caret-color: #60a5fa;
-    transition: border-color 160ms ease, box-shadow 200ms ease, background 160ms ease;
+    caret-color: var(--accent);
+    transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 .otp-box:focus {
-    background: rgba(255, 255, 255, 0.09);
-    border-color: rgba(96, 165, 250, 0.75);
-    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.22), 0 0 24px rgba(59, 130, 246, 0.20);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px var(--focus);
 }
 
-/* 品牌辉光标：悬浮的钥匙孔光徽 */
+/* 品牌标记：实心 Apple 蓝方块（无渐变） */
 .auth-mark {
-    width: 64px;
-    height: 64px;
-    border-radius: 18px;
+    width: 60px;
+    height: 60px;
+    border-radius: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, rgba(59, 130, 246, 0.9), rgba(139, 92, 246, 0.9));
-    box-shadow: 0 10px 32px -6px rgba(99, 102, 241, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.35);
-    margin-inline: auto;
+    background: var(--accent);
+    box-shadow: 0 6px 16px -8px rgba(0, 113, 227, 0.5);
 }
 
-/* 减弱动效：光斑静止，只留最轻反馈 */
+/* 减弱动效 */
 @media (prefers-reduced-motion: reduce) {
-    .auth-scene::before,
-    .auth-scene::after {
-        animation: none !important;
+    * {
+        animation-duration: 0.01ms !important;
+        transition-duration: 120ms !important;
     }
+    .btn:active,
+    .auth-primary:active,
+    .auth-ghost:active { transform: none; }
+    html { scroll-behavior: auto; }
 }
