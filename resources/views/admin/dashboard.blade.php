@@ -1,17 +1,17 @@
 <x-layout title="管理后台">
     <x-app-shell active="admin">
     <div class="py-12 px-4">
-        <div class="flex items-center justify-between mb-8">
+        <div class="flex items-end justify-between gap-4 mb-6">
             <div>
-                <h1 class="text-[28px] font-semibold tracking-tight">管理后台</h1>
+                <h1 class="text-[28px] font-semibold tracking-tight leading-tight">管理后台</h1>
                 <p class="text-[15px] label-secondary mt-0.5">
-                    {{ auth()->user()->isSuperAdmin() ? '全局管理员' : '项目成员' }} · {{ auth()->user()->email }}
+                    {{ auth()->user()->isSuperAdmin() ? '全局管理员' : '项目成员' }}
                 </p>
             </div>
-            <div class="flex gap-3 text-[15px]">
+            <div class="flex items-center gap-2 flex-shrink-0 pb-0.5">
                 @can('manage-users')
-                    <a href="{{ route('admin.users.index') }}" class="label-secondary hover:underline">用户</a>
-                    <a href="{{ route('admin.audit.index') }}" class="label-secondary hover:underline">审计</a>
+                    <a href="{{ route('admin.users.index') }}" class="btn-secondary text-[15px] font-normal">用户</a>
+                    <a href="{{ route('admin.audit.index') }}" class="btn-secondary text-[15px] font-normal">审计</a>
                 @endcan
                 @can('create', App\Models\Project::class)
                     <a href="{{ route('admin.projects.create') }}" class="btn-primary">新建项目</a>
