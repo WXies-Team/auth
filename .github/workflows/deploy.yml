@@ -35,21 +35,28 @@ jobs:
       - uses: actions/checkout@v7
 
       # 依赖安装在 runner 本地做（构建产物 = vendor + public/build）。
-      # composer 用用户目录的新版（系统 /usr/bin/composer 过旧，见仓库提交说明）。
-      # **必须显式给 HOME**：self-hosted runner 的 step 进程无 HOME（build.yml 坑19），
-      # composer 的缓存目录与 npm 的用户目录都依赖它；只设在这两个 step，
-      # 不提到 job 级。HOME 指向工作区旁持久目录，缓存跨 run 留存。
+      # **必须显式给 HOME**：self-hosted runner 的 step 进程无 HOME（build.yml 坑19）。
+      # HOME 指向工作区旁持久目录，缓存跨 run 留存。
+      # composer 自足化（对齐 build.yml Ensure gh CLI 模式）：PATH 里的版本过旧
+      # 或缺失时，从官方 release 装 pin 版本到持久 HOME；版本 pin 固定值，升级改这里。
       - name: Install PHP dependencies
         env:
           HOME: ${{ github.workspace }}/../runner-home
         run: |
           set -euo pipefail
-          mkdir -p "$HOME"
-          COMPOSER_BIN=$(command -v composer || true)
-          if [ -z "$COMPOSER_BIN" ] || ! "$COMPOSER_BIN" --version 2>/dev/null | grep -qE 'Composer (2\.(2|1[0-9])|[3-9])'; then
+          mkdir -p "$HOME/.local/bin"
+          COMPOSER_BIN=""
+          if command -v composer >/dev/null 2>&1 && composer --version 2>/dev/null | grep -qE 'Composer (2\.(2|1[0-9])|[3-9])'; then
+            COMPOSER_BIN=$(command -v composer)
+          elif [ -x "$HOME/.local/bin/composer" ] && "$HOME/.local/bin/composer" --version 2>/dev/null | grep -qE 'Composer (2\.(2|1[0-9])|[3-9])'; then
+            COMPOSER_BIN="$HOME/.local/bin/composer"
+          else
+            COMPOSER_VERSION=2.10.3
+            curl -fsSL -o "$RUNNER_TEMP/composer-setup.php" https://getcomposer.org/installer
+            php "$RUNNER_TEMP/composer-setup.php" --install-dir="$HOME/.local/bin" --filename=composer --2 --version="$COMPOSER_VERSION" --quiet
             COMPOSER_BIN="$HOME/.local/bin/composer"
           fi
-          test -x "$COMPOSER_BIN" || { echo "::error::composer 2.2+ 不可用"; exit 1; }
+          "$COMPOSER_BIN" --version
           "$COMPOSER_BIN" install --no-dev --optimize-autoloader --no-interaction --no-progress
 
       - name: Build frontend
