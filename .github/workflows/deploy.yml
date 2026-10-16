@@ -92,6 +92,7 @@ jobs:
 
           echo "== [Deploy] rsync -> $OAUTH_DIR =="
           # 只同步生产必需：app/ bootstrap/ config/ database/ public/ resources/views/ routes/ vendor/
+          # composer.json 是运行时必需（Laravel 读包信息），不可排除。
           # 其余（测试、文档、构建源、开发配置）一律不上服务器。
           # 注意 rsync 语义：被 exclude 的目标端旧文件**不会**被 --delete 清掉，
           # 往排除清单新增条目时需在服务器上手动 rm 一次残留。
@@ -124,8 +125,6 @@ jobs:
             --exclude='package.json' \
             --exclude='package-lock.json' \
             --exclude='vite.config.js' \
-            --exclude='composer.json' \
-            --exclude='composer.lock' \
             --exclude='resources/css/' \
             --exclude='resources/js/' \
             -e "ssh -i $KEY -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
