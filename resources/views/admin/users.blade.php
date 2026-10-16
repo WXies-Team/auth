@@ -1,6 +1,6 @@
 <x-layout title="用户管理">
+    <x-top-nav active="admin" />
     <div class="max-w-3xl mx-auto py-12 px-4">
-        <a href="{{ route('admin.dashboard') }}" class="text-[15px] label-secondary hover:underline">← 管理后台</a>
         <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-8">用户管理</h1>
 
         @if (session('status'))

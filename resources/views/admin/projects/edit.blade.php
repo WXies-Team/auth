@@ -1,4 +1,5 @@
 <x-layout title="编辑项目">
+    <x-top-nav active="admin" />
     <div class="max-w-lg mx-auto py-12 px-4">
         <a href="{{ route('admin.projects.show', $project) }}" class="text-[15px] label-secondary hover:underline">← 返回项目</a>
         <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-6">编辑项目</h1>

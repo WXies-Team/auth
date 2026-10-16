@@ -1,4 +1,5 @@
 <x-layout title="管理后台">
+    <x-top-nav active="admin" />
     <div class="max-w-3xl mx-auto py-12 px-4">
         <div class="flex items-center justify-between mb-8">
             <div>

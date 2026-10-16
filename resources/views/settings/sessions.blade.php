@@ -1,7 +1,7 @@
 <x-layout title="已登录设备">
-    <div class="max-w-xl mx-auto py-12 px-4">
-        <a href="{{ route('home') }}" class="text-[15px] label-secondary hover:underline">← 返回</a>
-        <div class="flex items-center justify-between mt-2 mb-8">
+    <x-top-nav active="sessions" />
+    <div class="max-w-xl mx-auto py-10 px-4">
+        <div class="flex items-center justify-between mb-6">
             <h1 class="text-[28px] font-semibold tracking-tight">已登录设备</h1>
             <form method="POST" action="{{ route('sessions.destroy-others') }}"
                   onsubmit="return confirm('将下线除当前设备外的所有登录会话，确定？')">

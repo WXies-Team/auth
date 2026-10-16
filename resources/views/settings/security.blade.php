@@ -1,8 +1,16 @@
 <x-layout title="安全设置">
-    <div class="max-w-xl mx-auto py-12 px-4">
-        <a href="{{ route('home') }}" class="text-[15px] label-secondary hover:underline">← 返回</a>
-        <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-1">安全设置</h1>
-        <p class="text-[15px] label-secondary mb-8">管理两步验证与恢复方式</p>
+    <x-top-nav active="security" />
+    <div class="max-w-xl mx-auto py-10 px-4">
+        <h1 class="text-[28px] font-semibold tracking-[-0.5px] mb-6">安全设置</h1>
+
+        <section class="card p-5 flex items-center gap-4 mb-4">
+            <div class="w-12 h-12 rounded-full flex items-center justify-center text-white text-[19px] font-semibold shrink-0"
+                 style="background: var(--accent)">{{ mb_substr(auth()->user()->name, 0, 1) }}</div>
+            <div class="min-w-0">
+                <div class="text-[17px] font-semibold truncate">{{ auth()->user()->name }}</div>
+                <div class="text-[15px] label-secondary truncate">{{ auth()->user()->email }}</div>
+            </div>
+        </section>
 
         @if ($recoveryCodes)
             <section class="rounded-2xl p-6 mb-6 border" style="background: color-mix(in srgb, var(--color-amber) 10%, var(--color-surface)); border-color: color-mix(in srgb, var(--color-amber) 30%, transparent)">
@@ -16,7 +24,7 @@
             </section>
         @endif
 
-        <section class="card p-6 mb-6">
+        <section class="card p-6 mb-4">
             <div class="flex items-start justify-between mb-5">
                 <div>
                     <h2 class="font-semibold text-[17px]">两步验证（TOTP）</h2>
@@ -65,7 +73,7 @@
             @endif
         </section>
 
-        <section class="card p-6 mb-6">
+        <section class="card p-6 mb-4">
             <h2 class="font-semibold text-[17px] mb-1">Passkey</h2>
             <p class="text-[15px] label-secondary mb-4">用指纹、面容或屏幕锁登录，无需密码</p>
 

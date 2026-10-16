@@ -1,4 +1,5 @@
 <x-layout title="{{ $project->name }}">
+    <x-top-nav active="admin" />
     <div class="max-w-3xl mx-auto py-12 px-4">
         <a href="{{ route('admin.dashboard') }}" class="text-[15px] label-secondary hover:underline">← 项目列表</a>
 

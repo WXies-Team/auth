@@ -1,6 +1,6 @@
 <x-layout title="审计日志">
+    <x-top-nav active="admin" />
     <div class="max-w-5xl mx-auto py-12 px-4">
-        <a href="{{ route('admin.dashboard') }}" class="text-[15px] label-secondary hover:underline">← 管理后台</a>
         <h1 class="text-[28px] font-semibold tracking-tight mt-2 mb-8">审计日志</h1>
 
         <div class="card overflow-x-auto" style="border-color: var(--color-separator)">
