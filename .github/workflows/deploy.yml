@@ -101,7 +101,7 @@ jobs:
             --exclude='.git/' \
             --exclude='.gitignore' \
             --exclude='.gitattributes' \
-            --exclude='.editorconfig' \
+            --exclude='.editorconfig' \n            --exclude='.npmrc' \
             --exclude='.env' \
             --exclude='.env.example' \
             --exclude='.user.ini' \
