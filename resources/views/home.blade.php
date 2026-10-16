@@ -1,9 +1,9 @@
 <x-layout>
     <div class="min-h-screen flex items-center justify-center px-4">
         <div class="text-center">
-            <div class="mx-auto mb-5 w-16 h-16 rounded-[14px] flex items-center justify-center text-3xl text-white shadow-lg"
+            <div class="mx-auto mb-5 w-16 h-16 rounded-[16px] flex items-center justify-center shadow-lg"
                  style="background: linear-gradient(135deg, #007aff, #5e5ce6);">
-                ⬢
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             </div>
             <h1 class="text-[28px] font-semibold tracking-tight">统一登录网关</h1>
 

@@ -11,5 +11,6 @@
 </head>
 <body class="min-h-screen">
     {{ $slot }}
+    @stack('scripts')
 </body>
 </html>
