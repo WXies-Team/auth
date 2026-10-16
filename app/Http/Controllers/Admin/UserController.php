@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Services\AuditLogger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 
@@ -29,7 +30,7 @@ class UserController extends Controller
         ]);
 
         $user->forceFill(['global_role' => $data['global_role'] ?? null])->save();
-        app(AuditLogger::class)->record('user.global_role_changed', auth()->id(), 'user', $user->getKey(), [
+        app(AuditLogger::class)->record('user.global_role_changed', Auth::id(), 'user', $user->getKey(), [
             'global_role' => $data['global_role'] ?? null,
         ]);
 

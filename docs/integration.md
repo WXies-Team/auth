@@ -46,8 +46,9 @@ GET <gateway>/.well-known/openid-configuration
 | RP 发起登出 | `/oauth/logout` |
 | 动态注册（RFC 7591/7592） | `/api/register` |
 
-支持：`response_type=code`、PKCE（S256，**公共客户端必带**，机密客户端建议带）、
-`client_secret_basic` / `client_secret_post`、refresh_token、`prompt=login/none/consent`、`max_age`。
+支持：`response_type=code`、PKCE（S256，**建议所有客户端携带**，机密客户端同时支持
+client_secret 认证）、`client_secret_basic` / `client_secret_post`、refresh_token、
+`prompt=login/none/consent`、`max_age`。
 
 ## 3. 标准登录流（授权码 + PKCE）
 
@@ -168,7 +169,14 @@ oauth2cfg := &oauth2.Config{ClientID: ..., ClientSecret: ..., Endpoint: provider
 idToken, err := verifier.Verify(ctx, rawIDToken) // 自动查 JWKS 验签
 ```
 
-## 9. FAQ
+## 9. 网关的社交账号绑定行为
+
+网关对 GitHub/Google 返回的邮箱**不会自动合并**到已有账户：
+外部邮箱命中已有网关账户时，会要求用户先登录原账户，登录成功后完成显式绑定；
+已登录用户也可在「安全设置」中主动绑定社交账号。新邮箱则自动 JIT 建号
+（Google 主邮箱标记为已验证；GitHub 邮箱不作验证标记）。
+
+## 10. FAQ
 
 **Q: 网关能帮我存项目的用户数据吗？**
 不能，也不应该——见 §0 数据契约。
@@ -180,5 +188,5 @@ idToken, err := verifier.Verify(ctx, rawIDToken) // 自动查 JWKS 验签
 管理后台 → 项目 → 轮换 Secret（旧值即刻失效）。
 
 **Q: 测试环境怎么调试？**
-注册一个 redirect_uri 指向 `http://localhost:PORT/callback` 的开发 Client 即可
-（redirect_uri 需为绝对 URL；`http://` 仅允许 localhost）。
+在管理后台注册一个 redirect_uri 指向开发机回调地址的开发 Client
+（redirect_uri 需为绝对 URL）。

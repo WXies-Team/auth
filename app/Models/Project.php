@@ -48,9 +48,8 @@ class Project extends Model
      */
     public function roleOf(User $user): ?string
     {
-        return $this->members()
-            ->whereKey($user->getKey())
-            ->pivot('role')
-            ->value('role');
+        $member = $this->members()->whereKey($user->getKey())->first();
+
+        return $member?->pivot?->role;
     }
 }

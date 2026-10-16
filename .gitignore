@@ -25,3 +25,10 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Agent 工具配置（不入库）
+/.agents/
+/.claude/
+/.mcp.json
+/opencode.json
+/boost.json

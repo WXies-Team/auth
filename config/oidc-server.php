@@ -168,7 +168,6 @@ return [
     'grant_types_supported' => [
         'authorization_code',
         'refresh_token',
-        'client_credentials',
     ],
 
     /*

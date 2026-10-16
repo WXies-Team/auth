@@ -7,7 +7,7 @@ return [
     |--------------------------------------------------------------------------
     |
     | DCR_INITIAL_TOKEN 为空即关闭动态注册。设置后用它作为注册端点的
-    | initial access token（hash 存储校验，见 controller）。
+    | initial access token（配置明文，请求侧 Bearer 逐字节比对）。
     |
     */
     'dcr_initial_token' => env('DCR_INITIAL_TOKEN'),

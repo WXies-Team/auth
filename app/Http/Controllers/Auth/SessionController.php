@@ -32,8 +32,13 @@ class SessionController extends Controller
     {
         abort_unless($session->user_id === Auth::id(), 404);
 
+        $user = Auth::user();
+
         app(SessionTracker::class)->revoke($session);
         app(AuditLogger::class)->record('session.revoked', Auth::id(), 'login_session', $session->id);
+
+        // 会话终止 = 通知各 RP 单点登出（back-channel）。
+        app(BackchannelLogoutService::class)->notifyForUser($user);
 
         // 下线的是当前设备本身 → 直接登出
         if ($session->session_id === $request->session()->getId()) {
@@ -58,6 +63,9 @@ class SessionController extends Controller
                 ->value('id'),
         );
         app(AuditLogger::class)->record('session.revoked_all_others', $user->getKey());
+
+        // 其他会话终止同样通知各 RP。
+        app(BackchannelLogoutService::class)->notifyForUser($user);
 
         return back()->with('status', '其他设备已全部下线');
     }

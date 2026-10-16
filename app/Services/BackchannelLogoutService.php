@@ -42,7 +42,7 @@ class BackchannelLogoutService
         $now = now()->getTimestamp();
 
         return JWT::encode([
-            'iss' => config('app.url'),
+            'iss' => config('oidc-server.issuer') ?? config('app.url'),
             'aud' => $client->getKey(),
             'sub' => (string) $user->getKey(),
             'iat' => $now,

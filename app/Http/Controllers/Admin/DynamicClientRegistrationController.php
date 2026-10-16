@@ -7,9 +7,9 @@ use App\Models\Project;
 use App\Services\AuditLogger;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Laravel\Passport\Client;
+use Symfony\Component\HttpFoundation\Response;
 
 /**
  * OAuth 2.0 Dynamic Client Registration（RFC 7591 注册 / RFC 7592 管理）。
@@ -45,7 +45,7 @@ class DynamicClientRegistrationController extends Controller
             'name' => $data['client_name'],
             'secret' => hash('sha256', $secret),
             'redirect_uris' => $data['redirect_uris'],
-            'grant_types' => $data['grant_types'] ?? ['authorization_code', 'refresh_token'],
+            'grant_types' => array_values(array_intersect($data['grant_types'] ?? [], ['authorization_code', 'refresh_token'])) ?: ['authorization_code'],
             'revoked' => false,
             'backchannel_logout_uri' => $data['backchannel_logout_uri'] ?? null,
             'registration_access_token_hash' => hash('sha256', $registrationToken),
@@ -116,7 +116,7 @@ class DynamicClientRegistrationController extends Controller
         return response()->json($this->metadata($client));
     }
 
-    public function destroy(Request $request, string $clientId): \Symfony\Component\HttpFoundation\Response
+    public function destroy(Request $request, string $clientId): Response
     {
         $client = $this->authorizeManagement($request, $clientId);
 

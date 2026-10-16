@@ -11,10 +11,7 @@ use App\Models\User;
  */
 class ProjectPolicy
 {
-    public function before(User $user): ?bool
-    {
-        return $user->isSuperAdmin() ? true : null;
-    }
+    // 全局管理员放行由 AppServiceProvider 的 Gate::before 统一处理。
 
     public function view(User $user, Project $project): bool
     {

@@ -35,8 +35,10 @@
                         <button class="btn-secondary">重新生成恢复码</button>
                     </form>
                     <form method="POST" action="{{ route('security.two-factor.disable') }}"
-                          onsubmit="return confirm('关闭两步验证会降低账户安全性，确定？')">
+                          onsubmit="return confirm('关闭两步验证会降低账户安全性，确定？')" class="space-y-2">
                         @csrf @method('DELETE')
+                        <input type="password" name="password" required autocomplete="current-password"
+                               placeholder="输入当前密码确认" class="input w-64">
                         <button class="btn" style="color: var(--color-red)">关闭两步验证</button>
                     </form>
                 </div>
@@ -64,9 +66,17 @@
         </section>
 
         <section class="card p-6">
-            <h2 class="font-semibold text-[17px] mb-1">Passkey</h2>
-            <p class="text-[15px] label-secondary mb-4">在「已登录设备」页可管理；首次可在支持的浏览器中直接注册（即将上线管理界面）</p>
-            <a href="{{ route('sessions.index') }}" class="btn-secondary inline-flex">管理已登录设备</a>
+            <h2 class="font-semibold text-[17px] mb-1">Passkey 与社交账号</h2>
+            <p class="text-[15px] label-secondary mb-4">Passkey 管理界面即将上线；社交账号绑定后可用其一键登录</p>
+            <div class="flex flex-wrap gap-2.5">
+                @if (config('services.github.client_id'))
+                    <a href="{{ route('social.redirect', ['provider' => 'github', 'intent' => 'link']) }}" class="btn-secondary">绑定 GitHub</a>
+                @endif
+                @if (config('services.google.client_id'))
+                    <a href="{{ route('social.redirect', ['provider' => 'google', 'intent' => 'link']) }}" class="btn-secondary">绑定 Google</a>
+                @endif
+                <a href="{{ route('sessions.index') }}" class="btn-secondary">管理已登录设备</a>
+            </div>
         </section>
     </div>
 </x-layout>

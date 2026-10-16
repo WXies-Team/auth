@@ -77,12 +77,25 @@ class SecurityController extends Controller
 
     public function disable(Request $request): RedirectResponse
     {
-        Auth::user()->disableTwoFactorAuth();
-        $request->session()->forget('recovery_codes');
-        app(AuditLogger::class)->record('security.2fa.disabled', Auth::id());
-        app(SessionTracker::class)->revokeAllExcept(Auth::user());
+        $data = $request->validate([
+            'password' => ['required', 'string'],
+        ]);
 
-        return redirect()->route('security.show');
+        $user = Auth::user();
+
+        // 关闭 2FA 属敏感操作：复验当前密码后执行（防会话被劫持直接关防护）。
+        if (! Auth::guard('web')->getProvider()->validateCredentials($user, $data)) {
+            throw ValidationException::withMessages([
+                'password' => '密码不正确。',
+            ]);
+        }
+
+        $user->disableTwoFactorAuth();
+        $request->session()->forget('recovery_codes');
+        app(AuditLogger::class)->record('security.2fa.disabled', $user->getKey());
+        app(SessionTracker::class)->revokeAllExcept($user);
+
+        return redirect()->route('security.show')->with('status', '两步验证已关闭');
     }
 
     public function regenerateRecoveryCodes(Request $request): RedirectResponse

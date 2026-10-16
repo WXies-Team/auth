@@ -21,6 +21,8 @@ class ProjectController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
+        Gate::authorize('create', Project::class);
+
         $data = $request->validate([
             'slug' => ['required', 'string', 'min:2', 'max:64', 'regex:/^[a-z0-9][a-z0-9-]*$/', Rule::unique('projects', 'slug')],
             'name' => ['required', 'string', 'max:128'],

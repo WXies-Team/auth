@@ -34,6 +34,19 @@ class LoginFinalizer
         app(SessionTracker::class)->track($request, $user);
         app(AuditLogger::class)->record("login.{$method}", $user->getKey());
 
+        // 社交登录绕行：登录已证明账户所有权，此处完成显式绑定（见 SocialAuthController）。
+        $pendingLink = $request->session()->pull('pending_social_link');
+        if (is_array($pendingLink) && (int) ($pendingLink['user_id'] ?? 0) === $user->getKey()) {
+            $user->identities()->create([
+                'provider' => $pendingLink['provider'],
+                'provider_user_id' => $pendingLink['provider_user_id'],
+                'provider_email' => $pendingLink['provider_email'] ?? null,
+            ]);
+            app(AuditLogger::class)->record('security.identity_linked', $user->getKey(), metadata: [
+                'provider' => $pendingLink['provider'],
+            ]);
+        }
+
         if ($challenge) {
             return app(ReauthenticationService::class)->complete($request, $challenge);
         }
