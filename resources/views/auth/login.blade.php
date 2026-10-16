@@ -3,23 +3,23 @@
         <div class="grain"></div>
 
         <div class="w-full max-w-[400px]">
-            <div class="text-center mb-7">
+            <div class="text-center mb-7 mat stagger-1">
                 <div class="auth-mark mb-5">
                     <i data-lucide="lock" class="w-7 h-7 text-white" stroke-width="1.8"></i>
                 </div>
-                <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight">统一登录网关</h1>
-                <p class="auth-quiet text-[15px] mt-1.5">一次登录，通行所有项目</p>
+                <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight mat stagger-2">统一登录网关</h1>
+                <p class="auth-quiet text-[15px] mt-1.5 mat stagger-3">一次登录，通行所有项目</p>
             </div>
 
-            <div class="auth-card p-7">
+            <div class="auth-card p-7 mat stagger-4">
                 @if (session('status'))
-                    <div class="auth-note-ok rounded-xl px-4 py-3 text-[15px] mb-4">
+                    <div class="auth-note-ok note-in rounded-xl px-4 py-3 text-[15px] mb-4">
                         {{ session('status') }}
                     </div>
                 @endif
 
                 @if ($errors->any())
-                    <div class="auth-note-error rounded-xl px-4 py-3 text-[15px] mb-4">
+                    <div class="auth-note-error note-in rounded-xl px-4 py-3 text-[15px] mb-4">
                         {{ $errors->first() }}
                     </div>
                 @endif
@@ -79,7 +79,7 @@
                 @endif
             </div>
 
-            <p class="text-center text-[13px] auth-faint mt-6">
+            <p class="text-center text-[13px] auth-faint mt-6 mat stagger-5">
                 在邮箱框可直接使用浏览器保存的 Passkey 登录
             </p>
         </div>

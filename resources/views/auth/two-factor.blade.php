@@ -3,11 +3,11 @@
         <div class="grain"></div>
 
         <div class="w-full max-w-[400px]">
-            <div class="text-center mb-7">
+            <div class="text-center mb-7 mat stagger-1">
                 <div class="auth-mark mb-5">
                     <i data-lucide="shield-check" class="w-[26px] h-[26px] label-secondary"></i>
                 </div>
-                <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight">两步验证</h1>
+                <h1 class="text-[34px] font-semibold tracking-[-0.9px] leading-tight mat stagger-2">两步验证</h1>
                 <p class="auth-quiet text-[15px] mt-1.5">
                     {{ $useRecoveryCode ? '输入一个未使用的恢复码' : '输入验证器应用中的 6 位验证码' }}
                 </p>
@@ -28,6 +28,7 @@
                         <div class="flex justify-center gap-2.5" @paste="onPaste($event)">
                             <template x-for="i in 6" :key="i">
                                 <input type="text" inputmode="numeric" maxlength="1" class="otp-box"
+                                       :style="'--i:' + (i - 1)"
                                        :value="digits[i - 1] ?? ''"
                                        :aria-label="'验证码第 ' + i + ' 位'"
                                        @input="onInput($event, i - 1)"
@@ -37,7 +38,7 @@
                         </div>
                         <input type="hidden" name="code" x-model="value">
                         @if ($errors->any())
-                            <p class="text-[15px] text-center mt-4" style="color: #ff7b72">{{ $errors->first() }}</p>
+                            <p class="text-[15px] text-center mt-4 note-in" style="color: #ff7b72">{{ $errors->first() }}</p>
                         @endif
                         <p class="text-center text-[13px] auth-faint mt-4">输满 6 位自动验证</p>
                     @endif

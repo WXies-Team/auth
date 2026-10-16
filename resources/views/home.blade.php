@@ -3,7 +3,7 @@
         <x-app-shell active="home">
         <div class="py-1">
             {{-- 资料卡 --}}
-            <div class="card p-6 flex items-center gap-4">
+            <div class="card p-6 flex items-center gap-4 mat stagger-1">
                 <div class="w-14 h-14 rounded-full flex items-center justify-center text-white text-[22px] font-semibold shrink-0"
                      style="background: var(--accent)">
                     {{ mb_substr(auth()->user()->name, 0, 1) }}
@@ -15,7 +15,7 @@
             </div>
 
             {{-- 入口列表（分组行 + Lucide 图标 + chevron，iOS 设置惯例） --}}
-            <div class="card mt-4 divide-y separator overflow-hidden">
+            <div class="card mt-4 divide-y separator overflow-hidden mat stagger-3">
                 <a href="{{ route('security.show') }}" class="flex items-center gap-3.5 px-5 py-3.5 no-underline hover:bg-[var(--fill-2)] transition">
                     <i data-lucide="shield-check" class="w-5 h-5 text-[var(--accent)]"></i>
                     <span class="flex-1 text-[17px] text-[var(--ink)]">安全设置</span>
