@@ -55,6 +55,7 @@
                     {{-- 第二步：证明你是你 --}}
                     <template x-if="stage === 'password'">
                         <div class="space-y-3" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
+                            <input type="hidden" name="email" :value="email">
                             <div class="flex items-center justify-between rounded-xl px-3.5 py-2.5"
                                  style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07)">
                                 <span class="text-[15px] truncate text-white/90" x-text="email"></span>
