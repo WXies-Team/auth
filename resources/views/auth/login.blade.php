@@ -31,7 +31,7 @@
 
                 <form method="POST"
                       action="{{ isset($challenge) ? route('auth.reauthenticate') : route('login') }}"
-                      @submit="if (stage === 'identifier') { e.preventDefault(); continueWithEmail(); }">
+                      @submit="(event) => { if (stage === 'identifier') { event.preventDefault(); continueWithEmail(); } else { loading = true; } }">
                     @csrf
                     @if (isset($challenge))
                         <input type="hidden" name="transaction" value="{{ $challenge->transactionId }}">
@@ -145,12 +145,6 @@
                 },
                 init() {
                     if (oldEmail) this.stage = 'password';
-                    this.$el.querySelector('form')?.addEventListener('submit', () => {
-                        if (this.stage === 'password') this.loading = true;
-                    });
-                    document.querySelector('[data-passkey-login]')?.addEventListener('click', () => {
-                        this.loading = true;
-                    });
                 },
             };
         }
