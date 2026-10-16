@@ -40,7 +40,7 @@
 
                     {{-- 第一步：只问「你是谁」（Passkey autofill 锚定在此框） --}}
                     <template x-if="stage === 'identifier'">
-                        <div x-transition:enter="transition ease-out duration-160" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
+                        <div x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
                             <input id="email" type="email" name="email" required x-ref="email"
                                    x-model="email" autocomplete="email webauthn" placeholder="name@example.com"
                                    aria-label="邮箱"
@@ -54,7 +54,7 @@
 
                     {{-- 第二步：证明你是你 --}}
                     <template x-if="stage === 'password'">
-                        <div class="space-y-3" x-transition:enter="transition ease-out duration-160" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
+                        <div class="space-y-3" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
                             <div class="flex items-center justify-between rounded-xl px-3.5 py-2.5"
                                  style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07)">
                                 <span class="text-[15px] truncate text-white/90" x-text="email"></span>
