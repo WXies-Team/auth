@@ -91,20 +91,41 @@ jobs:
           run_ssh() { ssh "${SSH_OPTS[@]}" "$SERVER_USER@$SERVER_HOST" "bash -c $(printf '%q' "$1")"; }
 
           echo "== [Deploy] rsync -> $OAUTH_DIR =="
+          # 只同步生产必需：app/ bootstrap/ config/ database/ public/ resources/views/ routes/ vendor/
+          # 其余（测试、文档、构建源、开发配置）一律不上服务器。
           rsync -az --delete \
             --max-delete=60 \
             --exclude='.git/' \
             --exclude='.gitignore' \
+            --exclude='.gitattributes' \
+            --exclude='.editorconfig' \
             --exclude='.env' \
+            --exclude='.env.example' \
             --exclude='.user.ini' \
             --exclude='.htaccess' \
             --exclude='.well-known/' \
             --exclude='AGENTS.md' \
+            --exclude='CLAUDE.md' \
+            --exclude='README.md' \
             --exclude='.ai/' \
             --exclude='.agents/' \
+            --exclude='.github/' \
+            --exclude='.mcp.json' \
+            --exclude='opencode.json' \
+            --exclude='boost.json' \
             --exclude='storage/' \
             --exclude='node_modules/' \
             --exclude='docs/' \
+            --exclude='tests/' \
+            --exclude='phpunit.xml' \
+            --exclude='pint.json' \
+            --exclude='package.json' \
+            --exclude='package-lock.json' \
+            --exclude='vite.config.js' \
+            --exclude='composer.json' \
+            --exclude='composer.lock' \
+            --exclude='resources/css/' \
+            --exclude='resources/js/' \
             -e "ssh -i $KEY -p $SSH_PORT -o StrictHostKeyChecking=accept-new" \
             ./ "$SERVER_USER@$SERVER_HOST:$OAUTH_DIR/"
 
