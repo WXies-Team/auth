@@ -14,12 +14,7 @@
             </div>
 
             <div class="auth-card rounded-[22px] p-7">
-                @if ($errors->any())
-                    <div x-data x-transition.opacity.duration.200ms
-                         class="auth-note-error rounded-xl px-4 py-3 text-[15px] mb-5">
-                        {{ $errors->first() }}
-                    </div>
-                @endif
+
 
                 <form method="POST" action="{{ route('two-factor.store') }}" id="otp-form">
                     @csrf
@@ -27,18 +22,23 @@
                     @if ($useRecoveryCode)
                         <input name="code" required autofocus autocomplete="one-time-code"
                                x-model="recovery" placeholder="XXXX-XXXX"
+                               aria-label="恢复码"
                                class="auth-input text-center font-mono tracking-[0.2em]">
                     @else
                         <div class="flex justify-center gap-2.5" @paste="onPaste($event)">
                             <template x-for="i in 6" :key="i">
                                 <input type="text" inputmode="numeric" maxlength="1" class="otp-box"
                                        :value="digits[i - 1] ?? ''"
+                                       :aria-label="'验证码第 ' + i + ' 位'"
                                        @input="onInput($event, i - 1)"
                                        @keydown.backspace="onBackspace($event, i - 1)"
                                        @focus="$event.target.select()">
                             </template>
                         </div>
                         <input type="hidden" name="code" x-model="value">
+                        @if ($errors->any())
+                            <p class="text-[15px] text-center mt-4" style="color: #ff7b72">{{ $errors->first() }}</p>
+                        @endif
                         <p class="text-center text-[13px] auth-faint mt-4">输满 6 位自动验证</p>
                     @endif
 

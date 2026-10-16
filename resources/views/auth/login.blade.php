@@ -23,7 +23,7 @@
                 @endif
 
                 @if ($errors->any())
-                    <div x-data x-transition.opacity.duration.200ms
+                    <div x-data x-show="stage !== 'password'" x-transition.opacity.duration.200ms
                          class="auth-note-error rounded-xl px-4 py-3 text-[15px] mb-4">
                         {{ $errors->first() }}
                     </div>
@@ -40,9 +40,10 @@
 
                     {{-- 第一步：只问「你是谁」（Passkey autofill 锚定在此框） --}}
                     <template x-if="stage === 'identifier'">
-                        <div>
+                        <div x-transition:enter="transition ease-out duration-160" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
                             <input id="email" type="email" name="email" required x-ref="email"
-                                   x-model="email" autocomplete="email webauthn" placeholder="邮箱"
+                                   x-model="email" autocomplete="email webauthn" placeholder="name@example.com"
+                                   aria-label="邮箱"
                                    class="auth-input">
                             <button type="submit" class="auth-primary mt-3.5" :disabled="loading">
                                 <span x-show="!loading">继续</span>
@@ -53,7 +54,7 @@
 
                     {{-- 第二步：证明你是你 --}}
                     <template x-if="stage === 'password'">
-                        <div class="space-y-3">
+                        <div class="space-y-3" x-transition:enter="transition ease-out duration-160" x-transition:enter-start="opacity-0 translate-x-2" x-transition:enter-end="opacity-100 translate-x-0">
                             <div class="flex items-center justify-between rounded-xl px-3.5 py-2.5"
                                  style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07)">
                                 <span class="text-[15px] truncate text-white/90" x-text="email"></span>
@@ -64,7 +65,8 @@
                             </div>
                             <div class="relative">
                                 <input :type="showPassword ? 'text' : 'password'" name="password" required
-                                       x-ref="password" autocomplete="current-password" placeholder="密码"
+                                       x-ref="password" autocomplete="current-password" placeholder="输入密码"
+                                       aria-label="密码"
                                        class="auth-input pr-14">
                                 <button type="button" @click="showPassword = !showPassword"
                                         class="absolute right-3.5 top-1/2 -translate-y-1/2 text-[13px] auth-faint hover:text-white/70"
@@ -75,6 +77,9 @@
                                        class="rounded accent-blue-500 w-4 h-4">
                                 记住此设备
                             </label>
+                            @if ($errors->any())
+                                <p class="text-[15px]" style="color: #ff7b72">{{ $errors->first() }}</p>
+                            @endif
                             <button type="submit" class="auth-primary" :disabled="loading">
                                 <span x-show="!loading">登录</span>
                                 <span x-show="loading" class="inline-block w-4 h-4 rounded-full border-2 border-white/40 border-t-white animate-spin"></span>
