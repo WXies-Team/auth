@@ -1,8 +1,9 @@
 <?php
 
 declare(strict_types=1);
-use Admin9\OidcServer\Models\OidcClient;
 use Admin9\OidcServer\Services\DefaultClaims;
+use App\Http\Middleware\EnforcePkce;
+use App\OAuth\GatewayClient;
 
 return [
     /*
@@ -76,7 +77,7 @@ return [
     | client ownership and existing tokens are not evidence of explicit consent.
     |
     */
-    'client_model' => OidcClient::class,
+    'client_model' => GatewayClient::class,
 
     /*
     |--------------------------------------------------------------------------
@@ -168,6 +169,9 @@ return [
     'grant_types_supported' => [
         'authorization_code',
         'refresh_token',
+        // 与 discovery 宣告一致（OidcController 硬编码含 client_credentials）。
+        // 启用后，client 的 grant_types 含此项即可走 M2M 令牌流。
+        'client_credentials',
     ],
 
     /*
@@ -242,8 +246,11 @@ return [
     'routes' => [
         'enabled' => true,
         'discovery_middleware' => [],
-        'authorization_middleware' => [],
-        'token_middleware' => [],
+        // OAuth 2.1：所有客户端强制 PKCE（S256）。包内仅在提供了 challenge 时才强制 S256，
+        // 此中间件前置拦截缺失 PKCE 的授权请求。
+        'authorization_middleware' => [EnforcePkce::class],
+        // RFC 6749 §4.4.1：令牌/内省/吊销端点须防爆破，按 IP+端点限流。
+        'token_middleware' => ['throttle:60,1'],
         'userinfo_middleware' => ['auth:api'],
     ],
 ];

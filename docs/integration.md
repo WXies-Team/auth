@@ -46,9 +46,12 @@ GET <gateway>/.well-known/openid-configuration
 | RP 发起登出 | `/oauth/logout` |
 | 动态注册（RFC 7591/7592） | `/api/register` |
 
-支持：`response_type=code`、PKCE（S256，**建议所有客户端携带**，机密客户端同时支持
-client_secret 认证）、`client_secret_basic` / `client_secret_post`、refresh_token、
+支持：`response_type=code`、**PKCE（S256，所有客户端强制——缺 code_challenge 或方法非 S256 直接拒绝）**、
+`client_secret_basic` / `client_secret_post`、`refresh_token`（轮换）、`client_credentials`（M2M）、
 `prompt=login/none/consent`、`max_age`。
+
+**记住授权**：用户对某 Client 授权过一次后，同 scope 或更小 scope 再次授权会静默跳过同意屏；
+scope 扩大或带 `prompt=consent` 时仍会重新征求同意。用户可在网关「已授权应用」页随时撤销。
 
 ## 3. 标准登录流（授权码 + PKCE）
 
@@ -76,6 +79,21 @@ client_secret 认证）、`client_secret_basic` / `client_secret_post`、refresh
    用 JWKS 验证 id_token（RS256），校验 iss/aud/exp/nonce
 7. 可选：GET <gateway>/oauth/userinfo，Authorization: Bearer <access_token>
 ```
+
+## 3.5 机密客户端对机（client_credentials，M2M）
+
+服务端间调用无需用户参与。注册 Client 时 `grant_types` 含 `client_credentials`
+（动态注册传 `"grant_types":["client_credentials"]`，或后台创建后调整），直接换 token：
+
+```
+POST <gateway>/oauth/token
+Authorization: Basic base64(client_id:client_secret)
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&scope=openid
+```
+
+响应 `{ access_token, token_type, expires_in }`（无 id_token / refresh_token，无用户上下文）。
 
 ## 4. Claims（id_token / userinfo 一致）
 

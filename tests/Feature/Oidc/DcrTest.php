@@ -42,10 +42,22 @@ class DcrTest extends TestCase
         $response = $this->postJson('/api/register', [
             'client_name' => 'Evil App',
             'redirect_uris' => ['https://evil.example.com/cb'],
-            'grant_types' => ['client_credentials', 'authorization_code'],
+            'grant_types' => ['password', 'implicit', 'authorization_code'],
         ], ['Authorization' => 'Bearer test-initial-token']);
 
+        // password / implicit 被过滤，仅保留受支持的 authorization_code
         $this->assertSame(['authorization_code'], $response->json('grant_types'));
+    }
+
+    public function test_register_accepts_client_credentials_grant(): void
+    {
+        $response = $this->postJson('/api/register', [
+            'client_name' => 'M2M App',
+            'redirect_uris' => ['https://m2m.example.com/cb'],
+            'grant_types' => ['client_credentials'],
+        ], ['Authorization' => 'Bearer test-initial-token']);
+
+        $this->assertSame(['client_credentials'], $response->json('grant_types'));
     }
 
     public function test_registered_client_can_be_managed_with_its_token(): void
