@@ -26,9 +26,10 @@ class ProjectClientController extends Controller
 
         $secret = Str::password(48, symbols: false);
 
+        // 明文交给 Passport 的 secret mutator 自行 bcrypt（勿手动哈希，会双重哈希）。
         $client = DB::transaction(fn () => Client::create([
             'name' => $data['name'],
-            'secret' => hash('sha256', $secret),
+            'secret' => $secret,
             'redirect_uris' => [$data['redirect']],
             'grant_types' => ['authorization_code', 'refresh_token'],
             'revoked' => false,
@@ -72,7 +73,7 @@ class ProjectClientController extends Controller
         abort_unless($client->project_id === $project->getKey(), 404);
 
         $secret = Str::password(48, symbols: false);
-        $client->update(['secret' => hash('sha256', $secret)]);
+        $client->update(['secret' => $secret]);
         app(AuditLogger::class)->record('client.secret_rotated', Auth::id(), 'oauth_client', null, [
             'client_id' => $client->getKey(),
         ]);

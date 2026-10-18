@@ -41,11 +41,20 @@ class DynamicClientRegistrationController extends Controller
         $secret = Str::password(48, symbols: false);
         $projectId = config('oidc.dcr_default_project_id') ?: Project::orderBy('id')->value('id');
 
+        $allowedGrants = ['authorization_code', 'refresh_token', 'client_credentials'];
+        $grantTypes = array_values(array_intersect($data['grant_types'] ?? [], $allowedGrants));
+        if ($grantTypes === []) {
+            $grantTypes = ['authorization_code'];
+        }
+        // 纯机密客户端（仅 client_credentials）不需要 redirect_uri，但 RFC 7591 要求注册时提供；此处保留。
+
+        // 明文交给 Passport 的 secret mutator 自行 bcrypt。
+        // 此前手动 sha256 会被 mutator 再 bcrypt 一次，导致令牌端点校验永远失败。
         $client = Client::forceCreate([
             'name' => $data['client_name'],
-            'secret' => hash('sha256', $secret),
+            'secret' => $secret,
             'redirect_uris' => $data['redirect_uris'],
-            'grant_types' => array_values(array_intersect($data['grant_types'] ?? [], ['authorization_code', 'refresh_token'])) ?: ['authorization_code'],
+            'grant_types' => $grantTypes,
             'revoked' => false,
             'backchannel_logout_uri' => $data['backchannel_logout_uri'] ?? null,
             'registration_access_token_hash' => hash('sha256', $registrationToken),
