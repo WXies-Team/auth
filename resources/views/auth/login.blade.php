@@ -50,6 +50,13 @@
                     <button type="submit" class="auth-primary mt-1">登录</button>
                 </form>
 
+                <div class="flex items-center justify-between mt-4 text-[15px]">
+                    <a href="{{ route('password.request') }}" class="auth-quiet no-underline hover:text-[var(--ink)] transition">忘记密码？</a>
+                    @if (config('oidc.registration_enabled'))
+                        <a href="{{ route('register') }}" class="text-[var(--accent)] no-underline font-medium">创建账号</a>
+                    @endif
+                </div>
+
                 <div class="flex items-center gap-3 my-5">
                     <span class="h-px flex-1 auth-line"></span>
                     <span class="text-[13px] auth-faint">或</span>

@@ -12,6 +12,34 @@
             </div>
         </section>
 
+        @if (session('status'))
+            <div class="auth-note-ok note-in rounded-xl px-4 py-3 text-[15px] mb-4">
+                {{ session('status') }}
+            </div>
+        @endif
+
+        <section class="card p-6 mb-4">
+            <h2 class="font-semibold text-[17px] mb-1">登录密码</h2>
+            <p class="text-[15px] label-secondary mb-4">修改后其他设备需要重新登录</p>
+
+            @if ($errors->any())
+                <div class="auth-note-error rounded-xl px-4 py-3 text-[15px] mb-4">
+                    {{ $errors->first() }}
+                </div>
+            @endif
+
+            <form method="POST" action="{{ route('security.password') }}" class="space-y-3 max-w-sm">
+                @csrf @method('PUT')
+                <input type="password" name="current_password" required autocomplete="current-password"
+                       placeholder="当前密码" aria-label="当前密码" class="auth-input">
+                <input type="password" name="password" required autocomplete="new-password"
+                       placeholder="新密码（至少 8 位）" aria-label="新密码" class="auth-input">
+                <input type="password" name="password_confirmation" required autocomplete="new-password"
+                       placeholder="确认新密码" aria-label="确认新密码" class="auth-input">
+                <button class="btn-primary">更新密码</button>
+            </form>
+        </section>
+
         @if ($recoveryCodes)
             <section class="rounded-2xl p-6 mb-6 border" style="background: color-mix(in srgb, var(--color-amber) 10%, var(--color-surface)); border-color: color-mix(in srgb, var(--color-amber) 30%, transparent)">
                 <h2 class="font-semibold mb-1" style="color: var(--color-amber)">恢复码已生成</h2>

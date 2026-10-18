@@ -1,12 +1,17 @@
 <?php
 
+use App\Http\Controllers\Admin\AuditController;
 use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\ProjectClientController;
 use App\Http\Controllers\Admin\ProjectController;
 use App\Http\Controllers\Admin\ProjectMemberController;
 use App\Http\Controllers\Admin\UserController;
+use App\Http\Controllers\Auth\ConnectedAppsController;
+use App\Http\Controllers\Auth\ForgotPasswordController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\ReauthenticateController;
+use App\Http\Controllers\Auth\RegistrationController;
+use App\Http\Controllers\Auth\ResetPasswordController;
 use App\Http\Controllers\Auth\SecurityController;
 use App\Http\Controllers\Auth\SessionController;
 use App\Http\Controllers\Auth\SocialAuthController;
@@ -32,6 +37,24 @@ Route::middleware('web')->group(function (): void {
     Route::post('/reauthenticate', [ReauthenticateController::class, 'store'])
         ->middleware('throttle:30,1')
         ->block();
+
+    // 自助注册（REGISTRATION_ENABLED 开启才可用）
+    Route::get('/register', [RegistrationController::class, 'show'])->name('register');
+    Route::post('/register', [RegistrationController::class, 'store'])
+        ->middleware('throttle:10,1')
+        ->block();
+
+    // 密码找回（忘记密码 → 邮件链接重置）
+    Route::get('/forgot-password', [ForgotPasswordController::class, 'show'])
+        ->name('password.request');
+    Route::post('/forgot-password', [ForgotPasswordController::class, 'store'])
+        ->middleware('throttle:6,1')
+        ->name('password.email');
+    Route::get('/reset-password/{token}', [ResetPasswordController::class, 'show'])
+        ->name('password.reset');
+    Route::post('/reset-password', [ResetPasswordController::class, 'store'])
+        ->middleware('throttle:6,1')
+        ->name('password.update');
 
     Route::get('/two-factor', [TwoFactorChallengeController::class, 'show'])
         ->block()
@@ -61,6 +84,9 @@ Route::middleware('web')->group(function (): void {
         Route::post('/security/recovery-codes', [SecurityController::class, 'regenerateRecoveryCodes'])
             ->middleware('throttle:5,1')
             ->name('security.recovery-codes');
+        Route::put('/security/password', [SecurityController::class, 'updatePassword'])
+            ->middleware('throttle:10,1')
+            ->name('security.password');
 
         // 已登录设备管理
         Route::get('/sessions', [SessionController::class, 'index'])->name('sessions.index');
@@ -68,6 +94,15 @@ Route::middleware('web')->group(function (): void {
         Route::delete('/sessions', [SessionController::class, 'destroyOthers'])
             ->middleware('throttle:10,1')
             ->name('sessions.destroy-others');
+
+        // 已授权应用（撤销对下游应用的授权）
+        Route::get('/apps', [ConnectedAppsController::class, 'index'])
+            ->name('apps.index');
+        Route::delete('/apps/{clientId}', [ConnectedAppsController::class, 'revoke'])
+            ->name('apps.revoke');
+        Route::delete('/apps', [ConnectedAppsController::class, 'revokeAll'])
+            ->middleware('throttle:10,1')
+            ->name('apps.revoke-all');
     });
 
     // 管理后台：全局管理员或项目成员可进入；具体操作由 ProjectPolicy 细分。
@@ -101,7 +136,7 @@ Route::middleware('web')->group(function (): void {
         });
 
         // 审计日志（仅全局管理员）
-        Route::get('/audit', [\App\Http\Controllers\Admin\AuditController::class, 'index'])
+        Route::get('/audit', [AuditController::class, 'index'])
             ->middleware('can:manage-users')
             ->name('audit.index');
     });

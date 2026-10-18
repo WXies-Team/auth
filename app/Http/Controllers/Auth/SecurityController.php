@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Models\LoginSession;
 use App\Services\AuditLogger;
 use App\Services\SessionTracker;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Validation\Rules\Password;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
@@ -109,5 +111,30 @@ class SecurityController extends Controller
         app(AuditLogger::class)->record('security.recovery_codes.regenerated', $user->getKey());
 
         return redirect()->route('security.show');
+    }
+
+    public function updatePassword(Request $request): RedirectResponse
+    {
+        // current_password 规则复验当前密码，防止会话被劫持后直接改密夺取账号。
+        $data = $request->validate([
+            'current_password' => ['required', 'current_password'],
+            'password' => ['required', 'confirmed', Password::defaults()],
+        ], [
+            'current_password.current_password' => '当前密码不正确。',
+        ]);
+
+        $user = Auth::user();
+
+        $user->forceFill(['password' => $data['password']])->save();
+        app(AuditLogger::class)->record('password.changed', $user->getKey());
+        // 改密后除当前设备外全部下线（须传当前 session id，否则当前会话也被吊销）。
+        app(SessionTracker::class)->revokeAllExcept(
+            $user,
+            LoginSession::where('user_id', $user->getKey())
+                ->where('session_id', $request->session()->getId())
+                ->value('id'),
+        );
+
+        return redirect()->route('security.show')->with('status', '密码已更新，其他设备已重新登录');
     }
 }

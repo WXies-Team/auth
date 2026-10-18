@@ -27,6 +27,11 @@
                     <span class="flex-1 text-[17px] text-[var(--ink)]">已登录设备</span>
                     <i data-lucide="chevron-right" class="w-4 h-4 label-tertiary"></i>
                 </a>
+                <a href="{{ route('apps.index') }}" class="flex items-center gap-3.5 px-5 py-3.5 no-underline hover:bg-[var(--fill-2)] transition">
+                    <i data-lucide="link-2" class="w-5 h-5 label-secondary"></i>
+                    <span class="flex-1 text-[17px] text-[var(--ink)]">已授权应用</span>
+                    <i data-lucide="chevron-right" class="w-4 h-4 label-tertiary"></i>
+                </a>
                 @can('access-admin')
                     <a href="{{ route('admin.dashboard') }}" class="flex items-center gap-3.5 px-5 py-3.5 no-underline hover:bg-[var(--fill-2)] transition">
                         <i data-lucide="settings" class="w-5 h-5 label-secondary"></i>

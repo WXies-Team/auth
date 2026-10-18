@@ -32,6 +32,9 @@
             <a href="{{ route('sessions.index') }}" class="side-link {{ $active === 'sessions' ? 'active' : '' }}">
                 <i data-lucide="monitor" class="w-[18px] h-[18px]"></i> 已登录设备
             </a>
+            <a href="{{ route('apps.index') }}" class="side-link {{ $active === 'apps' ? 'active' : '' }}">
+                <i data-lucide="link-2" class="w-[18px] h-[18px]"></i> 已授权应用
+            </a>
             @can('access-admin')
                 <a href="{{ route('admin.dashboard') }}" class="side-link {{ $active === 'admin' ? 'active' : '' }}">
                     <i data-lucide="settings" class="w-[18px] h-[18px]"></i> 管理后台
@@ -53,6 +56,9 @@
         </a>
         <a href="{{ route('sessions.index') }}" class="tab-link {{ $active === 'sessions' ? 'active' : '' }}">
             <i data-lucide="monitor" class="w-6 h-6"></i> 设备
+        </a>
+        <a href="{{ route('apps.index') }}" class="tab-link {{ $active === 'apps' ? 'active' : '' }}">
+            <i data-lucide="link-2" class="w-6 h-6"></i> 应用
         </a>
         @can('access-admin')
             <a href="{{ route('admin.dashboard') }}" class="tab-link {{ $active === 'admin' ? 'active' : '' }}">
