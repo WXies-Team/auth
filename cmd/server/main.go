@@ -1,0 +1,644 @@
+// Command server 是统一账号服务（auth.horatio.cn）。
+//
+// 与两个日记服务的 /auth/* 端点一一对应、JSON 字段完全一致（见 internal/protocol），
+// 客户端从日记自带后端切到本端点时只需改 base URL 并在登录请求加 app 字段。
+// 部署形态与日记服务相同：Go 单二进制 + supervisord，对外只经 nginx TLS 反代
+// （默认绑 127.0.0.1:8868）。
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/WXies-Team/auth/internal/auth"
+	"github.com/WXies-Team/auth/internal/config"
+	"github.com/WXies-Team/auth/internal/db"
+	// 别名 mailsvc：包名 mail 与标准库 net/mail 同名，直引易混
+	mailsvc "github.com/WXies-Team/auth/internal/mail"
+	"github.com/WXies-Team/auth/internal/protocol"
+)
+
+// 请求体上限：认证请求都是小 JSON，64KB 足够挡住异常大包
+const maxBodyBytes = 64 << 10
+
+type ctxKey int
+
+const callerKey ctxKey = iota
+
+func main() {
+	// 日志按级别分流（12-factor 口径）：Info→stdout，Warn/Error→stderr，
+	// 让 supervisord 的两个日志文件各归各位。
+	slog.SetDefault(slog.New(&splitHandler{
+		out: slog.NewTextHandler(os.Stdout, nil),
+		err: slog.NewTextHandler(os.Stderr, nil),
+	}))
+
+	if err := requireJWTSecret(os.Getenv("JWT_SECRET")); err != nil {
+		slog.Error("JWT_SECRET 不可用", "err", err)
+		os.Exit(1)
+	}
+	secret := os.Getenv("JWT_SECRET")
+
+	// 连接串只认 MYSQL_DSN。启动失败 → supervisord 拉不起来 → deploy 脚本的
+	// 健康检查失败 → 自动回滚。
+	dsn, err := db.FromEnv()
+	if err != nil {
+		slog.Error("数据库连接串不可用", "err", err)
+		os.Exit(1)
+	}
+	// 带重试地连库（不是一次失败就退出）：MySQL 冷启实测约 9 秒，立刻退出会让
+	// supervisor 的 startretries 耗尽变成 FATAL，而且 MySQL 恢复后进程已不在、
+	// **不会自己回来**。等 90 秒期间进程一直存活，MySQL 一就绪就自动服务。
+	pool, err := db.OpenWithRetry(dsn, 90*time.Second)
+	if err != nil {
+		slog.Error("等待数据库超时，退出交给 supervisord 继续重试", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = pool.Close() }()
+	if err := db.EnsureSchema(pool); err != nil {
+		slog.Error("建表失败", "err", err)
+		os.Exit(1)
+	}
+
+	cfg := config.New(pool)
+	// 邮件凭据从 app_config 现读（10s 缓存，改库即热生效）。没配好时发码回 503
+	//「邮件服务暂不可用」，属于可自愈的配置态而不是崩溃；启动时 Warn 一次，
+	// 免得等用户注册失败才发现。
+	for _, key := range []string{"mail_tenant_id", "mail_client_id", "mail_client_secret"} {
+		v, err := cfg.Require(key)
+		// 读库失败 ≠ 没配：分开喊，否则 DB 抖动会被「未配置」这条 Warn 带偏
+		if err != nil {
+			slog.Error("读邮件凭据失败（继续启动）", "key", key, "err", err)
+		} else if v == "" {
+			slog.Warn("邮件凭据未配置，注册与验证码邮件会失败", "key", key)
+		}
+	}
+	authSvc, err := auth.NewService(pool, secret, mailsvc.New(cfg.StringFunc))
+	if err != nil {
+		slog.Error("初始化认证服务", "err", err)
+		os.Exit(1)
+	}
+
+	mux := http.NewServeMux()
+
+	// 健康检查要**碰数据库**：DB 挂了回 5xx，ci/deploy-server.sh 靠 `curl -fsS`
+	// 判定失败并自动回滚。若改成「永远 200」，部署脚本会在数据库已挂时误判健康。
+	// 限流给到 120/分：部署脚本的回滚/健康轮询 15 次只占 30 秒，且它从 127.0.0.1
+	// 直连、与外部监控不同键；120/分仍能挡住对 /health 的打库轰炸。
+	mux.Handle("GET /health", withLogging(limitN("health", 120, health(pool, cfg))))
+
+	// ---- 无登录态端点 ----
+	// 限流口径与日记服务的 /auth/* 一致：register/login/login-code 每 IP 15 次/分
+	//（撞库与爆破的主要目标），发码是**真的投一封信**、更贵，每 IP 5 次/分；
+	// 每邮箱 60 秒冷却 + 每日 10 条 + 收件人总闸 15 条在 auth 内部，换 IP 也躲不掉。
+	// 响应只回 sent=true，不回任何关于邮箱存在与否的额外信息（业务文案走 writeResult）。
+	mux.Handle("POST /auth/register", withLogging(limit("register", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, _ *http.Request) {
+		resp, err := authSvc.Register(r.Email, r.Password, r.Code, r.App)
+		writeResult(w, resp, err)
+	}))))
+	mux.Handle("POST /auth/send-code", withLogging(limitN("send-code", 5, jsonBody[protocol.SendCodeRequest](func(r *protocol.SendCodeRequest, w http.ResponseWriter, _ *http.Request) {
+		writeResult(w, map[string]bool{"sent": true}, authSvc.SendCode(r.Email, r.Purpose))
+	}))))
+	mux.Handle("POST /auth/reset-password", withLogging(limitN("reset-password", 5, jsonBody[protocol.ResetPasswordRequest](func(r *protocol.ResetPasswordRequest, w http.ResponseWriter, _ *http.Request) {
+		writeResult(w, map[string]bool{"ok": true}, authSvc.ResetPassword(r.Email, r.Code, r.Password))
+	}))))
+	mux.Handle("POST /auth/login", withLogging(limit("login", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, _ *http.Request) {
+		resp, err := authSvc.Login(r.Email, r.Password, r.App)
+		writeResult(w, resp, err)
+	}))))
+	mux.Handle("POST /auth/login-code", withLogging(limit("login-code", jsonBody[protocol.LoginCodeRequest](func(r *protocol.LoginCodeRequest, w http.ResponseWriter, _ *http.Request) {
+		resp, err := authSvc.LoginByEmailCode(r.Email, r.Code, r.App)
+		writeResult(w, resp, err)
+	}))))
+
+	// ---- 需要登录态的端点 ----
+	// 先解 Bearer 拿 Caller（uid+email+aud），再交业务处理——改密重发 token 的
+	// aud/email 直接取自现会话，客户端不用再传。
+	authed := func(h func(c auth.Caller, w http.ResponseWriter, r *http.Request)) http.Handler {
+		return withLogging(withUID(authSvc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h(r.Context().Value(callerKey).(auth.Caller), w, r)
+		})))
+	}
+	// authedLimited 同 authed，但**按 uid 限流**：改密/注销是持被盗 token 在线爆破
+	// 旧密码的主入口，按 IP 限流挡不住分布式来源，按账号限才能兜住。
+	// 外层再套一道按 IP 的宽限流：uid 限流在 JWT 校验之后，而每次校验都要一次
+	// DB 查询（token_version）——被盗 token 高频打这些路由可先把连接池的认证查询
+	// 打满，IP 层 120/分挡在查询之前，把放大面掐掉。
+	authedLimited := func(scope string, max int, h func(c auth.Caller, w http.ResponseWriter, r *http.Request)) http.Handler {
+		return limitN(scope+"-ip", 120, authed(func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+			if !limiter.allow(scope+":"+strconv.FormatInt(c.UID, 10), max, time.Minute) {
+				w.Header().Set("Retry-After", "60")
+				writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+				return
+			}
+			h(c, w, r)
+		}))
+	}
+	mux.Handle("POST /auth/logout", authedLimited("logout", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
+		writeResult(w, map[string]bool{"ok": true}, authSvc.Logout(c.UID))
+	}))
+	mux.Handle("POST /auth/change-password", authedLimited("change-password", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req protocol.ChangePasswordRequest
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		resp, err := authSvc.ChangePassword(c, req.OldPassword, req.NewPassword)
+		writeResult(w, resp, err)
+	}))
+	// 改密码的验证码版：发码端点收件人由 **uid 查库**决定，客户端传不了收件人——
+	// 改密码码只能发进账号本人的绑定邮箱。限流按 uid（authedLimited），
+	// 码本身的冷却、日限额、5 次错即作废在 auth 包内。
+	mux.Handle("POST /auth/send-change-code", authedLimited("send-change-code", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
+		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeCode(c.UID))
+	}))
+	mux.Handle("POST /auth/change-password-code", authedLimited("change-password-code", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req protocol.ChangePasswordCodeRequest
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		resp, err := authSvc.ChangePasswordByCode(c, req.Code, req.Password)
+		writeResult(w, resp, err)
+	}))
+	// 改邮箱：发码与提交都按 uid 限流。码发到**新**邮箱（purpose=email_change，
+	// 与改密码的 change 码互不串用），提交时密码重验 + 验码双闸，查重在服务端；
+	// 成功回 {ok:true} 且**不 bump token_version**——改邮箱不是凭证变更，
+	// 现会话保持登录（与改密相反），新旧邮箱各收一封通知信。
+	mux.Handle("POST /auth/send-change-email-code", authedLimited("send-change-email-code", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req protocol.SendChangeEmailCodeRequest
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeEmailCode(c.UID, req.Email))
+	}))
+	mux.Handle("POST /auth/change-email", authedLimited("change-email", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req protocol.ChangeEmailRequest
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		writeResult(w, map[string]bool{"ok": true}, authSvc.ChangeEmail(c.UID, req.Password, req.Email, req.Code))
+	}))
+	mux.Handle("POST /auth/delete", authedLimited("delete-account", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req protocol.DeleteAccountRequest
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		writeResult(w, map[string]bool{"ok": true}, authSvc.DeleteAccount(c.UID, req.Password))
+	}))
+
+	// ---- 内部校验（日记服务的 withUID 中间件调用）----
+	// 验签 + token_version 比对 + aud 精确匹配期望应用。限流按来源 IP 600/分：
+	// 调用方是同机的日记服务（一次业务请求调一次 verify），正常量级远低于此；
+	// 600 是给多租户共享留的余量，挡的是误配置成公网可达后的打爆。
+	mux.Handle("POST /internal/verify", withLogging(limitN("verify", 600, internalVerify(authSvc))))
+
+	// 兜底：未知错误 500 + ApiError 体，而不是让 Go 把栈吐给客户端
+	handler := withRecover(mux)
+
+	// 默认只绑回环：对外一律经 nginx TLS 反代，直连 8868 会把 JWT 走明文。
+	addr := envOr("BIND_ADDR", "127.0.0.1:8868")
+	// 超时三件套：没有它们，慢速 body（slowloris）或挂住不读的连接能长期占着 fd
+	// 把服务拖垮。认证请求都是小包，60s 读写绰绰有余。
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// 头部上限收到 16KB（默认 1MB）：防超大 header 内存占用
+		MaxHeaderBytes: 16 << 10,
+	}
+
+	// 优雅关闭：supervisor stop/restart 发 SIGTERM，等在途请求处理完再退
+	//（健康检查轮询有 30s 窗口，15s 收尾足够且不至于拖慢部署）。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		slog.Info("收到退出信号，等待在途请求完成")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("优雅关闭超时，强制退出", "err", err)
+		}
+	}()
+
+	slog.Info("server starting", "addr", addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("server stopped", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("server exited")
+}
+
+// requireJWTSecret 校验签名密钥：缺失或短于 32 字节直接拒启——短 secret = 弱签名，
+// 统一账号服务的 token 被破解波及所有下游应用，这里没有妥协余地。
+func requireJWTSecret(secret string) error {
+	if secret == "" {
+		return errors.New("缺少 JWT_SECRET（环境变量），检查 supervisord 的 environment")
+	}
+	if len(secret) < 32 {
+		return fmt.Errorf("JWT_SECRET 过短，至少 32 字节（当前 %d）", len(secret))
+	}
+	return nil
+}
+
+// envOr 读环境变量，空则给默认值。
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// health 复刻日记服务的 /health 语义：**ping 数据库**（DB 挂了返回 5xx，
+// deploy-server.sh 靠 `curl -fsS` 判定失败并自动回滚），再给两个配置开关位。
+func health(pool *sql.DB, cfg *config.Store) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ping 带 2s 超时：连接池被占满时 /health 不能无限排队——
+		// 部署健康检查拿不到响应会误判回滚
+		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.PingContext(pingCtx); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "数据库不可用")
+			return
+		}
+		// 邮件凭据没有兜底值：缺键时发码全 503，/health 给个开关位让部署方自查，
+		// 不用翻日志
+		mailKey, err := cfg.Require("mail_client_secret")
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "数据库不可用")
+			return
+		}
+		writeJSON(w, http.StatusOK, healthResponse{
+			Status:         "ok",
+			MailConfigured: mailKey != "",
+			// 能启动到这里就说明 JWT_SECRET 已通过 ≥32 字节校验（拒启在 main 最前面），
+			// 恒为 true——给部署方一眼确认「这个进程带着可用密钥在跑」
+			JWTConfigured: true,
+		})
+	})
+}
+
+type healthResponse struct {
+	Status         string `json:"status"`
+	MailConfigured bool   `json:"mailConfigured"`
+	JWTConfigured  bool   `json:"jwtConfigured"`
+}
+
+// verifier 是 internalVerify 依赖的最小接口：路由层测试注入假实现，不必拉起真库。
+type verifier interface {
+	Verify(bearer, expectApp string) (*auth.VerifyResult, error)
+}
+
+// internalVerify 是日记服务 withUID 中间件要调的端点：POST /internal/verify，
+// Bearer 用户 token + body {"app":"<期望 aud>"}。通过回 uid/email/app，
+// 否则 401（错误体走 writeResult，含 503 的 DB 抖动分支）。
+func internalVerify(v verifier) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.VerifyRequest
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		// app 缺失/未知在这里挡掉，不进 Verify——期望值都对不上就别浪费一次查库
+		if req.App == "" {
+			writeError(w, http.StatusBadRequest, "参数不正确")
+			return
+		}
+		res, err := v.Verify(r.Header.Get("Authorization"), req.App)
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, protocol.VerifyResponse{UID: res.UID, Email: res.Email, App: res.App})
+	})
+}
+
+// ---- 以下为通用中间件与 JSON 工具 ----
+
+// decode 解码请求体。**故意不拒绝未知字段**——日记客户端的 DTO 可能多发字段，
+// 客户端多发不该报错（否则加字段会让老客户端直接失败）。
+// 超限走 http.MaxBytesReader：截断回结构化 413 而不是静默截断后的 400。
+func decode(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	err := json.NewDecoder(r.Body).Decode(v)
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return errBodyTooLarge
+	}
+	return err
+}
+
+var errBodyTooLarge = errors.New("body too large")
+
+// decodeOr400：decode 失败统一回执——超限 413、其余 400。全部 decode 入口共用，
+// 避免每处手抄错误映射再漏掉 413。
+func decodeOr400(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := decode(w, r, v); err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "请求体过大")
+		} else {
+			writeError(w, http.StatusBadRequest, "请求格式不正确")
+		}
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, code int, message string) {
+	writeJSON(w, code, protocol.ApiError{Message: message})
+}
+
+// writeResult 把业务结果翻译成「状态码 + ApiError 体」。
+func writeResult(w http.ResponseWriter, v any, err error) {
+	if err == nil {
+		writeJSON(w, http.StatusOK, v)
+		return
+	}
+	var he *auth.HTTPError
+	if errors.As(err, &he) {
+		writeError(w, he.Code, he.Message)
+		return
+	}
+	// 内部错误（含 SQL 与路径）全进日志，客户端只拿固定文案——排障信息不丢，
+	// 但不再外泄
+	slog.Error("handler failed", "err", err, "cause", err.Error())
+	writeError(w, http.StatusInternalServerError, "服务出了点问题，请稍后重试")
+}
+
+func withRecover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic", "err", rec, "path", r.URL.Path)
+				// panic 穿过路由层的 withLogging（其 slog.Info 不再执行）：
+				// 这里补一条同构 request 日志，panic 轮次也能按 500 检索
+				slog.Info("request", "method", r.Method, "path", r.URL.Path,
+					"status", http.StatusInternalServerError, "panicked", true)
+				writeError(w, http.StatusInternalServerError, "服务出了点问题，请稍后再试")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// statusRecorder 记录状态码给 withLogging（只记 method/path 没法事后发现
+// 429/503 异常与限流误伤）。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func withLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		// nosniff 防 MIME 嗅探
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		slog.Info("request", "method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "took", time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// withUID 解 Bearer 并把 Caller 放进 context；失败直接回 401/503。
+func withUID(svc *auth.Service, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caller, err := svc.ValidUserID(r.Header.Get("Authorization"))
+		if err != nil {
+			// ValidUserID 只回 HTTPError（401 或 DB 抖动的 503），直接翻译
+			writeResult(w, nil, err)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey, caller)))
+	})
+}
+
+// ---- 进程内滑动窗口限流（单实例部署假设：supervisord 只跑一个进程，多实例时
+// 每个实例各自一套窗口，限流额度翻倍——上多实例前要把这里换成共享存储）----
+
+type window struct {
+	hits []time.Time
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	windows map[string]*window
+}
+
+var limiter = &rateLimiter{windows: map[string]*window{}}
+
+// allow 每 [scope:key] 每 windowMs 内最多 max 次。
+func (l *rateLimiter) allow(key string, max int, windowMs time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	// 攒太多时全量扫一遍，把**过期且再没人来过**的键清掉：惰性清理只在该键
+	// 再次被访问时发生，长期不访问的键（如已注销账号）会永远留在 map 里。
+	if len(l.windows) > 4096 {
+		for k, w := range l.windows {
+			stale := true
+			for _, t := range w.hits {
+				if now.Sub(t) < windowMs {
+					stale = false
+					break
+				}
+			}
+			if stale {
+				delete(l.windows, k)
+			}
+		}
+	}
+	w := l.windows[key]
+	if w == nil {
+		w = &window{}
+		l.windows[key] = w
+	}
+	// 淘汰窗口外的；窗口清空后**整个键重建**——否则键会随账号数无限攒；
+	// 重建时必须把当前请求记上，只删不记会把这一次漏计（首请求被静默放行两次）。
+	kept := w.hits[:0]
+	for _, t := range w.hits {
+		if now.Sub(t) < windowMs {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == 0 {
+		if max <= 0 {
+			delete(l.windows, key)
+			return false
+		}
+		l.windows[key] = &window{hits: []time.Time{now}}
+		return true
+	}
+	w.hits = kept
+	if len(w.hits) >= max {
+		return false
+	}
+	w.hits = append(w.hits, now)
+	return true
+}
+
+func limit(scope string, next http.Handler) http.Handler {
+	return limitN(scope, 15, next)
+}
+
+// limitN 同 limit 但可指定每分钟上限（健康检查要放行部署轮询，15/分不够用）。
+// 注意几条路由把本闸放在 withLogging **之外**（挡在读体/JWT 之前是刻意的）：
+// 拒绝分支因此要自带 nosniff 与访问日志，否则 429 轮次在运维侧不可见。
+func limitN(scope string, max int, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := scope + ":" + clientIP(r)
+		if !limiter.allow(key, max, time.Minute) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Retry-After", "60")
+			slog.Info("request", "method", r.Method, "path", r.URL.Path,
+				"status", http.StatusTooManyRequests, "scope", scope)
+			writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientIP 解析真实客户端 IP，只用于限流键。
+//
+// 生产里 nginx 在同机做 TLS 反代，请求转到本进程时 RemoteAddr 恒为代理地址——
+// 直接当键会让**所有用户挤进同一个桶**，15 次/分的全站共享额度可被单点打满
+//（打挂登录注册），反爆破的分 IP 粒度也完全失效。业界共识是「只信任受信代理
+// 追加的转发值」，所以：
+//
+//  1. RemoteAddr 不是受信代理（环回/内网）→ 认定直连，用 RemoteAddr，XFF 一律不信
+//     （否则任何客户端伪造一个 X-Forwarded-For 就能每请求换一个键，限流被绕过）
+//  2. 是受信代理 → 优先 X-Forwarded-For：从**右端**往左找第一个非受信地址——右端是
+//     代理自己按 TCP 对端追加的、客户端伪造不了；左端的旧值才可能是客户端自带的。
+//     XFF 没有（nginx 只配了 X-Real-IP 的常见部署）→ 用 X-Real-IP（同样是代理
+//     按 $remote_addr 写的，客户端改不了），它也不可信才回落 RemoteAddr
+//  3. 两个头都没有（本机 curl /health 这类）→ 回落 RemoteAddr
+//
+// 想改信任范围用 TRUSTED_PROXIES（逗号分隔 CIDR/IP，默认环回+内网）。
+func clientIP(r *http.Request) string {
+	remote := hostOnly(r.RemoteAddr)
+	trusted := trustedProxies()
+	if !containsIP(trusted, remote) {
+		return remote
+	}
+	for _, header := range r.Header.Values("X-Forwarded-For") {
+		parts := strings.Split(header, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			ip := strings.TrimSpace(parts[i])
+			if ip == "" || net.ParseIP(ip) == nil {
+				continue // 空串/非 IP（伪造垃圾）跳过，继续往左找
+			}
+			if !containsIP(trusted, ip) {
+				return ip
+			}
+		}
+	}
+	if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(real) != nil {
+		return real
+	}
+	return remote
+}
+
+// hostOnly 去掉 RemoteAddr 的端口；SplitHostPort 失败时按原样返回。
+func hostOnly(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
+}
+
+// trustedProxies 解析受信代理集合：TRUSTED_PROXIES 显式配置优先，
+// 未配置时默认环回 + RFC1918/ULA 内网段（同机 nginx 与机房内部负载都在此列）。
+func trustedProxies() []string {
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		return strings.Split(v, ",")
+	}
+	return []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+}
+
+// containsIP 判断 ip 是否命中受信集合中的某一项（精确 IP 或 CIDR）。
+func containsIP(trusted []string, ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, t := range trusted {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if strings.Contains(t, "/") {
+			if _, cidr, err := net.ParseCIDR(t); err == nil && cidr.Contains(parsed) {
+				return true
+			}
+			continue
+		}
+		if addr := net.ParseIP(t); addr != nil && addr.Equal(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonBody 解码请求体后交给 h。不拒绝未知字段（见 decode 注释）。
+func jsonBody[T any](h func(*T, http.ResponseWriter, *http.Request)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req T
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		h(&req, w, r)
+	})
+}
+
+// splitHandler 按级别把记录分流到两个 handler（<Warn→stdout，≥Warn→stderr），
+// 让 supervisord 的 stdout/stderr 两个日志文件各归各位。
+type splitHandler struct {
+	out slog.Handler
+	err slog.Handler
+}
+
+func (h *splitHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.out.Enabled(ctx, level) || h.err.Enabled(ctx, level)
+}
+
+func (h *splitHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		return h.err.Handle(ctx, r)
+	}
+	return h.out.Handle(ctx, r)
+}
+
+func (h *splitHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &splitHandler{out: h.out.WithAttrs(attrs), err: h.err.WithAttrs(attrs)}
+}
+
+func (h *splitHandler) WithGroup(name string) slog.Handler {
+	return &splitHandler{out: h.out.WithGroup(name), err: h.err.WithGroup(name)}
+}
