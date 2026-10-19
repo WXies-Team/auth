@@ -6,6 +6,8 @@
 // calorie-diary/server/internal/protocol/protocol.go 的 auth 块。
 package protocol
 
+import "encoding/json"
+
 // AuthRequest 对应日记客户端的 AuthRequest。
 //
 // Code 只在**注册**时校验，登录一律忽略——两边共用一个 DTO，老客户端登录不带
@@ -131,6 +133,78 @@ type SessionInfo struct {
 	CreatedAt  int64  `json:"createdAt"`
 	LastSeenAt int64  `json:"lastSeenAt"`
 	Current    bool   `json:"current"`
+}
+
+// ---- Web 自助台 / 管理后台的新端点 DTO ----
+//
+// 与上面那批「与日记客户端逐字对齐」的 DTO 分开：这些是本服务新增端点的形状，
+// 由 Web 页与（C 批）日记 App 的 passkey/2FA 流程读写，改字段不影响老客户端。
+
+// WebLoginRequest 是 POST /web/login/password 的请求体。
+//
+// App 是可选的：日记 App 走这条路要带上自己的标识（便于审计与将来分流），
+// 网页端可以不传——web 会话不签 JWT，没有 aud 参与。
+type WebLoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	App      string `json:"app"`
+}
+
+// WebLoginCodeRequest 是 POST /web/login/email-code 的请求体。
+type WebLoginCodeRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+// WebLoginTOTPRequest 是 POST /web/login/totp 的请求体：Code 与 RecoveryCode
+// 二选一（哪个非空用哪个）。
+type WebLoginTOTPRequest struct {
+	LoginToken   string `json:"loginToken"`
+	Code         string `json:"code"`
+	RecoveryCode string `json:"recoveryCode"`
+}
+
+// WebLoginPending 是两步登录第一步的回执（与 {token,email} 互斥）。
+type WebLoginPending struct {
+	Status     string   `json:"status"`
+	LoginToken string   `json:"loginToken"`
+	Methods    []string `json:"methods"`
+}
+
+// WebSessionResponse 是 POST /web/session 的回执：控制台页头与管理后台
+// 的入口判定都看它。csrfToken 从可读 cookie 同步回一份（服务端才是准的）。
+type WebSessionResponse struct {
+	UID          int64  `json:"uid"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	CSRFToken    string `json:"csrfToken"`
+	TotpEnabled  bool   `json:"totpEnabled"`
+	PasskeyCount int    `json:"passkeyCount"`
+}
+
+// WebReauthRequest 是 POST /web/reauth 的请求体：Password 与 TOTPCode 二选一，
+// 都为空则回 400（「重新验证」必须真的验点什么）。
+type WebReauthRequest struct {
+	Password string `json:"password"`
+	TOTPCode string `json:"totpCode"`
+}
+
+// PasskeyFinishRequest 是 /webauthn/*/finish 的请求体：ceremonyId 是我们发的，
+// response 是浏览器原样回的 PublicKeyCredential JSON（透传给库解析）。
+type PasskeyFinishRequest struct {
+	CeremonyID int64           `json:"ceremonyId"`
+	Response   json.RawMessage `json:"response"`
+}
+
+// PasskeyRenameRequest 是 PATCH /api/passkeys/{id} 的请求体。
+type PasskeyRenameRequest struct {
+	Name string `json:"name"`
+}
+
+// CodeRequest 是 /api/totp/setup 之外三个 TOTP 写操作的统一请求体
+//（enable / disable / regenerate-recovery-codes 都只要一个码）。
+type CodeRequest struct {
+	Code string `json:"code"`
 }
 
 // ApiError 对应 ApiError：所有非 200 回执的统一响应体。
