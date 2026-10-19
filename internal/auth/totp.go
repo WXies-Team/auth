@@ -341,7 +341,7 @@ func (s *Service) DisableTOTP(c Caller, code string) (err error) {
 	if f == nil || !f.Enabled {
 		return badRequest("两步验证尚未开启")
 	}
-	used, err := s.consumeRecoveryCode(c.UID, code, c.Meta)
+	used, err := s.consumeRecoveryCode(c.UID, c.Email, code, c.Meta)
 	if err != nil {
 		return err
 	}
@@ -397,7 +397,7 @@ func (s *Service) RegenerateRecoveryCodes(c Caller, code string) (codes []string
 	if f == nil || !f.Enabled {
 		return nil, badRequest("两步验证尚未开启")
 	}
-	used, err := s.consumeRecoveryCode(c.UID, code, c.Meta)
+	used, err := s.consumeRecoveryCode(c.UID, c.Email, code, c.Meta)
 	if err != nil {
 		return nil, err
 	}
@@ -515,8 +515,9 @@ func (s *Service) verifyTOTPAt(secret, code string, lastStep int64) (int64, bool
 // 归一化在服务端做（去空格/连字符、大写）——手抄时多打个空格不该判错。
 //
 // 只有**命中**才落 recovery.consume 审计：拿乱码试的失败轮次已经在
-// login.fail 里计着，逐次记只会让表被爆破尝试灌满。
-func (s *Service) consumeRecoveryCode(uid int64, code string, meta SessionMeta) (bool, error) {
+// login.fail 里计着，逐次记只会让表被爆破尝试灌满。actor 带 uid 与掩码邮箱
+//（m5：恢复码消费是安全事件，审计行要能独立归因）。
+func (s *Service) consumeRecoveryCode(uid int64, email, code string, meta SessionMeta) (bool, error) {
 	norm := normalizeRecoveryCode(code)
 	if norm == "" {
 		return false, nil
@@ -534,7 +535,8 @@ func (s *Service) consumeRecoveryCode(uid int64, code string, meta SessionMeta) 
 	}
 	if n == 1 {
 		s.Audit(AuditEvent{
-			Action: AuditRecoveryUse, OK: true, ActorUID: uidPtr(uid), Meta: meta,
+			Action: AuditRecoveryUse, OK: true, ActorUID: uidPtr(uid),
+			ActorEmail: maskEmail(email), Meta: meta,
 		})
 	}
 	return n == 1, nil

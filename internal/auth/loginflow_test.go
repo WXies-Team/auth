@@ -147,6 +147,62 @@ func TestWebLoginSecondStep(t *testing.T) {
 	}
 }
 
+// m4 回归：第二步爆破可归因——WebLoginTOTP 失败路径的审计行必须带 st.uid 与
+// 掩码邮箱（旧实现失败时 res=nil，actor 全空，第二步被爆破查不到是谁的账号）。
+func TestWebLoginTOTPFailureCarriesActor(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "web-2fa-actor@example.com", "secret123")
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("取身份: %v", err)
+	}
+	setup, err := svc.SetupTOTP(c)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := svc.EnableTOTP(c, currentCode(t, setup.Secret)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	meta := SessionMeta{IP: "203.0.113.50", UserAgent: "Firefox"}
+
+	res, err := svc.WebLoginPassword("web-2fa-actor@example.com", "secret123", meta, "")
+	if err != nil || res.Status != "2fa_required" {
+		t.Fatalf("应进两步: %+v err=%v", res, err)
+	}
+	// 错码 → 失败审计应记 actor_uid 与掩码邮箱
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "000000", "", meta); err == nil {
+		t.Fatal("错码应失败")
+	}
+	var (
+		uid    int64
+		email  string
+		action string
+	)
+	if err := svc.pool.QueryRow(
+		"SELECT actor_uid, actor_email, action FROM audit_logs WHERE action = 'login.fail' ORDER BY id DESC LIMIT 1").
+		Scan(&uid, &email, &action); err != nil {
+		t.Fatalf("查失败审计: %v", err)
+	}
+	if uid != c.UID {
+		t.Errorf("失败审计 actor_uid 应为 %d，得到 %d", c.UID, uid)
+	}
+	if email != "w***@example.com" {
+		t.Errorf("失败审计 actor_email 应为掩码邮箱，得到 %q", email)
+	}
+	// 恢复码失败路同样归因
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "AAAA-BBBB-CCCC-DDDD", meta); err == nil {
+		t.Fatal("乱造恢复码应失败")
+	}
+	if err := svc.pool.QueryRow(
+		"SELECT actor_uid, actor_email FROM audit_logs WHERE action = 'login.fail' ORDER BY id DESC LIMIT 1").
+		Scan(&uid, &email); err != nil {
+		t.Fatalf("查恢复码失败审计: %v", err)
+	}
+	if uid != c.UID || email != "w***@example.com" {
+		t.Errorf("恢复码失败审计也应归因，得到 uid=%d email=%q", uid, email)
+	}
+}
+
 // 邮箱验证码登录：一路建到底、不叠 TOTP（邮件通道本身就是持有因子）。
 func TestWebLoginEmailCode(t *testing.T) {
 	svc, mailer := newTestService(t)

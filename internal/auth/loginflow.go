@@ -49,19 +49,12 @@ type WebLoginResult struct {
 	usedMethod string
 }
 
-// resUID / resEmail 从登录回执里取审计要用的身份（失败时回执为 nil → 匿名事件）。
+// resUID 从登录回执里取审计要用的 uid（失败时回执为 nil → 匿名事件）。
 func resUID(res *WebLoginResult) int64 {
 	if res == nil {
 		return 0
 	}
 	return res.UID
-}
-
-func resEmail(res *WebLoginResult, fallback string) string {
-	if res == nil {
-		return fallback
-	}
-	return res.Email
 }
 
 // normalizeLoginApp 是三条登录编排入口共用的 app 闸：空串 = web 流程（不签 JWT、
@@ -230,6 +223,10 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 	if strings.TrimSpace(recoveryCode) != "" {
 		method = "recovery"
 	}
+	// actor 在中间态揭开后即回填：失败路径（错码/乱码爆破第二步）同样要能
+	// 归因到 uid 与掩码邮箱——旧实现失败时 res=nil，审计 actor 全空
+	var actorUID int64
+	var actorEmail string
 	defer func() {
 		// 中间态本身过期/不存在：这不是「输错码」，不进登录失败统计
 		if err != nil && strings.Contains(err.Error(), "登录请求已过期") {
@@ -241,8 +238,8 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 			detail["app"] = res.App
 		}
 		s.Audit(AuditEvent{
-			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(resUID(res)),
-			ActorEmail: maskEmail(resEmail(res, "")), Meta: meta,
+			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(actorUID),
+			ActorEmail: actorEmail, Meta: meta,
 			Detail: detail,
 		})
 	}()
@@ -250,9 +247,17 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 	if err != nil {
 		return nil, err
 	}
+	actorUID = st.uid
+	// 邮箱查一次：审计 actor 的掩码底稿与后面 completeLogin 共用同一行查询
+	var email string
+	if err := s.pool.QueryRowContext(context.Background(),
+		"SELECT email FROM users WHERE id = ?", st.uid).Scan(&email); err != nil {
+		return nil, fmt.Errorf("查用户: %w", err)
+	}
+	actorEmail = maskEmail(email)
 	var ok bool
 	if rc := strings.TrimSpace(recoveryCode); rc != "" {
-		ok, err = s.consumeRecoveryCode(st.uid, rc, meta)
+		ok, err = s.consumeRecoveryCode(st.uid, email, rc, meta)
 		if err != nil {
 			return nil, err
 		}
@@ -270,11 +275,6 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 		return nil, badRequest("验证码错误，请重新输入")
 	}
 	s.burnLoginState(loginToken)
-	var email string
-	if err := s.pool.QueryRowContext(context.Background(), "SELECT email FROM users WHERE id = ?", st.uid).
-		Scan(&email); err != nil {
-		return nil, fmt.Errorf("查用户: %w", err)
-	}
 	res, err = s.completeLogin(st.uid, email, st.app, meta)
 	if err != nil {
 		return nil, err

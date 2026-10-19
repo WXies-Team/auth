@@ -133,7 +133,7 @@ func TestAuditDetailCarriesNoSecrets(t *testing.T) {
 		t.Fatalf("改密: %v", err)
 	}
 	// 用掉一个恢复码（recovery.consume 事件）
-	if ok, err := svc.consumeRecoveryCode(c.UID, codes[0], testMeta); err != nil || !ok {
+	if ok, err := svc.consumeRecoveryCode(c.UID, "audit-secret@example.com", codes[0], testMeta); err != nil || !ok {
 		t.Fatalf("消费恢复码: ok=%v err=%v", ok, err)
 	}
 	// 换发恢复码（recovery.generate 事件）
