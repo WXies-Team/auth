@@ -456,6 +456,58 @@ func TestChangePasswordByCode(t *testing.T) {
 	}
 }
 
+// 改绑邮箱后验证码改密必须还能走通：改绑刻意不 bump token_version，token 里的
+// email 停留旧值，而 SendChangeCode 把码发进**库里当前**邮箱——验码若按 token
+// claim 查库就恒「验证码已过期」（发与验必须同源取库中邮箱）。换发的新 token
+// 也要带新邮箱，旧值签回去下一轮还会再断一次。
+func TestChangePasswordByCodeAfterEmailChange(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "old2@example.com", "secret123")
+	caller, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("校验失败: %v", err)
+	}
+
+	// 改绑到新邮箱；现会话不吊销，caller 的 email claim 保持旧值
+	if err := svc.SendChangeEmailCode(caller, "new2@example.com"); err != nil {
+		t.Fatalf("改邮箱发码失败: %v", err)
+	}
+	if err := svc.ChangeEmail(caller, "secret123", "new2@example.com", codeIn(t, mailer)); err != nil {
+		t.Fatalf("改绑失败: %v", err)
+	}
+	if caller.Email != "old2@example.com" {
+		t.Fatalf("前置条件：caller 的 email claim 应仍是旧值，得到 %q", caller.Email)
+	}
+
+	// 改密码的码发进库里当前（新）邮箱
+	if err := svc.SendChangeCode(caller); err != nil {
+		t.Fatalf("发修改密码码失败: %v", err)
+	}
+	if mailer.to != "new2@example.com" {
+		t.Fatalf("改密码码应发进库里当前邮箱，得到 %q", mailer.to)
+	}
+	code := codeIn(t, mailer)
+
+	// 旧 token 直接提交验证码改密：改绑前这是必败场景（按旧邮箱验码恒「已过期」）
+	next, err := svc.ChangePasswordByCode(caller, code, "newsecret1")
+	if err != nil {
+		t.Fatalf("改绑后验证码改密应成功: %v", err)
+	}
+	if next.Email != "new2@example.com" {
+		t.Errorf("换发响应的 email 应是库里当前邮箱，得到 %q", next.Email)
+	}
+	claims, err := svc.parseToken(next.Token)
+	if err != nil {
+		t.Fatalf("解析新 token: %v", err)
+	}
+	if em, _ := claims["email"].(string); em != "new2@example.com" {
+		t.Errorf("新 token 的 email claim 应是新邮箱，得到 %q", em)
+	}
+	if _, err := svc.Login("new2@example.com", "newsecret1", "calorie-diary", testMeta); err != nil {
+		t.Errorf("新密码登录失败: %v", err)
+	}
+}
+
 // 注销：只删本服务数据（users 行 + 验证码行）；密码错什么都不删；
 // 原 token 随账号一起失效。
 func TestDeleteAccountRemovesData(t *testing.T) {

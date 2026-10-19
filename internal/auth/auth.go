@@ -920,23 +920,28 @@ func (s *Service) setPasswordAndRevoke(userID int64, newHash string) error {
 // reissueToken 读吊销后的新版本号并换发 token：当前设备拿它无缝续用，
 // 其他设备的旧 ver 已对不上（被登出的只会是它们）。aud 沿用调用方现会话的 app。
 //
+// 邮箱从**库**取而不是沿用 token claim：改绑邮箱不 bump token_version，走到这里的
+// token 其 email claim 可能还是旧值——把旧邮箱签回新 token，会让「验证码收与验
+// 同源」在下一轮改密时再次断开（改绑后验证码改密失败的另一半就在这里）。
+//
 // 旧会话行已由 setPasswordAndRevoke 同批吊销（token 层与会话层一起走），
 // 这里只给本设备建一行新会话，换发的 token 绑它。
 func (s *Service) reissueToken(c Caller) (*Response, error) {
 	var next int
+	var email string
 	if err := s.pool.QueryRowContext(context.Background(),
-		"SELECT token_version FROM users WHERE id = ?", c.UID).Scan(&next); err != nil {
+		"SELECT token_version, email FROM users WHERE id = ?", c.UID).Scan(&next, &email); err != nil {
 		return nil, fmt.Errorf("读新版本号: %w", err)
 	}
 	sid, err := s.createSession(c.UID, c.App, c.Meta)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := s.createToken(c.UID, c.Email, c.App, next, sid)
+	tok, err := s.createToken(c.UID, email, c.App, next, sid)
 	if err != nil {
 		return nil, err
 	}
-	return &Response{Token: tok, Email: c.Email}, nil
+	return &Response{Token: tok, Email: email}, nil
 }
 
 // ChangePassword 校验旧密码、改密并**顺带吊销**（版本 +1），返回新 token 让当前设备继续用。
@@ -971,7 +976,7 @@ func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (res
 	return s.reissueToken(c)
 }
 
-// ChangePasswordByCode 改密码的验证码版：码经 [SendChangeCode] 发进**token 绑定的
+// ChangePasswordByCode 改密码的验证码版：码经 [SendChangeCode] 发进**账号当前绑定的
 // 邮箱**，验证通过即改密并 token_version+1 吊销其他设备；当前设备拿返回的新 token
 // 无缝续用（与 ChangePassword 同一契约）。
 // 强度校验放在验码之前：先拒弱密码、不白烧一次码的试错次数。
@@ -986,7 +991,14 @@ func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (resp
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
 	}
-	if err := s.otps.verify(PurposeChange, c.Email, code); err != nil {
+	// 收与验都锚定 **uid 查库的当前邮箱**，不用 token claim：改绑邮箱不 bump
+	// token_version，token 里的 email 停留旧值，而 SendChangeCode 的码是发进库里
+	// 当前邮箱的——按 claim 验码会把「新邮箱收到的码」恒判成「验证码已过期」。
+	email, _, err := s.loadUserAuth(c.UID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.otps.verify(PurposeChange, email, code); err != nil {
 		return nil, err
 	}
 	newHash, err := hash(newPassword)
