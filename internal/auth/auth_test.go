@@ -65,6 +65,8 @@ func newTestService(t *testing.T) (*Service, *recordMailer) {
 		}
 	}
 	m := &recordMailer{}
+	// TOTP 加密密钥按生产同款拒启口径（NewService 缺它直接报错），测试给固定 32 字节
+	t.Setenv("TOTP_ENC_KEY", strings.Repeat("k", 32))
 	// 钩子接上但三键全缺：真库注销用例正是「键不存在 → 跳过」的形态（见 Hooks），
 	// 这样跑的不是一条生产里不存在的 nil 分支
 	svc, err := NewService(pool, testSecret, m, NewHooks(func(string) (string, error) { return "", nil }))

@@ -124,14 +124,30 @@ type Service struct {
 	otps   *otpStore
 	mailer Mailer
 	hooks  *Hooks
+	// totpKey 是 TOTP secret 的 AES-256-GCM 密钥（TOTP_ENC_KEY，≥32 字节拒启）；
+	// recoveryPepper 是恢复码 HMAC 的密钥，由 JWT_SECRET 域分隔派生——同一根密钥
+	// 派两把子密钥，一把出事不牵连另一把。
+	totpKey       []byte
+	recoveryPepper []byte
 }
 
+// NewService 组装服务。除 JWT 密钥外还要求 TOTP_ENC_KEY 就位：TOTP secret 必须存
+// 原值（验证要用），没有可用加密密钥时上线只会埋一颗「绑了却验不了」的雷，
+// 与 JWT_SECRET 短于 32 字节同款拒启口径。
 func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks) (*Service, error) {
 	node, err := snowflake.NewNode(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("初始化雪花节点: %w", err)
 	}
-	return &Service{pool: pool, secret: jwtSecret, ids: node, otps: &otpStore{pool: pool}, mailer: mailer, hooks: hooks}, nil
+	totpKey, err := requireTOTPEncKey()
+	if err != nil {
+		return nil, err
+	}
+	return &Service{
+		pool: pool, secret: jwtSecret, ids: node, otps: &otpStore{pool: pool},
+		mailer: mailer, hooks: hooks,
+		totpKey: totpKey, recoveryPepper: deriveRecoveryPepper(jwtSecret),
+	}, nil
 }
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
