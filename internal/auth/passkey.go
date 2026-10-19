@@ -71,6 +71,9 @@ func NewWebAuthn(opaqueOrigins []string) (*webauthn.WebAuthn, error) {
 			Registration: webauthn.TimeoutConfig{Enforce: true},
 		},
 	}
+	// Related Origin Requests 在这里留位、**不启用**：RP ID 是 horatio.cn，
+	// 所有 *.horatio.cn 天然同源，ROR 只在出现第二个注册域（如 horatio.com）时
+	// 才需要——到那时给 cfg 加 RelatedOrigins 并在根域挂 /.well-known/webauthn。
 	return webauthn.New(cfg)
 }
 

@@ -75,11 +75,11 @@ type AIUsageSubject struct {
 	Count   int    `json:"count"`
 }
 
-// AIUsageDay 是一天的聚合。
+// AIUsageDay 是一天的聚合（字段名对齐规格 A2.5：单日 Top10 记 byUserTop10）。
 type AIUsageDay struct {
 	Day       string           `json:"day"`
 	Total     int              `json:"total"`
-	ByUserTop []AIUsageSubject `json:"byUserTop"`
+	ByUserTop []AIUsageSubject `json:"byUserTop10"`
 }
 
 // AIQuota 是四档限额的当前值与「是否来自配置」。
