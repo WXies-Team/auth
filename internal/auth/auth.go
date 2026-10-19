@@ -885,7 +885,7 @@ func (s *Service) loadUserAuth(userID int64) (email, hashed string, err error) {
 	err = s.pool.QueryRowContext(context.Background(),
 		"SELECT email, password_hash FROM users WHERE id = ?", userID).Scan(&email, &h)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", unauthorized("")
+		return "", "", unauthorized("登录已过期，请重新登录")
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("查用户: %w", err)
@@ -1107,7 +1107,7 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 	err := s.pool.QueryRowContext(context.Background(),
 		"SELECT email, password_hash FROM users WHERE id = ?", userID).Scan(&email, &hashed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return unauthorized("")
+		return unauthorized("登录已过期，请重新登录")
 	}
 	if err != nil {
 		return fmt.Errorf("查用户: %w", err)
