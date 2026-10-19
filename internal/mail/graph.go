@@ -12,9 +12,10 @@
 // **发信身份**：`/users/{upn}` 必须填主邮箱 UPN——别名填进去会得到
 // `ErrorInvalidUser`（实测）。
 //
-// **发件人显示名不在这里定**：`message.from.name` 会被 Exchange 覆盖成邮箱对象的
-// DisplayName（微软官方口径，实测 202 但显示名照旧），所以 payload 里**不带 from**
-// ——想让收件人看到账号服务的名字，去把邮箱的 DisplayName 改成它（M365 管理中心 /
+// **发件人显示名随信取品牌**：payload 带 `message.from`，地址恒为 sender、Name 是
+// 这封信的品牌名（热量日记 / 开支日记 / Auth），与正文品牌同源。
+// 历史实测（2026-10-08，热量日记服务）Exchange 会把显示名覆盖成邮箱对象的
+// DisplayName：若收件箱仍显示旧名，兜底办法是改邮箱 DisplayName（M365 管理中心 /
 // `Set-Mailbox -DisplayName`），改完即生效。
 package mail
 
@@ -85,7 +86,15 @@ type recipient struct {
 	EmailAddress emailAddress `json:"emailAddress"`
 }
 
+// fromAddress 是 message.from：地址恒为常量 sender，Name 是这封信的品牌名
+// （品牌注册表在 auth 包，这里只按入参落字段）。
+type fromAddress struct {
+	Address string `json:"address"`
+	Name    string `json:"name"`
+}
+
 type message struct {
+	From         fromAddress `json:"from"`
 	Subject      string      `json:"subject"`
 	Body         body        `json:"body"`
 	ToRecipients []recipient `json:"toRecipients"`
@@ -101,7 +110,8 @@ type sendMailRequest struct {
 	SaveToSentItems bool    `json:"saveToSentItems"`
 }
 
-// Send 发一封 HTML 邮件。成功 = Graph 回 202（已接受；投递仍受 Exchange 限流约束，
+// Send 发一封 HTML 邮件。fromName 是发件人显示名（品牌名），落到 message.from.name；
+// 成功 = Graph 回 202（已接受；投递仍受 Exchange 限流约束，
 // 微软官方口径：sendMail 成功返回 202 Accepted、响应体为空）。
 // 失败返回带状态码与响应体片段的错误——只进服务端日志，客户端只看到白话。
 //
@@ -109,7 +119,7 @@ type sendMailRequest struct {
 // 而发码本身有 60 秒冷却与每 IP 5 次/分的闸，重试省不下用户等待、还多一份
 // 与「202 但带 Retry-After」撞出重复投递的风险——失败就把码撤销回 503，
 // 让用户手动重发，是最短也最安全的路径。
-func (s *Sender) Send(ctx context.Context, to, subject, html string) error {
+func (s *Sender) Send(ctx context.Context, fromName, to, subject, html string) error {
 	// 凭据现读（app_config，10s 缺省缓存）：改库即热生效，缺键直接不出网。
 	tenantID, clientID, secret := s.cfg("mail_tenant_id"), s.cfg("mail_client_id"), s.cfg("mail_client_secret")
 	if tenantID == "" || clientID == "" || secret == "" {
@@ -141,6 +151,7 @@ func (s *Sender) Send(ctx context.Context, to, subject, html string) error {
 		return fmt.Errorf("取 Graph 访问令牌: %w", err)
 	}
 	m := message{
+		From:         fromAddress{Address: sender, Name: fromName},
 		Subject:      subject,
 		Body:         body{ContentType: "HTML", Content: html},
 		ToRecipients: []recipient{{EmailAddress: emailAddress{Address: to}}},

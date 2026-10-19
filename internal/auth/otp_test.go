@@ -100,8 +100,8 @@ func TestMaskEmail(t *testing.T) {
 // 邮件模板的硬约束：验证码与有效期在正文里、深色模式覆盖在、
 // 不过 AA 的低对比度灰（#8a8a8e≈3.6:1 / #a1a1a6≈2.6:1）不许出现。
 func TestCodeEmailTemplateKeepsContract(t *testing.T) {
-	subject, html := codeEmail("注册", "123456")
-	if subject != "【Horatio 账号】注册验证码" {
+	subject, html := codeEmail(brandFor(""), "注册", "123456")
+	if subject != "【Auth】注册验证码" {
 		t.Errorf("主题格式变了: %q", subject)
 	}
 	for _, want := range []string{"123456", "5 分钟内有效", "prefers-color-scheme",
@@ -120,8 +120,8 @@ func TestCodeEmailTemplateKeepsContract(t *testing.T) {
 // 改绑邮箱的通知信（旧/新各一封）：主题与正文说清发生了什么 + 非本人操作的下一步；
 // 邮箱进正文前必须转义（正则不拦 <>）。
 func TestChangeEmailNoticeEmail(t *testing.T) {
-	subject, body := changeEmailNoticeEmail(false, "old@example.com", "new@example.com")
-	if subject != "【Horatio 账号】绑定邮箱已更换" {
+	subject, body := changeEmailNoticeEmail(brandFor(""), false, "old@example.com", "new@example.com")
+	if subject != "【Auth】绑定邮箱已更换" {
 		t.Errorf("旧邮箱信主题变了: %q", subject)
 	}
 	for _, want := range []string{"old@example.com", "new@example.com", "绑定邮箱已更换",
@@ -131,8 +131,8 @@ func TestChangeEmailNoticeEmail(t *testing.T) {
 		}
 	}
 
-	subject, body = changeEmailNoticeEmail(true, "old@example.com", "new@example.com")
-	if subject != "【Horatio 账号】新邮箱已绑定" {
+	subject, body = changeEmailNoticeEmail(brandFor(""), true, "old@example.com", "new@example.com")
+	if subject != "【Auth】新邮箱已绑定" {
 		t.Errorf("新邮箱信主题变了: %q", subject)
 	}
 	for _, want := range []string{"new@example.com", "新邮箱已绑定", "验证码会发到这里"} {
@@ -142,7 +142,7 @@ func TestChangeEmailNoticeEmail(t *testing.T) {
 	}
 
 	// 注入面：邮箱里的 < > 必须被转义，不能原样进 HTML
-	_, body = changeEmailNoticeEmail(true, `a<b>@x.com`, "n@y.com")
+	_, body = changeEmailNoticeEmail(brandFor(""), true, `a<b>@x.com`, "n@y.com")
 	if strings.Contains(body, "<b>") || !strings.Contains(body, "&lt;b&gt;") {
 		t.Errorf("邮箱未转义，存在 HTML 注入面: %s", body)
 	}

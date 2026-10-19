@@ -88,9 +88,10 @@ type Response struct {
 }
 
 // Mailer 是发信能力的最小接口：生产用 internal/mail 的 Graph 实现，测试注入假实现
-//（这样真库测试不会往外真发信）。
+// （这样真库测试不会往外真发信）。fromName 是这封信的发件人显示名（品牌名，见
+// brandFor）——与正文品牌同源取值，分头各传一套必然漂。
 type Mailer interface {
-	Send(ctx context.Context, to, subject, html string) error
+	Send(ctx context.Context, fromName, to, subject, html string) error
 }
 
 // Caller 是已验签会话的身份信息：路由层验完放进 context，业务层直接用——
@@ -495,9 +496,18 @@ func (s *Service) Login(rawEmail, password, app string) (*Response, error) {
 
 // SendCode 发送「注册 / 找回密码 / 登录」验证码。purpose 走白名单。
 //
+// app 可选：给了就决定这封验证码邮件的品牌（空 = 中性品牌 Auth，留给将来的 web
+// 账号台），未知值 400——与登录等端点同口径，老客户端不传照常工作。
+//
 // **不额外做防枚举是有意的**：注册侧本就对所有请求回「该邮箱已注册」（既有行为），
 // 同一信息在找回侧保持沉默换不来任何防护，只换来「等 60 秒却收不到信」的困惑。
-func (s *Service) SendCode(rawEmail, purpose string) error {
+func (s *Service) SendCode(rawEmail, purpose, app string) error {
+	// app 是客户端 bug 的第一现场，先于邮箱/用途校验回 400（与 Login 的顺序一致）
+	if app != "" {
+		if err := validateApp(app); err != nil {
+			return err
+		}
+	}
 	email := normalizeEmail(rawEmail)
 	if err := validateEmail(email); err != nil {
 		return err
@@ -529,12 +539,12 @@ func (s *Service) SendCode(rawEmail, purpose string) error {
 	case PurposeLogin:
 		action = "登录"
 	}
-	return s.sendOTP(purpose, email, action)
+	return s.sendOTP(purpose, email, action, app)
 }
 
 // sendOTP 公共发码尾段：占坑（issue，冷却与日限额在**发信之前**就挡）→ 投信 →
-// 信没发出去回滚。注册 / 找回密码 / 修改密码三条发码路共用。
-func (s *Service) sendOTP(purpose, email, action string) error {
+// 信没发出去回滚。注册 / 找回密码 / 修改密码三条发码路共用；app 只用来选邮件品牌。
+func (s *Service) sendOTP(purpose, email, action, app string) error {
 	if s.mailer == nil {
 		return &HTTPError{503, "邮件服务暂不可用，请稍后重试"}
 	}
@@ -542,9 +552,10 @@ func (s *Service) sendOTP(purpose, email, action string) error {
 	if err != nil {
 		return err
 	}
-	subject, html := codeEmail(action, code)
+	b := brandFor(app)
+	subject, html := codeEmail(b, action, code)
 	// 不接请求 ctx：发送器自带 15s 超时（含取 token 一次往返），不会把 handler 拖成悬挂
-	if err := s.mailer.Send(context.Background(), email, subject, html); err != nil {
+	if err := s.mailer.Send(context.Background(), b.name, email, subject, html); err != nil {
 		// 码已生成但信没发出去：撤销，否则用户要白等 60 秒冷却
 		s.otps.revoke(purpose, email)
 		mailLog(err, purpose, email)
@@ -556,20 +567,20 @@ func (s *Service) sendOTP(purpose, email, action string) error {
 // SendChangeCode 给**登录用户绑定的邮箱**发「修改密码」验证码。
 // 收件人只能来自 uid 查库——不像无登录态的 SendCode 收客户端传入的邮箱，
 // 改密码码发错人等于把改密权交给收件人列表。
-func (s *Service) SendChangeCode(userID int64) error {
-	email, _, err := s.loadUserAuth(userID)
+func (s *Service) SendChangeCode(c Caller) error {
+	email, _, err := s.loadUserAuth(c.UID)
 	if err != nil {
 		return err
 	}
-	return s.sendOTP(PurposeChange, email, "修改密码")
+	return s.sendOTP(PurposeChange, email, "修改密码", c.App)
 }
 
 // SendChangeEmailCode 给**新**邮箱发「修改邮箱」验证码。收件人是客户端传入的新邮箱，
 // 所以四道闸：登录态（路由 authed）、按 uid 限流（路由）、格式/查重/同邮箱（这里）、
 // 发码冷却与日限（otp store）。查重放在投信之前：拿一个已被占用的邮箱先烧一封信、
-// 走完整个流程最后一步才报错更糟。
-func (s *Service) SendChangeEmailCode(userID int64, rawEmail string) error {
-	current, _, err := s.loadUserAuth(userID)
+// 走完整个流程最后一步才报错更糟。品牌取自现会话的 app（改绑通知同源）。
+func (s *Service) SendChangeEmailCode(c Caller, rawEmail string) error {
+	current, _, err := s.loadUserAuth(c.UID)
 	if err != nil {
 		return err
 	}
@@ -587,7 +598,7 @@ func (s *Service) SendChangeEmailCode(userID int64, rawEmail string) error {
 	if exists {
 		return badRequest("该邮箱已被其他账号使用")
 	}
-	return s.sendOTP(PurposeChangeEmail, email, "修改邮箱")
+	return s.sendOTP(PurposeChangeEmail, email, "修改邮箱", c.App)
 }
 
 // LoginByEmailCode 用邮箱验证码登录：与 Login 同款成功响应（token + email）。
@@ -760,12 +771,13 @@ func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (*Res
 //
 // **不 bump token_version**：改邮箱不是凭证变更，现会话保持登录（与改密相反）。
 // 通知信失败只记日志——信没发出去不该把已经完成的改绑回滚成 500。
-func (s *Service) ChangeEmail(userID int64, password, rawEmail, code string) error {
+// 码信与两封通知信的品牌都取现会话的 app（见 brandFor），三封信同源不漂。
+func (s *Service) ChangeEmail(c Caller, password, rawEmail, code string) error {
 	email := normalizeEmail(rawEmail)
 	if err := validateEmail(email); err != nil {
 		return err
 	}
-	current, hashed, err := s.loadUserAuth(userID)
+	current, hashed, err := s.loadUserAuth(c.UID)
 	if err != nil {
 		return err
 	}
@@ -789,7 +801,7 @@ func (s *Service) ChangeEmail(userID int64, password, rawEmail, code string) err
 		return err
 	}
 	if _, err := s.pool.ExecContext(context.Background(),
-		"UPDATE users SET email = ? WHERE id = ?", email, userID); err != nil {
+		"UPDATE users SET email = ? WHERE id = ?", email, c.UID); err != nil {
 		// 并发下另一个账号先占了这个邮箱：uq_users_email 挡住，翻译成同一句人话
 		var me *mysql.MySQLError
 		if errors.As(err, &me) && me.Number == 1062 {
@@ -797,22 +809,24 @@ func (s *Service) ChangeEmail(userID int64, password, rawEmail, code string) err
 		}
 		return fmt.Errorf("改绑邮箱: %w", err)
 	}
-	s.notifyEmailChanged(current, email)
+	s.notifyEmailChanged(c.App, current, email)
 	return nil
 }
 
 // notifyEmailChanged 改绑后的两封通知信（旧、新邮箱各一封）：只报事实与「非本人怎么办」。
-// 失败只记日志（邮箱脱敏）——通知是附带动作，不参与改绑成败。
-func (s *Service) notifyEmailChanged(oldEmail, newEmail string) {
+// 失败只记日志（邮箱脱敏）——通知是附带动作，不参与改绑成败。品牌由 app 现取
+// （与同批的改密码码信同源）。
+func (s *Service) notifyEmailChanged(app, oldEmail, newEmail string) {
 	if s.mailer == nil {
 		return
 	}
+	b := brandFor(app)
 	for _, to := range []struct {
 		addr  string
 		toNew bool
 	}{{oldEmail, false}, {newEmail, true}} {
-		subject, body := changeEmailNoticeEmail(to.toNew, oldEmail, newEmail)
-		if err := s.mailer.Send(context.Background(), to.addr, subject, body); err != nil {
+		subject, body := changeEmailNoticeEmail(b, to.toNew, oldEmail, newEmail)
+		if err := s.mailer.Send(context.Background(), b.name, to.addr, subject, body); err != nil {
 			mailLog(err, "email_change_notice", to.addr)
 		}
 	}

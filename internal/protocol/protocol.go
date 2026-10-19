@@ -22,9 +22,14 @@ type AuthRequest struct {
 
 // SendCodeRequest 对应 SendCodeRequest。Purpose 取 auth.PurposeRegister /
 // PurposeReset / PurposeLogin（客户端 CodePurpose 三值，服务端白名单同集，其余回 400）。
+//
+// App 是本服务新增的**可选**字段：决定这封验证码邮件的品牌（空白 = 中性品牌 Auth，
+// 预留给将来的 web 账号台；给了就必须在 calorie-diary / expense-diary 白名单，未知值 400）。
+// 老客户端不传照常工作——可选字段加进来不会让它们挂掉。
 type SendCodeRequest struct {
 	Email   string `json:"email"`
 	Purpose string `json:"purpose"`
+	App     string `json:"app"`
 }
 
 // ResetPasswordRequest 对应 ResetPasswordRequest。

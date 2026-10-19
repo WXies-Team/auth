@@ -4,21 +4,73 @@ import (
 	"html"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 )
 
-// 邮件模板。品牌用中性的「Horatio 账号」而不是某个 App 的名字：本服务是统一账号
-// 服务，/auth/send-code 的请求体里也没有 app 字段可分流，按 App 品牌发信做不到
-// 也不该在这里做（要做是 P2 按 aud 分品牌的事）。结构照行业模板（与热量日记服务
-// 同一套外壳）：深色模式、表格布局、全内联样式、AA 对比度、≥15px 字阶。
+// 邮件模板：**结构一套、品牌按 app 换**。本服务统一为两个日记签发验证码与改绑通知，
+// 收件人看到的应是自己在用的那个 App 的名字——主题前缀、头部行、警示句、落款
+// 与发件人显示名都取自下面的品牌注册表；缺省或空 app 用中性品牌 Auth
+//（统一账号服务不借任何 App 的名头，也是将来 web 账号台的默认品牌）。
+// 结构照行业模板（与热量日记服务同一套外壳）：深色模式、表格布局、全内联样式、
+// AA 对比度、≥15px 字阶。
+
+// brand 是一个品牌的全部可换串：外壳共用，换品牌就是换这几个字段。
+type brand struct {
+	name   string // 品牌名：头部行、警示句、发件人显示名（热量日记 / 开支日记 / Auth）
+	latin  string // 落款第二段：App 拉丁名或域名（CalorieDiary / ExpenseDiary / auth.horatio.cn）
+	footer string // 落款整串，形如「<name> <latin>」
+	prefix string // 主题前缀，如 「【热量日记】」
+	// account 是改绑通知里的属格串。中文品牌直接相接（热量日记账号）；中性品牌按
+	// 作者定案用「账户」且拉丁名前留一个空格（" Auth 账户"）——中英混排的空格只在这里
+	// 与 join 出现，模板不再逐处手写。
+	account string
+}
+
+// brands 品牌注册表：键与 JWT aud 白名单（allowedApps）同集，两处一起加。
+var brands = map[string]brand{
+	"calorie-diary": {
+		name: "热量日记", latin: "CalorieDiary", footer: "热量日记 CalorieDiary",
+		prefix: "【热量日记】", account: "热量日记账号",
+	},
+	"expense-diary": {
+		name: "开支日记", latin: "ExpenseDiary", footer: "开支日记 ExpenseDiary",
+		prefix: "【开支日记】", account: "开支日记账号",
+	},
+}
+
+// neutralBrand 是缺省品牌 Auth：SendCodeRequest.app 没给（web 账号台口径）与所有
+// 拿不到 app 的发信场合都用它。
+var neutralBrand = brand{
+	name: "Auth", latin: "auth.horatio.cn", footer: "Auth auth.horatio.cn",
+	prefix: "【Auth】", account: " Auth 账户",
+}
+
+// brandFor 按 app 取品牌，空与未知都回 Auth：非法 app 在上游已被 validateApp 挡成
+// 400（或来自 JWT aud 白名单），这里不重复报错，兜底中性品牌最稳。
+func brandFor(app string) brand {
+	if b, ok := brands[app]; ok {
+		return b
+	}
+	return neutralBrand
+}
+
+// join 把品牌名与后接的中文连起来：拉丁名（Auth）补一个空格，中文名不补。
+// 中英混排的空格规则集中在这里，模板不逐处手写。
+func (b brand) join(zh string) string {
+	if b.name != "" && b.name[0] < utf8.RuneSelf {
+		return b.name + " " + zh
+	}
+	return b.name + zh
+}
 
 // codeEmail 拼验证码信的主题与正文：场景标题 → 一句话说明 → 大号验证码 + 有效期
 // → 「非本人请忽略 + 别告诉任何人」→ 落款。
 //
 // action 只会是「注册 / 找回密码 / 修改密码 / 登录 / 修改邮箱」五个字面量之一
 //（由 purpose 分流，不来自用户输入），code 只含数字——两处都没有 HTML 注入面。
-func codeEmail(action, code string) (subject, html string) {
-	subject = "【Horatio 账号】" + action + "验证码"
-	inner := `            <p class="muted" style="` + emailFont + `margin:0 0 16px;font-size:15px;line-height:1.5;color:#6e6e73;">Horatio 账号 &middot; 邮箱验证</p>
+func codeEmail(b brand, action, code string) (subject, html string) {
+	subject = b.prefix + action + "验证码"
+	inner := `            <p class="muted" style="` + emailFont + `margin:0 0 16px;font-size:15px;line-height:1.5;color:#6e6e73;">` + b.name + ` &middot; 邮箱验证</p>
             <h1 class="h1" style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:600;line-height:1.4;color:#1c1c1e;">` + action + `验证码</h1>
             <p class="lead" style="` + emailFont + `margin:0 0 24px;font-size:16px;line-height:1.6;color:#1c1c1e;">在应用里输入下面的验证码，继续` + action + `。</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="codebox" style="width:100%;background-color:#f2f2f7;border:1px solid #e5e5ea;border-radius:12px;">
@@ -31,34 +83,34 @@ func codeEmail(action, code string) (subject, html string) {
             </table>
             <hr class="hr" style="border:0;border-top:1px solid #e5e5ea;margin:24px 0 16px;">
             <p class="muted" style="` + emailFont + `margin:0 0 8px;font-size:15px;line-height:1.6;color:#6e6e73;">不是你操作？忽略这封邮件即可，账号不会有任何变化。</p>
-            <p class="muted" style="` + emailFont + `margin:0 0 20px;font-size:15px;line-height:1.6;color:#6e6e73;">Horatio 账号不会向你索要验证码，也别把它告诉他人。</p>
-            <p class="foot" style="` + emailFont + `margin:0;font-size:15px;color:#6e6e73;">Horatio 账号 auth.horatio.cn</p>`
+            <p class="muted" style="` + emailFont + `margin:0 0 20px;font-size:15px;line-height:1.6;color:#6e6e73;">` + b.join("不会向你索要验证码，也别把它告诉他人。") + `</p>
+            <p class="foot" style="` + emailFont + `margin:0;font-size:15px;color:#6e6e73;">` + b.footer + `</p>`
 	return subject, emailShell(inner)
 }
 
 // changeEmailNoticeEmail 改绑邮箱后的通知信（旧、新邮箱各一封）：说清「哪个邮箱变成了
 // 什么」，再给非本人操作时的下一步——两句一事，不做多余解释。
 // 邮箱进正文前先 html.EscapeString：validateEmail 的正则不拦 `<>&`，不转义就是注入面。
-func changeEmailNoticeEmail(toNew bool, oldEmail, newEmail string) (subject, body string) {
+func changeEmailNoticeEmail(b brand, toNew bool, oldEmail, newEmail string) (subject, body string) {
 	oldE, newE := html.EscapeString(oldEmail), html.EscapeString(newEmail)
 	var title, lead, next string
 	if toNew {
-		subject = "【Horatio 账号】新邮箱已绑定"
+		subject = b.prefix + "新邮箱已绑定"
 		title = "新邮箱已绑定"
-		lead = newE + " 已成为 Horatio 账号的绑定邮箱（原绑定邮箱 " + oldE + "），该账号的验证码会发到这里。"
+		lead = newE + " 已成为" + b.account + "的绑定邮箱（原绑定邮箱 " + oldE + "），该账号的验证码会发到这里。"
 		next = "不是你操作？请立刻让账号主人把邮箱改回去。"
 	} else {
-		subject = "【Horatio 账号】绑定邮箱已更换"
+		subject = b.prefix + "绑定邮箱已更换"
 		title = "绑定邮箱已更换"
 		lead = "你的账号绑定邮箱已由 " + oldE + " 改为 " + newE + "。"
 		next = "不是你操作？请立刻用「找回密码」重置密码。"
 	}
-	inner := `            <p class="muted" style="` + emailFont + `margin:0 0 16px;font-size:15px;line-height:1.5;color:#6e6e73;">Horatio 账号 &middot; 账号安全</p>
+	inner := `            <p class="muted" style="` + emailFont + `margin:0 0 16px;font-size:15px;line-height:1.5;color:#6e6e73;">` + b.name + ` &middot; 账号安全</p>
             <h1 class="h1" style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:600;line-height:1.4;color:#1c1c1e;">` + title + `</h1>
             <p class="lead" style="` + emailFont + `margin:0 0 24px;font-size:16px;line-height:1.6;color:#1c1c1e;">` + lead + `</p>
             <hr class="hr" style="border:0;border-top:1px solid #e5e5ea;margin:0 0 16px;">
             <p class="muted" style="` + emailFont + `margin:0 0 20px;font-size:15px;line-height:1.6;color:#6e6e73;">` + next + `</p>
-            <p class="foot" style="` + emailFont + `margin:0;font-size:15px;color:#6e6e73;">Horatio 账号 auth.horatio.cn</p>`
+            <p class="foot" style="` + emailFont + `margin:0;font-size:15px;color:#6e6e73;">` + b.footer + `</p>`
 	return subject, emailShell(inner)
 }
 

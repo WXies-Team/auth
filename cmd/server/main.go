@@ -109,8 +109,10 @@ func main() {
 		resp, err := authSvc.Register(r.Email, r.Password, r.Code, r.App)
 		writeResult(w, resp, err)
 	}))))
+	// send-code 的 app 是可选字段：只决定这封验证码邮件的品牌（空白 = 中性品牌
+	// Auth，未知值 400），不参与限流与验证码语义。
 	mux.Handle("POST /auth/send-code", withLogging(limitN("send-code", 5, jsonBody[protocol.SendCodeRequest](func(r *protocol.SendCodeRequest, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"sent": true}, authSvc.SendCode(r.Email, r.Purpose))
+		writeResult(w, map[string]bool{"sent": true}, authSvc.SendCode(r.Email, r.Purpose, r.App))
 	}))))
 	mux.Handle("POST /auth/reset-password", withLogging(limitN("reset-password", 5, jsonBody[protocol.ResetPasswordRequest](func(r *protocol.ResetPasswordRequest, w http.ResponseWriter, _ *http.Request) {
 		writeResult(w, map[string]bool{"ok": true}, authSvc.ResetPassword(r.Email, r.Code, r.Password))
@@ -162,7 +164,7 @@ func main() {
 	// 改密码码只能发进账号本人的绑定邮箱。限流按 uid（authedLimited），
 	// 码本身的冷却、日限额、5 次错即作废在 auth 包内。
 	mux.Handle("POST /auth/send-change-code", authedLimited("send-change-code", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeCode(c.UID))
+		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeCode(c))
 	}))
 	mux.Handle("POST /auth/change-password-code", authedLimited("change-password-code", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.ChangePasswordCodeRequest
@@ -181,14 +183,14 @@ func main() {
 		if !decodeOr400(w, r, &req) {
 			return
 		}
-		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeEmailCode(c.UID, req.Email))
+		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeEmailCode(c, req.Email))
 	}))
 	mux.Handle("POST /auth/change-email", authedLimited("change-email", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.ChangeEmailRequest
 		if !decodeOr400(w, r, &req) {
 			return
 		}
-		writeResult(w, map[string]bool{"ok": true}, authSvc.ChangeEmail(c.UID, req.Password, req.Email, req.Code))
+		writeResult(w, map[string]bool{"ok": true}, authSvc.ChangeEmail(c, req.Password, req.Email, req.Code))
 	}))
 	mux.Handle("POST /auth/delete", authedLimited("delete-account", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.DeleteAccountRequest

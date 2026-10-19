@@ -20,18 +20,19 @@ import (
 const testSecret = "test-secret-do-not-use-in-prod-0123456789"
 
 // recordMailer 记住最后一封信：真库测试**绝不能真发信**，但「验证码确实进了邮件正文」
-// 这条链要验到——所以从正文里把码抠出来继续走注册。
-// sent 留全量（改邮箱要断言新旧两封通知信都在，只留最后一封看不到旧邮箱那封）。
-type mailRec struct{ to, subject, html string }
+// 这条链要验到——所以从正文里把码抠出来继续走注册。from 记下发件人显示名（品牌），
+// 「正文品牌与 From 同源」这条链靠它验。sent 留全量（改邮箱要断言新旧两封通知信都在，
+// 只留最后一封看不到旧邮箱那封）。
+type mailRec struct{ to, from, subject, html string }
 
 type recordMailer struct {
-	to, subject, html string
-	sent              []mailRec
+	to, from, subject, html string
+	sent                    []mailRec
 }
 
-func (m *recordMailer) Send(_ context.Context, to, subject, html string) error {
-	m.to, m.subject, m.html = to, subject, html
-	m.sent = append(m.sent, mailRec{to, subject, html})
+func (m *recordMailer) Send(_ context.Context, from, to, subject, html string) error {
+	m.from, m.to, m.subject, m.html = from, to, subject, html
+	m.sent = append(m.sent, mailRec{to, from, subject, html})
 	return nil
 }
 
@@ -68,10 +69,11 @@ func newTestService(t *testing.T) (*Service, *recordMailer) {
 }
 
 // registerViaCode 走真实链路：发码 → 从邮件正文取码 → 注册。
-// 绕过发码直接塞一个码进去，测的就不是注册流程了。
+// 绕过发码直接塞一个码进去，测的就不是注册流程了。app 与注册声明的一致
+// （calorie-diary）：码信品牌与会话 aud 同源，正是生产的取值路径。
 func registerViaCode(t *testing.T, svc *Service, m *recordMailer, email, password string) *Response {
 	t.Helper()
-	if err := svc.SendCode(email, PurposeRegister); err != nil {
+	if err := svc.SendCode(email, PurposeRegister, "calorie-diary"); err != nil {
 		t.Fatalf("发码失败: %v", err)
 	}
 	code := codeIn(t, m)
@@ -386,7 +388,7 @@ func TestChangePasswordByCode(t *testing.T) {
 	}
 
 	// 收件人必须是 token 绑定的邮箱，主题必须是修改密码场景
-	if err := svc.SendChangeCode(caller.UID); err != nil {
+	if err := svc.SendChangeCode(caller); err != nil {
 		t.Fatalf("发码失败: %v", err)
 	}
 	if mailer.to != "chg@example.com" {
@@ -502,14 +504,14 @@ func TestResetPasswordRevokesSessions(t *testing.T) {
 	reg := registerViaCode(t, svc, mailer, "reset@example.com", "secret123")
 
 	// 用途分流：未注册邮箱不给找回码、已注册邮箱不给注册码（文案都直白）
-	if err := svc.SendCode("nobody@example.com", PurposeReset); err == nil {
+	if err := svc.SendCode("nobody@example.com", PurposeReset, "calorie-diary"); err == nil {
 		t.Error("未注册邮箱发找回码应被拒")
 	}
-	if err := svc.SendCode("reset@example.com", PurposeRegister); err == nil {
+	if err := svc.SendCode("reset@example.com", PurposeRegister, "calorie-diary"); err == nil {
 		t.Error("已注册邮箱不该再收到注册码")
 	}
 
-	if err := svc.SendCode("reset@example.com", PurposeReset); err != nil {
+	if err := svc.SendCode("reset@example.com", PurposeReset, "calorie-diary"); err != nil {
 		t.Fatalf("发码失败: %v", err)
 	}
 	if mailer.to != "reset@example.com" {
@@ -553,7 +555,9 @@ func TestResetPasswordRevokesSessions(t *testing.T) {
 
 type failMailer struct{}
 
-func (failMailer) Send(context.Context, string, string, string) error { return errors.New("graph boom") }
+func (failMailer) Send(context.Context, string, string, string, string) error {
+	return errors.New("graph boom")
+}
 
 // 发信失败必须**回滚冷却**：码已生成但信没发出去时若不作废，用户要白等 60 秒。
 func TestSendCodeFailureRollsBackCooldown(t *testing.T) {
@@ -561,13 +565,50 @@ func TestSendCodeFailureRollsBackCooldown(t *testing.T) {
 	good := svc.mailer
 	svc.mailer = failMailer{}
 
-	err := svc.SendCode("bounce@example.com", PurposeRegister)
+	err := svc.SendCode("bounce@example.com", PurposeRegister, "calorie-diary")
 	if code, msg := httpMsg(err); code != 503 || !strings.Contains(msg, "稍后重试") {
 		t.Fatalf("发信失败应 503 白话，得到 %d %q", code, msg)
 	}
 	svc.mailer = good
-	if err := svc.SendCode("bounce@example.com", PurposeRegister); err != nil {
+	if err := svc.SendCode("bounce@example.com", PurposeRegister, "calorie-diary"); err != nil {
 		t.Errorf("发信失败后应能立刻重试（冷却已回滚），得到: %v", err)
+	}
+}
+
+// send-code 的 app 决定邮件品牌：空 = 中性品牌 Auth，白名单两家各回各的串，
+// 未知值 400 且**一封信都不发**（校验排在发码之前，不白烧冷却与收件人日总闸）。
+// 主题、正文头部行与发件人显示名一起断言——三者必须同源取自同一个 brand。
+func TestSendCodeAppBranding(t *testing.T) {
+	svc, mailer := newTestService(t)
+
+	// 三个邮箱各自独立，避开同邮箱 60 秒冷却
+	cases := []struct {
+		app, email, subject, from string
+	}{
+		{"", "brand-neutral@example.com", "【Auth】注册验证码", "Auth"},
+		{"calorie-diary", "brand-calorie@example.com", "【热量日记】注册验证码", "热量日记"},
+		{"expense-diary", "brand-expense@example.com", "【开支日记】注册验证码", "开支日记"},
+	}
+	for _, c := range cases {
+		if err := svc.SendCode(c.email, PurposeRegister, c.app); err != nil {
+			t.Fatalf("app=%q 发码失败: %v", c.app, err)
+		}
+		if mailer.subject != c.subject || mailer.from != c.from {
+			t.Errorf("app=%q: 主题=%q 发件人=%q，应为 %q / %q",
+				c.app, mailer.subject, mailer.from, c.subject, c.from)
+		}
+		if want := c.from + " &middot; 邮箱验证"; !strings.Contains(mailer.html, want) {
+			t.Errorf("app=%q 正文缺头部行 %q", c.app, want)
+		}
+	}
+
+	sent := len(mailer.sent)
+	err := svc.SendCode("brand-evil@example.com", PurposeRegister, "evil-app")
+	if code, msg := httpMsg(err); code != 400 || !strings.Contains(msg, "参数不正确") {
+		t.Errorf("未知 app 应 400「参数不正确」，得到 %d %q", code, msg)
+	}
+	if len(mailer.sent) != sent {
+		t.Errorf("未知 app 不该发信，信数 %d → %d", sent, len(mailer.sent))
 	}
 }
 
@@ -584,7 +625,7 @@ func TestLoginByEmailCode(t *testing.T) {
 	}
 
 	// 跨用途：找回密码的码不能拿来登录（purpose 进 key，五种码互不串用）
-	if err := svc.SendCode("login@example.com", PurposeReset); err != nil {
+	if err := svc.SendCode("login@example.com", PurposeReset, "calorie-diary"); err != nil {
 		t.Fatalf("发找回码失败: %v", err)
 	}
 	if _, err := svc.LoginByEmailCode("login@example.com", codeIn(t, mailer), "calorie-diary"); err == nil {
@@ -592,7 +633,7 @@ func TestLoginByEmailCode(t *testing.T) {
 	}
 
 	// 正常登录
-	if err := svc.SendCode("login@example.com", PurposeLogin); err != nil {
+	if err := svc.SendCode("login@example.com", PurposeLogin, "calorie-diary"); err != nil {
 		t.Fatalf("发登录码失败: %v", err)
 	}
 	code := codeIn(t, mailer)
@@ -624,33 +665,33 @@ func TestChangeEmailFlow(t *testing.T) {
 	registerViaCode(t, svc, mailer, "taken@example.com", "secret123")
 
 	// 占用查重：发码阶段就挡，不烧信
-	err = svc.SendChangeEmailCode(caller.UID, "taken@example.com")
+	err = svc.SendChangeEmailCode(caller, "taken@example.com")
 	if code, msg := httpMsg(err); code != 400 || !strings.Contains(msg, "该邮箱已被其他账号使用") {
 		t.Errorf("被占用邮箱应 400「该邮箱已被其他账号使用」，得到 %d %q", code, msg)
 	}
 	// 与当前邮箱相同
-	err = svc.SendChangeEmailCode(caller.UID, "old@example.com")
+	err = svc.SendChangeEmailCode(caller, "old@example.com")
 	if code, msg := httpMsg(err); code != 400 || !strings.Contains(msg, "相同") {
 		t.Errorf("同邮箱应 400「新邮箱与当前邮箱相同」，得到 %d %q", code, msg)
 	}
 
 	// 发码到新邮箱：主题是「修改邮箱」验证码信
-	if err := svc.SendChangeEmailCode(caller.UID, "new@example.com"); err != nil {
+	if err := svc.SendChangeEmailCode(caller, "new@example.com"); err != nil {
 		t.Fatalf("改邮箱发码失败: %v", err)
 	}
-	if mailer.subject != "【Horatio 账号】修改邮箱验证码" {
+	if mailer.subject != "【热量日记】修改邮箱验证码" {
 		t.Errorf("发码信主题不对: %q", mailer.subject)
 	}
 	code1 := codeIn(t, mailer)
 
 	// 密码错 → 400「原密码不正确」（与原密码改密同一口径），且**码不被消耗**
-	err = svc.ChangeEmail(caller.UID, "wrong-pass", "new@example.com", code1)
+	err = svc.ChangeEmail(caller, "wrong-pass", "new@example.com", code1)
 	if code, msg := httpMsg(err); code != 400 || !strings.Contains(msg, "原密码不正确") {
 		t.Errorf("密码错应 400「原密码不正确」，得到 %d %q", code, msg)
 	}
 
 	// 成功路径：上一步密码错没烧掉这个码
-	if err := svc.ChangeEmail(caller.UID, "secret123", "new@example.com", code1); err != nil {
+	if err := svc.ChangeEmail(caller, "secret123", "new@example.com", code1); err != nil {
 		t.Fatalf("改绑失败: %v", err)
 	}
 	var got string
@@ -665,11 +706,11 @@ func TestChangeEmailFlow(t *testing.T) {
 	// 两封通知信：旧邮箱收到「已更换」、新邮箱收到「已绑定」，正文都点名两个邮箱
 	var noticeOld, noticeNew bool
 	for _, m := range mailer.sent {
-		if m.to == "old@example.com" && m.subject == "【Horatio 账号】绑定邮箱已更换" &&
+		if m.to == "old@example.com" && m.subject == "【热量日记】绑定邮箱已更换" &&
 			strings.Contains(m.html, "new@example.com") {
 			noticeOld = true
 		}
-		if m.to == "new@example.com" && m.subject == "【Horatio 账号】新邮箱已绑定" &&
+		if m.to == "new@example.com" && m.subject == "【热量日记】新邮箱已绑定" &&
 			strings.Contains(m.html, "old@example.com") {
 			noticeNew = true
 		}

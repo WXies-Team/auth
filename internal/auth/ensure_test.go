@@ -97,7 +97,7 @@ func TestEnsureUsersMigratesExistingAndNew(t *testing.T) {
 	if _, err := svc.Login("codeonly@example.com", "whatever123", "calorie-diary"); err == nil {
 		t.Error("没有密码的账号不该能用密码登录")
 	}
-	if err := svc.SendCode("codeonly@example.com", PurposeLogin); err != nil {
+	if err := svc.SendCode("codeonly@example.com", PurposeLogin, "calorie-diary"); err != nil {
 		t.Errorf("验证码登录链路应可用: %v", err)
 	}
 
