@@ -24,6 +24,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
 | Sessions / device management | `internal/auth/session.go` + `sessions` comments in `internal/db/schema.sql` (kick = session layer only, `token_version` untouched) |
 | User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` in `cmd/server/routes.go`; one-off merge of the two diaries' `profiles` columns = `scripts/migrate-profile-to-auth.sh` (rules + known data shapes in its header) |
+| AI rate limits / usage accounting (per-uid across both apps) | `internal/ai/quota.go` (three gates + unified accounting, 口径 pinned in its package comment) + `cmd/server/ai.go` (the `/internal/ai/*` handlers, diary-side 429 copy); one-off merge of both diaries' `ai_usage` = `scripts/migrate-ai-usage-to-auth.sh` |
 | User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
 | Web console (login, passkey, TOTP, admin) | `docs/spec-passkey-2fa-web.md` first — it is the authoritative spec (session mechanism, endpoint tables, page list); then `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go` for logic and `cmd/server/{web,admin,ui}.go` + `internal/ui/` for HTTP/pages |
 
@@ -118,6 +119,9 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 - Don't mass-run `gofmt`: Go 1.27's gofmt wants a space after `//` before a full-width
   parenthesis while this repo's comments don't — a blanket run rewrites every doc comment
   and drowns the diff (CI only runs build/vet/test, never gofmt).
+- The AI-usage merge marker `ai_usage_merged_at` in `app_config` is the **only** guard against
+  double-counting `scripts/migrate-ai-usage-to-auth.sh` — never delete it "because the key looks
+  stale"; deleting it and re-running `--execute` doubles every user's and the global daily count.
 - `otpStore.issue` holds a per-email `GET_LOCK` on a pinned conn (`issueLocked`): never call a
   `s.pool` statement while that lock is held — with the 8-conn pool saturated by concurrent
   issuers, the holder waits forever for a connection and never releases the lock (self-deadlock,
