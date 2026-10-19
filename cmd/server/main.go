@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,7 +35,12 @@ const maxBodyBytes = 64 << 10
 
 type ctxKey int
 
-const callerKey ctxKey = iota
+// callerKey 放业务身份（老端点只认它）；webCallerKey 放双凭据解析的完整现场
+//（CSRF hash、role、凭 cookie 还是 Bearer 进来）——两把钥匙同一次解析填。
+const (
+	callerKey ctxKey = iota
+	webCallerKey
+)
 
 func main() {
 	// 日志按级别分流（12-factor 口径）：Info→stdout，Warn/Error→stderr，
@@ -106,147 +110,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-
-	// 健康检查要**碰数据库**：DB 挂了回 5xx，ci/deploy-server.sh 靠 `curl -fsS`
-	// 判定失败并自动回滚。若改成「永远 200」，部署脚本会在数据库已挂时误判健康。
-	// 限流给到 120/分：部署脚本的回滚/健康轮询 15 次只占 30 秒，且它从 127.0.0.1
-	// 直连、与外部监控不同键；120/分仍能挡住对 /health 的打库轰炸。
-	mux.Handle("GET /health", withLogging(limitN("health", 120, health(pool, cfg))))
-
-	// ---- 无登录态端点 ----
-	// 限流口径与日记服务的 /auth/* 一致：register/login/login-code 每 IP 15 次/分
-	//（撞库与爆破的主要目标），发码是**真的投一封信**、更贵，每 IP 5 次/分；
-	// 每邮箱 60 秒冷却 + 每日 10 条 + 收件人总闸 15 条在 auth 内部，换 IP 也躲不掉。
-	// 响应只回 sent=true，不回任何关于邮箱存在与否的额外信息（业务文案走 writeResult）。
-	mux.Handle("POST /auth/register", withLogging(limit("register", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, req *http.Request) {
-		resp, err := authSvc.Register(r.Email, r.Password, r.Code, r.App, sessMeta(req))
-		writeResult(w, resp, err)
-	}))))
-	// send-code 的 app 是可选字段：只决定这封验证码邮件的品牌（空白 = 中性品牌
-	// Auth，未知值 400），不参与限流与验证码语义。
-	mux.Handle("POST /auth/send-code", withLogging(limitN("send-code", 5, jsonBody[protocol.SendCodeRequest](func(r *protocol.SendCodeRequest, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"sent": true}, authSvc.SendCode(r.Email, r.Purpose, r.App))
-	}))))
-	mux.Handle("POST /auth/reset-password", withLogging(limitN("reset-password", 5, jsonBody[protocol.ResetPasswordRequest](func(r *protocol.ResetPasswordRequest, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"ok": true}, authSvc.ResetPassword(r.Email, r.Code, r.Password))
-	}))))
-	mux.Handle("POST /auth/login", withLogging(limit("login", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, req *http.Request) {
-		resp, err := authSvc.Login(r.Email, r.Password, r.App, sessMeta(req))
-		writeResult(w, resp, err)
-	}))))
-	mux.Handle("POST /auth/login-code", withLogging(limit("login-code", jsonBody[protocol.LoginCodeRequest](func(r *protocol.LoginCodeRequest, w http.ResponseWriter, req *http.Request) {
-		resp, err := authSvc.LoginByEmailCode(r.Email, r.Code, r.App, sessMeta(req))
-		writeResult(w, resp, err)
-	}))))
-
-	// ---- 需要登录态的端点 ----
-	// 先解 Bearer 拿 Caller（uid+email+aud），再交业务处理——改密重发 token 的
-	// aud/email 直接取自现会话，客户端不用再传。
-	authed := func(h func(c auth.Caller, w http.ResponseWriter, r *http.Request)) http.Handler {
-		return withLogging(withUID(authSvc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h(r.Context().Value(callerKey).(auth.Caller), w, r)
-		})))
-	}
-	// authedLimited 同 authed，但**按 uid 限流**：改密/注销是持被盗 token 在线爆破
-	// 旧密码的主入口，按 IP 限流挡不住分布式来源，按账号限才能兜住。
-	// 外层再套一道按 IP 的宽限流：uid 限流在 JWT 校验之后，而每次校验都要一次
-	// DB 查询（token_version）——被盗 token 高频打这些路由可先把连接池的认证查询
-	// 打满，IP 层 120/分挡在查询之前，把放大面掐掉。
-	authedLimited := func(scope string, max int, h func(c auth.Caller, w http.ResponseWriter, r *http.Request)) http.Handler {
-		return limitN(scope+"-ip", 120, authed(func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-			if !limiter.allow(scope+":"+strconv.FormatInt(c.UID, 10), max, time.Minute) {
-				w.Header().Set("Retry-After", "60")
-				writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
-				return
-			}
-			h(c, w, r)
-		}))
-	}
-	mux.Handle("POST /auth/logout", authedLimited("logout", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"ok": true}, authSvc.Logout(c.UID))
-	}))
-	mux.Handle("POST /auth/change-password", authedLimited("change-password", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		var req protocol.ChangePasswordRequest
-		if !decodeOr400(w, r, &req) {
-			return
-		}
-		resp, err := authSvc.ChangePassword(c, req.OldPassword, req.NewPassword)
-		writeResult(w, resp, err)
-	}))
-	// 改密码的验证码版：发码端点收件人由 **uid 查库**决定，客户端传不了收件人——
-	// 改密码码只能发进账号本人的绑定邮箱。限流按 uid（authedLimited），
-	// 码本身的冷却、日限额、5 次错即作废在 auth 包内。
-	mux.Handle("POST /auth/send-change-code", authedLimited("send-change-code", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeCode(c))
-	}))
-	mux.Handle("POST /auth/change-password-code", authedLimited("change-password-code", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		var req protocol.ChangePasswordCodeRequest
-		if !decodeOr400(w, r, &req) {
-			return
-		}
-		resp, err := authSvc.ChangePasswordByCode(c, req.Code, req.Password)
-		writeResult(w, resp, err)
-	}))
-	// 改邮箱：发码与提交都按 uid 限流。码发到**新**邮箱（purpose=email_change，
-	// 与改密码的 change 码互不串用），提交时密码重验 + 验码双闸，查重在服务端；
-	// 成功回 {ok:true} 且**不 bump token_version**——改邮箱不是凭证变更，
-	// 现会话保持登录（与改密相反），新旧邮箱各收一封通知信。
-	mux.Handle("POST /auth/send-change-email-code", authedLimited("send-change-email-code", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		var req protocol.SendChangeEmailCodeRequest
-		if !decodeOr400(w, r, &req) {
-			return
-		}
-		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeEmailCode(c, req.Email))
-	}))
-	mux.Handle("POST /auth/change-email", authedLimited("change-email", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		var req protocol.ChangeEmailRequest
-		if !decodeOr400(w, r, &req) {
-			return
-		}
-		writeResult(w, map[string]bool{"ok": true}, authSvc.ChangeEmail(c, req.Password, req.Email, req.Code))
-	}))
-	mux.Handle("POST /auth/delete", authedLimited("delete-account", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		var req protocol.DeleteAccountRequest
-		if !decodeOr400(w, r, &req) {
-			return
-		}
-		writeResult(w, map[string]bool{"ok": true}, authSvc.DeleteAccount(c.UID, req.Password))
-	}))
-
-	// ---- 已登录设备（会话管理）----
-	// 三个端点都走 authed + 按 uid 限流。列表单独一个 scope：设备页多刷几次
-	// 不该把「踢人」的额度挤掉（同 scope 会共用 uid 那一个桶）。
-	mux.Handle("GET /api/sessions", authedLimited("sessions", 30, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
-		list, err := authSvc.ListSessions(c.UID, c.SID)
-		writeResult(w, list, err)
-	}))
-	// 踢单台：别人会话与不存在的 id 同回 404（不给存在性探针），幂等 200；
-	// 踢掉当前 sid 也放行——客户端自己处理本地登出。
-	mux.Handle("DELETE /api/sessions/{id}", authedLimited("session-kick", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "参数不正确")
-			return
-		}
-		writeResult(w, map[string]bool{"ok": true}, authSvc.RevokeSession(c.UID, id))
-	}))
-	// 退出其它设备：只动会话层（不 bump token_version），当前 token 照用。
-	mux.Handle("POST /api/sessions/revoke-others", authedLimited("session-revoke-others", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
-		writeResult(w, map[string]bool{"ok": true}, authSvc.RevokeOtherSessions(c.UID, c.SID))
-	}))
-
-	// ---- 内部校验（日记服务的 withUID 中间件调用）----
-	// 验签 + token_version 比对 + aud 精确匹配期望应用 + 会话未被踢（sid 行健在）。
-	// 限流按来源 IP 600/分：
-	// 调用方是同机的日记服务（一次业务请求调一次 verify），正常量级远低于此；
-	// 600 是给多租户共享留的余量，挡的是误配置成公网可达后的打爆。
-	// 环回/受信内网守卫在限流之外：先把公网来源挡在读体与限流计数之前。
-	mux.Handle("POST /internal/verify", withLogging(loopbackOnly(limitN("verify", 600, internalVerify(authSvc)))))
-
-	// ---- 内部校验（存量迁移）----
-	// 两个日记服务的历史用户并入本服务的唯一入口：Bearer hook_token 鉴权 +
-	// 单批 ≤100 条 + 整批一个事务。同样只该被同机脚本调到，不挂公网限流（见 loopbackOnly）。
-	mux.Handle("POST /internal/users/ensure", withLogging(loopbackOnly(internalEnsure(cfg.Require, authSvc))))
+	// 路由注册整体挪进 registerRoutes：端点形状只有打到 handler 上才作数，
+	// 抽出来才能被路由级回归测试钉住（老客户端契约见 routes_test.go）。
+	registerRoutes(mux, authSvc, cfg, pool)
 
 	// 兜底：未知错误 500 + ApiError 体，而不是让 Go 把栈吐给客户端
 	handler := withRecover(mux)
@@ -528,20 +394,63 @@ func withLogging(next http.Handler) http.Handler {
 	})
 }
 
-// withUID 解 Bearer 并把 Caller 放进 context；失败直接回 401/503。
-// 顺带把本次请求的来源（IP/UA）填进 Caller.Meta：改密换发新 token 时要拿它
-// 给新会话建行——过了这层再想取原始请求就取不到了。
+// withUID 解析**双凭据**并把身份放进 context；失败直接回 401/503。
+//
+// 三条路径（见 resolveCaller）：网页会话 cookie、老客户端的 JWT Bearer、以及
+// C 批 App 拿到的 web token Bearer。顺带做两件事：
+//
+//   - 本次请求的来源（IP/UA）填进 Caller.Meta——改密换发新会话、审计都要它，
+//     过了这层再想取原始请求就取不到了；
+//   - **凭 cookie 进来的非 GET 请求校验 CSRF**（同步器 token，见 auth.WebCaller.CheckCSRF）。
+//     Bearer 请求不做这一步：跨站脚本设置不了 Authorization 头，没有可搭的顺风车，
+//     给它加校验只会把老客户端挡在门外。
 func withUID(svc *auth.Service, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, err := svc.ValidUserID(r.Header.Get("Authorization"))
+		wc, err := resolveCaller(svc, r)
 		if err != nil {
-			// ValidUserID 只回 HTTPError（401 或 DB 抖动的 503），直接翻译
 			writeResult(w, nil, err)
 			return
 		}
-		caller.Meta = sessMeta(r)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey, caller)))
+		wc.Meta = sessMeta(r)
+		if wc.ViaCookie && !readMethod(r.Method) && !wc.CheckCSRF(r.Header.Get("X-CSRF-Token")) {
+			writeError(w, http.StatusForbidden, "请求校验失败，请刷新页面后重试")
+			return
+		}
+		ctx := context.WithValue(r.Context(), callerKey, wc.Caller)
+		ctx = context.WithValue(ctx, webCallerKey, wc)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// readMethod 判定「不改状态的动词」——GET/HEAD/OPTIONS 不需要 CSRF token。
+func readMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+}
+
+// resolveCaller 按优先级解析凭据：
+//
+//  1. 会话 cookie（网页）→ sha256 点查 sessions.web_token_hash；
+//  2. Bearer 是 JWT 形状（三个点）→ 走原有 ValidUserID，**语义与老客户端时代一字不变**；
+//  3. Bearer 不是 JWT 形状（C 批 passkey/验证码登录回的 32 字节 web token）→ 同 1 的点查。
+//
+// 只有「非 JWT 形状」才落到 3：JWT 的验签失败在解析阶段就出错、不打库，
+// 少一次无谓的点查；真 503（DB 抖动）原样往上抛，不能被当成「换个凭据再试」。
+func resolveCaller(svc *auth.Service, r *http.Request) (auth.WebCaller, error) {
+	if ck, err := r.Cookie(auth.WebCookieName); err == nil && ck.Value != "" {
+		return svc.ValidWebSession(ck.Value)
+	}
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return auth.WebCaller{}, &auth.HTTPError{Code: 401, Message: "请先登录"}
+	}
+	caller, err := svc.ValidUserID(header)
+	if err == nil {
+		return auth.WebCaller{Caller: caller}, nil
+	}
+	if strings.Contains(strings.TrimPrefix(header, "Bearer "), ".") {
+		return auth.WebCaller{}, err
+	}
+	return svc.ValidWebBearer(header)
 }
 
 // sessMeta 取登录会话要记的来源：IP 用限流同一套 clientIP（受信代理口径——
