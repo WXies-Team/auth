@@ -102,6 +102,13 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
   `app_config`) **must all be set in production**: a missing key is the legitimate "skip this
   App" state (real-DB tests rely on it to avoid any network call), so don't "fix" it; lose one
   App key in prod and that App's business rows turn into orphans silently on every delete.
+- **Declared non-rollbackable residual of the delete hooks**: the hooks are cross-service,
+  non-transactional calls — if App A's hook succeeds and App B's then fails, the whole delete
+  aborts (account stays, auth rows untouched) but **App A's business data is already gone and
+  cannot be brought back**. User remedy = just retry the delete (hooks are idempotent);
+  troubleshooting = the `注销钩子调用失败，注销中止` slog line (uid/app/status) plus the earlier
+  `注销钩子已调用` lines tell which Apps were already cleaned. Full remediation would be
+  two-phase across three repos — deliberately out of scope (see hooks.go BeforeDelete).
 - `TOTP_ENC_KEY` is a **second refuse-to-start secret** (≥32 bytes, same gate as
   `JWT_SECRET`): local runs and real-DB tests must provide it (`newTestService` sets it via
   `t.Setenv`). Losing it in prod invalidates every enrolled TOTP — only recovery codes remain,
