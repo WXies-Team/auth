@@ -25,8 +25,10 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/WXies-Team/auth/internal/protocol"
 	"github.com/bwmarrin/snowflake"
 	"github.com/go-sql-driver/mysql"
@@ -127,14 +129,20 @@ type Service struct {
 	// totpKey 是 TOTP secret 的 AES-256-GCM 密钥（TOTP_ENC_KEY，≥32 字节拒启）；
 	// recoveryPepper 是恢复码 HMAC 的密钥，由 JWT_SECRET 域分隔派生——同一根密钥
 	// 派两把子密钥，一把出事不牵连另一把。
-	totpKey       []byte
+	totpKey        []byte
 	recoveryPepper []byte
+	// wa 是 WebAuthn RP 实例（配置见 auth.NewWebAuthn）。nil = Passkey 端点回 503，
+	// 其余功能不受影响——主流程不该因为一个可选功能起不来就全站宕掉。
+	wa *webauthn.WebAuthn
+	// credBySID 记「本会话用哪把 Passkey 登录」（列表页 current 标记），见 passkey.go。
+	credBySIDMu sync.RWMutex
+	credBySID   map[int64]string
 }
 
 // NewService 组装服务。除 JWT 密钥外还要求 TOTP_ENC_KEY 就位：TOTP secret 必须存
 // 原值（验证要用），没有可用加密密钥时上线只会埋一颗「绑了却验不了」的雷，
-// 与 JWT_SECRET 短于 32 字节同款拒启口径。
-func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks) (*Service, error) {
+// 与 JWT_SECRET 短于 32 字节同款拒启口径。wa 为 nil 时只有 Passkey 端点降级。
+func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks, wa *webauthn.WebAuthn) (*Service, error) {
 	node, err := snowflake.NewNode(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("初始化雪花节点: %w", err)
@@ -146,7 +154,7 @@ func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks) (*S
 	return &Service{
 		pool: pool, secret: jwtSecret, ids: node, otps: &otpStore{pool: pool},
 		mailer: mailer, hooks: hooks,
-		totpKey: totpKey, recoveryPepper: deriveRecoveryPepper(jwtSecret),
+		totpKey: totpKey, recoveryPepper: deriveRecoveryPepper(jwtSecret), wa: wa,
 	}, nil
 }
 

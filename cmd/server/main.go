@@ -86,7 +86,20 @@ func main() {
 			slog.Warn("邮件凭据未配置，注册与验证码邮件会失败", "key", key)
 		}
 	}
-	authSvc, err := auth.NewService(pool, secret, mailsvc.New(cfg.StringFunc), auth.NewHooks(cfg.Require))
+	// Passkey 的 RP 实例：网页 origin 固定；Android 原生仪式的 apk-key-hash 指纹
+	// 从 app_config 键现读（webauthn_opaque_origins，逗号分隔，App 批次供指纹后灌库，
+	// 改库 ≤10 秒热生效）。键没配 = 只放行网页端，两个 App 的原生仪式暂不可用。
+	// 指纹写错也不拖垮启动：记 Error 后降级为「仅网页端」——登录服务的可用性优先，
+	// 错误状态在启动日志里可见。
+	wa, err := auth.NewWebAuthn(splitList(cfgRequire(cfg, "webauthn_opaque_origins")))
+	if err != nil {
+		slog.Error("Passkey 不透明 origin 配置无效，降级为仅网页端可用", "err", err)
+		if plain, err2 := auth.NewWebAuthn(nil); err2 == nil {
+			wa = plain
+		}
+	}
+
+	authSvc, err := auth.NewService(pool, secret, mailsvc.New(cfg.StringFunc), auth.NewHooks(cfg.Require), wa)
 	if err != nil {
 		slog.Error("初始化认证服务", "err", err)
 		os.Exit(1)
@@ -293,6 +306,27 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// cfgRequire 读配置键；读失败只记日志后按未配置处理——可选功能的配置读不出
+// 不该挡住启动（mail 凭据那三键是另一档：发信是主流程，读失败会单独喊）。
+func cfgRequire(cfg *config.Store, key string) string {
+	v, err := cfg.Require(key)
+	if err != nil {
+		slog.Error("读配置键失败（按未配置处理）", "key", key, "err", err)
+	}
+	return v
+}
+
+// splitList 把逗号分隔的配置值拆成去空白的非空列表。
+func splitList(raw string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // health 复刻日记服务的 /health 语义：**ping 数据库**（DB 挂了返回 5xx，

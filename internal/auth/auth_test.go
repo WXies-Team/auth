@@ -68,8 +68,13 @@ func newTestService(t *testing.T) (*Service, *recordMailer) {
 	// TOTP 加密密钥按生产同款拒启口径（NewService 缺它直接报错），测试给固定 32 字节
 	t.Setenv("TOTP_ENC_KEY", strings.Repeat("k", 32))
 	// 钩子接上但三键全缺：真库注销用例正是「键不存在 → 跳过」的形态（见 Hooks），
-	// 这样跑的不是一条生产里不存在的 nil 分支
-	svc, err := NewService(pool, testSecret, m, NewHooks(func(string) (string, error) { return "", nil }))
+	// 这样跑的不是一条生产里不存在的 nil 分支。Passkey 实例只放网页 origin
+	//（仪式中间态与凭证存取的用例不真跑浏览器，不校验 origin）。
+	wa, err := NewWebAuthn(nil)
+	if err != nil {
+		t.Fatalf("NewWebAuthn: %v", err)
+	}
+	svc, err := NewService(pool, testSecret, m, NewHooks(func(string) (string, error) { return "", nil }), wa)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
