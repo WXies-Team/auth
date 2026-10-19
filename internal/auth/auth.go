@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WXies-Team/auth/internal/protocol"
 	"github.com/bwmarrin/snowflake"
 	"github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
@@ -376,6 +377,74 @@ func (s *Service) Register(rawEmail, password, code, app string) (*Response, err
 		return nil, err
 	}
 	return &Response{Token: tok, Email: email}, nil
+}
+
+// maxEnsureBatch 是单批并入条数上限。100 条（每条约 370 字节 JSON）远在路由层
+// 64KB 请求体上限之内；不设上限则一次误操作能把整库灌进 users，
+// 出错时回滚的代价也随批大小无界放大。
+const maxEnsureBatch = 100
+
+// EnsureUsers 把两个日记服务的存量用户批量并入本服务——**这是存量迁移的唯一入口**。
+//
+// 雪花 id 一律由本服务单点生成（与 Register 同一个 s.ids.Generate），业务侧禁止各自造号：
+// 两个 App 的旧自增 id 一旦也进 users.id，就会与雪花号段撞号，下游按 uid 关联的数据
+// 再也分不清是哪个来源签的。
+//
+// 已存在的邮箱只回它的 uid，**不动已有行的任何字段**——迁移脚本因此可以整批重跑
+// （幂等），重复执行不会覆盖用户后来改过的密码或注册时间。
+// password_hash 原样落库（NULL = 该用户在旧库只有邮箱验证码登录），created_at 用入参：
+// 迁移要保留真实注册时间，写成 now 会让全部老用户看起来都是今天注册的。
+//
+// 整批一个事务：任何一条失败全部回滚。邮箱归一化与格式校验在事务内逐条做，
+// 是刻意的——后半批出现非法条目时，前半批已插入的行靠事务一起回滚，
+// 「要么整批进、要么一条不进」由数据库保证，不靠调用方自觉。
+func (s *Service) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.EnsureUserResult, error) {
+	if len(entries) > maxEnsureBatch {
+		return nil, badRequest(fmt.Sprintf("单批最多 %d 条", maxEnsureBatch))
+	}
+	results := make([]protocol.EnsureUserResult, 0, len(entries))
+
+	tx, err := s.pool.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("开事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for i, e := range entries {
+		email := normalizeEmail(e.Email)
+		if err := validateEmail(email); err != nil {
+			// 迁移脚本按批排错，报出条目下标（0 起）才定位得到源数据
+			return nil, badRequest(fmt.Sprintf("下标 %d 的条目: %s", i, err.Error()))
+		}
+		var uid int64
+		err := tx.QueryRowContext(context.Background(),
+			"SELECT id FROM users WHERE email = ?", email).Scan(&uid)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			uid = s.ids.Generate().Int64()
+			// nil 指针走 NULL（纯验证码账号），非 nil 原样落库
+			var hash any
+			if e.PasswordHash != nil {
+				hash = *e.PasswordHash
+			}
+			if _, err := tx.ExecContext(context.Background(),
+				"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
+				uid, email, hash, e.CreatedAt); err != nil {
+				return nil, fmt.Errorf("并入用户（下标 %d）: %w", i, err)
+			}
+		case err != nil:
+			return nil, fmt.Errorf("查存量用户（下标 %d）: %w", i, err)
+		default:
+			// 已存在：回 uid 即可，已有行的 password_hash / created_at / token_version 一律不碰
+		}
+		results = append(results, protocol.EnsureUserResult{Email: email, UID: uid})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交并入: %w", err)
+	}
+	slog.Info("存量用户并入完成", "count", len(results))
+	return results, nil
 }
 
 // Login 校验凭据并签发 token。邮箱不存在与密码错误**返回同一句话**，

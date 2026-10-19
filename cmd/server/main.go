@@ -202,7 +202,13 @@ func main() {
 	// 验签 + token_version 比对 + aud 精确匹配期望应用。限流按来源 IP 600/分：
 	// 调用方是同机的日记服务（一次业务请求调一次 verify），正常量级远低于此；
 	// 600 是给多租户共享留的余量，挡的是误配置成公网可达后的打爆。
-	mux.Handle("POST /internal/verify", withLogging(limitN("verify", 600, internalVerify(authSvc))))
+	// 环回/受信内网守卫在限流之外：先把公网来源挡在读体与限流计数之前。
+	mux.Handle("POST /internal/verify", withLogging(loopbackOnly(limitN("verify", 600, internalVerify(authSvc)))))
+
+	// ---- 内部校验（存量迁移）----
+	// 两个日记服务的历史用户并入本服务的唯一入口：Bearer hook_token 鉴权 +
+	// 单批 ≤100 条 + 整批一个事务。同样只该被同机脚本调到，不挂公网限流（见 loopbackOnly）。
+	mux.Handle("POST /internal/users/ensure", withLogging(loopbackOnly(internalEnsure(cfg.Require, authSvc))))
 
 	// 兜底：未知错误 500 + ApiError 体，而不是让 Go 把栈吐给客户端
 	handler := withRecover(mux)
@@ -327,6 +333,44 @@ func internalVerify(v verifier) http.Handler {
 	})
 }
 
+// userEnsurer 是 internalEnsure 依赖的最小接口：路由层测试注入假实现，不必拉起真库。
+type userEnsurer interface {
+	EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.EnsureUserResult, error)
+}
+
+// internalEnsure 是存量用户并入端点：POST /internal/users/ensure，
+// 头 `Authorization: Bearer <hook_token>`，体是 0~100 条 EnsureUserEntry 数组，
+// 回与入参同序的 [{email,uid}]。用途见 Service.EnsureUsers 的注释。
+//
+// hook_token 从 app_config 现读（10s 缓存，改库即热生效）。**键没配时恒 401**——
+// 迁移凭据没进库就该一条也进不来；而读库失败回 503 而不是 401：把 DB 抖动当成
+// 鉴权失败，会把排障方向带偏到「token 插错了」。
+func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want, err := tokenFor(auth.HookTokenKey)
+		if err != nil {
+			slog.Error("读 hook_token 失败", "err", err)
+			writeError(w, http.StatusServiceUnavailable, "服务暂时不可用，请稍后重试")
+			return
+		}
+		if want == "" {
+			slog.Warn("hook_token 未配置，内部并入端点拒绝一切请求")
+		}
+		// 对不上连请求体都不读：不给为错配凭据白解一次 JSON 的机会
+		if want == "" || r.Header.Get("Authorization") != "Bearer "+want {
+			writeError(w, http.StatusUnauthorized, "未授权")
+			return
+		}
+		var entries []protocol.EnsureUserEntry
+		if !decodeOr400(w, r, &entries) {
+			return
+		}
+		// 结果按入参顺序回，uid 是 int64（writeJSON 不会把它转成浮点）
+		results, err := svc.EnsureUsers(entries)
+		writeResult(w, results, err)
+	})
+}
+
 // ---- 以下为通用中间件与 JSON 工具 ----
 
 // decode 解码请求体。**故意不拒绝未知字段**——日记客户端的 DTO 可能多发字段，
@@ -435,6 +479,26 @@ func withUID(svc *auth.Service, next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey, caller)))
+	})
+}
+
+// loopbackOnly 只放行环回与受信内网来源的请求，其余 403。
+//
+// 内部端点（/internal/*）不该经 nginx 暴露：它们凭一根共享 bearer 就能用、
+// 不挂面向公网的限流——一旦被反代到公网，等于在防火墙外开了扇没锁的侧门，
+// 所以先按来源掐掉，再谈鉴权与限流。
+//
+// 判定只看 RemoteAddr：环回上的调用方就是同机的日记服务与迁移脚本，受信代理头
+// （X-Forwarded-For / X-Real-IP）一律不看——公网客户端能随便伪造它们，看了等于没设。
+// 信任范围与限流共用 TRUSTED_PROXIES（默认环回 + RFC1918/ULA 内网段）。
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !containsIP(trustedProxies(), hostOnly(r.RemoteAddr)) {
+			slog.Warn("内部端点拒绝非受信来源", "path", r.URL.Path, "remote", r.RemoteAddr)
+			writeError(w, http.StatusForbidden, "禁止访问")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

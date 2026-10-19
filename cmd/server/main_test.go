@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/WXies-Team/auth/internal/auth"
+	"github.com/WXies-Team/auth/internal/protocol"
 )
 
 // requireJWTSecret：缺失或短于 32 字节必须拒启——短 secret 等于弱签名。
@@ -168,5 +169,128 @@ func TestClientIPTrustModel(t *testing.T) {
 		if got := clientIP(req); got != c.want {
 			t.Errorf("%s: clientIP = %q，应为 %q", c.name, got, c.want)
 		}
+	}
+}
+
+// loopbackOnly：内部端点只放行环回与受信内网来源；公网来源连同它伪造的转发头都 403。
+func TestLoopbackOnly(t *testing.T) {
+	h := loopbackOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	cases := []struct {
+		name, remote, xff string
+		want              int
+	}{
+		{"同机日记服务", "127.0.0.1:5678", "", http.StatusOK},
+		{"受信内网", "192.168.1.5:5678", "", http.StatusOK},
+		{"公网直连", "203.0.113.7:5678", "", http.StatusForbidden},
+		{"公网来源伪造 XFF", "203.0.113.7:5678", "127.0.0.1", http.StatusForbidden},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/internal/users/ensure", nil)
+		req.RemoteAddr = c.remote
+		if c.xff != "" {
+			req.Header.Set("X-Forwarded-For", c.xff)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Errorf("%s: loopbackOnly = %d，应为 %d", c.name, rec.Code, c.want)
+		}
+	}
+}
+
+// fakeEnsurer 实现 userEnsurer：并入端点的鉴权与解码链路不依赖真库。
+type fakeEnsurer struct {
+	got   []protocol.EnsureUserEntry
+	res   []protocol.EnsureUserResult
+	err   error
+	calls int
+}
+
+func (f *fakeEnsurer) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.EnsureUserResult, error) {
+	f.calls++
+	f.got = entries
+	return f.res, f.err
+}
+
+// 存量并入端点：Bearer hook_token 对不上（含键没配）一律 401 且不碰业务；
+// 对上了才解码并转交 EnsureUsers，回执 uid 必须是整数文本。
+func TestInternalEnsureAuthAndPassthrough(t *testing.T) {
+	const tok = "mig-secret"
+	lookup := func(k string) (string, error) {
+		if k == auth.HookTokenKey {
+			return tok, nil
+		}
+		return "", nil
+	}
+	body := `[{"email":" a@b.com ","password_hash":null,"created_at":1600000000123}]`
+
+	// 鉴权三种错法：没头、token 键没配、token 不匹配——都不许进 EnsureUsers
+	for _, c := range []struct{ name, header string }{
+		{"缺 Authorization", ""},
+		{"token 错", "Bearer wrong"},
+	} {
+		f := &fakeEnsurer{res: []protocol.EnsureUserResult{{Email: "a@b.com", UID: 1}}}
+		h := internalEnsure(lookup, f)
+		req := httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+		if c.header != "" {
+			req.Header.Set("Authorization", c.header)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s: 应 401，得到 %d", c.name, rec.Code)
+		}
+		if f.calls != 0 {
+			t.Errorf("%s: 鉴权失败不该调 EnsureUsers，得到 %d 次", c.name, f.calls)
+		}
+	}
+	// hook_token 键没配（值为空）= 一条也进不来
+	noKey := func(string) (string, error) { return "", nil }
+	f := &fakeEnsurer{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer ")
+	internalEnsure(noKey, f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || f.calls != 0 {
+		t.Errorf("键没配应 401 且不进业务，得到 %d / %d 次", rec.Code, f.calls)
+	}
+
+	// 鉴权通过：字段原样透传，uid 以整数回出
+	f = &fakeEnsurer{res: []protocol.EnsureUserResult{{Email: "a@b.com", UID: 1234567890123456789}}}
+	h := internalEnsure(lookup, f)
+	req = httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("鉴权通过应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	if f.calls != 1 || len(f.got) != 1 {
+		t.Fatalf("应转交 1 条，得到 calls=%d len=%d", f.calls, len(f.got))
+	}
+	if f.got[0].Email != " a@b.com " || f.got[0].PasswordHash != nil || f.got[0].CreatedAt != 1600000000123 {
+		t.Errorf("字段应原样透传（归一化在业务层做），得到 %+v", f.got[0])
+	}
+	// 精度守卫：uid 过一遍 float64 就花位，回执里必须是纯整数文本
+	var raw []struct {
+		UID json.Number `json:"uid"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil || len(raw) != 1 {
+		t.Fatalf("响应解析: %v (%s)", err, rec.Body.String())
+	}
+	if strings.ContainsAny(string(raw[0].UID), ".eE") {
+		t.Errorf("uid 被序列化成了浮点: %s", rec.Body.String())
+	}
+
+	// 业务错误照旧走 writeResult 的翻译
+	f = &fakeEnsurer{err: &auth.HTTPError{Code: 400, Message: "下标 1 的条目: 邮箱格式不正确"}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	internalEnsure(lookup, f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "下标 1") {
+		t.Errorf("业务错误应原样翻译，得到 %d %s", rec.Code, rec.Body.String())
 	}
 }

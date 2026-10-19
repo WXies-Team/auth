@@ -93,6 +93,26 @@ type VerifyResponse struct {
 	App   string `json:"app"`
 }
 
+// EnsureUserEntry 是 POST /internal/users/ensure 的单条存量用户（迁移脚本 → 本服务）。
+//
+// **内部接口，不属于客户端契约**：与上面那些和 calorie-diary 逐字对齐的 /auth/* DTO
+// 无关，改字段名不影响任何 App。
+//
+// PasswordHash 原样落库：旧库已是 bcrypt 串，重算既没必要也需要明文；nil/缺字段/null
+// 都落 NULL——纯邮箱验证码登录的账号在旧库就没有密码。
+type EnsureUserEntry struct {
+	Email        string  `json:"email"`
+	PasswordHash *string `json:"password_hash"`
+	CreatedAt    int64   `json:"created_at"`
+}
+
+// EnsureUserResult 是并入回执：Email 是**归一化后**的邮箱（小写去空格，与落库值一致），
+// UID 是 63 位雪花整数，调用方用 int64 接收（decode 成 float64 会丢低位）。
+type EnsureUserResult struct {
+	Email string `json:"email"`
+	UID   int64  `json:"uid"`
+}
+
 // ApiError 对应 ApiError：所有非 200 回执的统一响应体。
 type ApiError struct {
 	Message string `json:"message"`
