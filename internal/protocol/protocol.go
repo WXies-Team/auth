@@ -138,6 +138,29 @@ type SessionInfo struct {
 	Current    bool   `json:"current"`
 }
 
+// ProfileResponse 是 GET /api/profile 与 PUT /api/profile 的回执（本服务新增的端点，
+// 不属于与日记客户端既有 /auth/* 逐字对齐的那批 DTO，也就不进 protocol_test.go 的
+// AuthDtos.kt 快照对拍）。
+//
+// Nickname 空串 = 未设置；AvatarImage 为 nil（JSON null）= 无头像——日记客户端的
+// avatarImage 是「空串即无头像」的 String，切过来时把 null 映射成 "" 即可。
+// UpdatedAt 是档案最后一次写入的毫秒时间戳，从未写过时为 0（无行时的默认回执）。
+type ProfileResponse struct {
+	Nickname    string  `json:"nickname"`
+	AvatarColor int     `json:"avatarColor"`
+	AvatarImage *string `json:"avatarImage"`
+	UpdatedAt   int64   `json:"updatedAt"`
+}
+
+// ProfileUpdateRequest 是 PUT /api/profile 的请求体：三字段**全量替换**（没传的字段
+// 等于清空——客户端每次提交完整档案，服务端不做局部合并）。AvatarImage 给 null/缺字段/
+// 空串都表示清除头像（与日记客户端 clearAvatarImage() 的空串语义对齐）。
+type ProfileUpdateRequest struct {
+	Nickname    string  `json:"nickname"`
+	AvatarColor int     `json:"avatarColor"`
+	AvatarImage *string `json:"avatarImage"`
+}
+
 // ---- Web 自助台 / 管理后台的新端点 DTO ----
 //
 // 与上面那批「与日记客户端逐字对齐」的 DTO 分开：这些是本服务新增端点的形状，

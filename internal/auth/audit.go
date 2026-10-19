@@ -35,6 +35,9 @@ const (
 	AuditRecoveryGen    = "recovery.generate"
 	AuditRecoveryUse    = "recovery.consume"
 	AuditReauth         = "reauth"
+	// AuditProfileUpdate 档案三件套（nickname/avatarColor/avatarImage）的写入：
+	// 成败都记，detail 只放字段名与长度类元信息（见 profile.go UpdateProfile）
+	AuditProfileUpdate  = "profile.update"
 	AuditAdminRole      = "admin.user.role_change"
 	AuditAdminUserKick  = "admin.user.session_revoke"
 	AuditAdminSession   = "admin.session.revoke"
