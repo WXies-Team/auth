@@ -2,6 +2,8 @@ package auth
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -237,4 +239,94 @@ func TestOTPStoreLifecycle(t *testing.T) {
 	if _, err := s.issue(PurposeChange, ctx); err != nil {
 		t.Errorf("撤销后应能立刻重发: %v", err)
 	}
+}
+
+// 并发语义（真库）：冷却、用后即焚、5 次作废三条闸都不能被同批并发穿透——
+// 读-判-写之间的窗口补齐后，这三种并发都只能各成一次。
+func TestOTPStoreConcurrency(t *testing.T) {
+	svc, _ := newTestService(t)
+	s := svc.otps
+	const n = 8
+
+	// 并发发码：冷却窗口内只允许 1 个成功，其余必须吃 429 冷却
+	t.Run("发码冷却挡并发", func(t *testing.T) {
+		email := "race-issue@example.com"
+		var wg sync.WaitGroup
+		var oks atomic.Int64
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := s.issue(PurposeRegister, email); err == nil {
+					oks.Add(1)
+				} else if c, _ := httpMsg(err); c != 429 {
+					t.Errorf("并发发码的失败应是 429 冷却，得到 %v", err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if oks.Load() != 1 {
+			t.Errorf("并发发码应只成功 1 个，得到 %d", oks.Load())
+		}
+	})
+
+	// 并发提交同一个正确码：用后即焚只放行一次
+	t.Run("验码一次性挡并发", func(t *testing.T) {
+		email := "race-verify@example.com"
+		code, err := s.issue(PurposeLogin, email)
+		if err != nil {
+			t.Fatalf("发码失败: %v", err)
+		}
+		var wg sync.WaitGroup
+		var oks atomic.Int64
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if err := s.verify(PurposeLogin, email, code); err == nil {
+					oks.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if oks.Load() != 1 {
+			t.Errorf("同一码并发提交应只成功 1 次，得到 %d", oks.Load())
+		}
+	})
+
+	// 并发错码：5 次作废不被穿透——N 个错码并发提交后，正确码也必须进不来
+	t.Run("错5次作废挡并发", func(t *testing.T) {
+		email := "race-attempts@example.com"
+		code, err := s.issue(PurposeReset, email)
+		if err != nil {
+			t.Fatalf("发码失败: %v", err)
+		}
+		wrong := "000000"
+		if wrong == code {
+			wrong = "000001"
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if err := s.verify(PurposeReset, email, wrong); err == nil {
+					t.Error("错码不该通过")
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if err := s.verify(PurposeReset, email, code); err == nil {
+			t.Error("并发错码打满试错上限后，正确码也不该再通过")
+		}
+	})
 }

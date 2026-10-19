@@ -82,6 +82,14 @@ func dayStart(now time.Time) int64 {
 }
 
 // issue 生成并落库一条验证码。冷却与日限额在这里挡，**发信之前**就挡。
+//
+// 三条闸的读与 INSERT 之间包一把**按邮箱的 MySQL 命名锁**（GET_LOCK）：同邮箱的
+// 并发发码在此串行化，冷却/日限额不会被同批并发穿透。
+// 没用事务 + SELECT … FOR UPDATE 做这件事：该邮箱还没发过码时（发码的主场景）
+// 锁定读拿的是间隙锁，间隙锁彼此兼容、两边的 INSERT 又互相等待对方的间隙锁，
+// 首发并发就是一把死锁；GET_LOCK 是会话级互斥，没有这个坑。
+// 锁只护 issue 自身的读-判-写窗口；verify/revoke 的烧代只会把闸门变松（作废代
+// 本就立刻释放冷却），不需要同一把锁。
 func (s *otpStore) issue(purpose, email string) (string, error) {
 	code, err := randomCode()
 	if err != nil {
@@ -90,24 +98,63 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 	ctx := context.Background()
 	now := time.Now()
 
+	// 持锁段走独立方法：RELEASE 的 defer 在它返回时就跑，锁先于外层清理释放——
+	// 清理要走 pool（可能需要池里空出的新连接），占着锁等池就是拿「锁等连接、
+	// 连接等锁」把自己挂死（并发测试实测过：8 条池连接全被占满时清理语句
+	// 永远等不到连接，持锁者释放不了锁）。
+	code, err = s.issueLocked(purpose, email, code, now, ctx)
+	if err != nil {
+		return "", err
+	}
+	// 过期行清理：表常年只有几十~几百行，全表扫可忽略；失败不挡发码
+	_, _ = s.pool.ExecContext(ctx, "DELETE FROM otp_codes WHERE created_at < ?", now.Add(-otpRetention).UnixMilli())
+	// 审计行的 90 天保留期同样挂在发码路径上清（规格 A1.4：不引入后台 goroutine，
+	// 借高频且已有的清理点顺手做）
+	cleanAuditLogs(s.pool)
+	return code, nil
+}
+
+// issueLocked 是 issue 的持锁段：全程只用一条钉住的连接（GET_LOCK 挂在会话上，
+// 中途换连接锁就丢了），闸门判定与 INSERT 都在这条连接上；返回前锁必已释放。
+func (s *otpStore) issueLocked(purpose, email, code string, now time.Time, ctx context.Context) (string, error) {
+	conn, err := s.pool.Conn(ctx)
+	if err != nil {
+		return "", fmt.Errorf("取数据库连接: %w", err)
+	}
+	// 先 Close 的 defer 后执行：锁先释放、连接后归还，顺序不能反
+	defer func() { _ = conn.Close() }()
+	// 锁名是服务级全局的且限 64 字符：用邮箱 sha256 的前 32 位做定长名，裸邮箱
+	// 超长会被 MySQL 截断出撞锁。取不到锁（对端 5 秒不放）直接报错让上层回
+	//「稍后重试」的通用文案——拿不到锁多半是库出了问题，硬发只会把闸门穿掉。
+	// 锁挂在会话连接上，RELEASE 必须落在同一连接（所以整个持锁段都用 conn）。
+	lockName := "auth_otp_" + sha256Hex(email)[:32]
+	var got sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 5)", lockName).Scan(&got); err != nil {
+		return "", fmt.Errorf("取发码锁: %w", err)
+	}
+	if !got.Valid || got.Int64 != 1 {
+		return "", fmt.Errorf("取发码锁超时: %s", lockName)
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", lockName) }()
+
 	// 只看活跃行（used=0）：作废代不构成冷却，也不占日额度——用后即焚的语义
 	// 就是「烧掉一代后可以立刻再要一个」
 	var lastSent sql.NullInt64
-	err = s.pool.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		"SELECT last_sent_at FROM otp_codes WHERE email = ? AND purpose = ? AND used = 0 ORDER BY id DESC LIMIT 1",
 		email, purpose).Scan(&lastSent)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("查验证码冷却: %w", err)
 	}
 	var dayCount, recipientCount int
-	if err := s.pool.QueryRowContext(ctx,
+	if err := conn.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM otp_codes WHERE email = ? AND purpose = ? AND used = 0 AND created_at >= ?",
 		email, purpose, dayStart(now)).Scan(&dayCount); err != nil {
 		return "", fmt.Errorf("查验证码日限额: %w", err)
 	}
 	// 总闸数「今天发过的全部码」，含已用掉/已作废的——否则反复「发码→用码」
 	// 就能把 15 条总闸刷没
-	if err := s.pool.QueryRowContext(ctx,
+	if err := conn.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM otp_codes WHERE email = ? AND created_at >= ?",
 		email, dayStart(now)).Scan(&recipientCount); err != nil {
 		return "", fmt.Errorf("查收件人日总闸: %w", err)
@@ -121,23 +168,22 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 		return "", err
 	}
 
-	if _, err := s.pool.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO otp_codes (email, purpose, code_hash, expires_at, attempts, used, created_at, last_sent_at)
 		 VALUES (?, ?, ?, ?, 0, 0, ?, ?)`,
 		email, purpose, sha256Hex(code), now.Add(otpTTL).UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
 		return "", fmt.Errorf("落库验证码: %w", err)
 	}
-	// 过期行清理：表常年只有几十~几百行，全表扫可忽略；失败不挡发码
-	_, _ = s.pool.ExecContext(ctx, "DELETE FROM otp_codes WHERE created_at < ?", now.Add(-otpRetention).UnixMilli())
-	// 审计行的 90 天保留期同样挂在发码路径上清（规格 A1.4：不引入后台 goroutine，
-	// 借高频且已有的清理点顺手做）
-	cleanAuditLogs(s.pool)
 	return code, nil
 }
 
 // verify 校验并**用后即焚**（一次性的码不能再用第二次）。文案区分两种失败：
 // 没发过/过期/试错太多 → 一句「过期」，输错 → 「验证码错误」，避免把
 //「还有几次机会」这类可被利用的信息说出去。
+//
+// 整段包进事务并给命中的码行加锁（FOR UPDATE）：试错次数的读-判-写之间不再有
+// 并发窗口——同码的并发提交在这里串行化，「错 5 次作废」不会被同批并发穿透，
+// 用后即焚的烧代对并发提交也只放行一次。
 func (s *otpStore) verify(purpose, email, code string) error {
 	if len(code) == 0 {
 		return badRequest("请先获取验证码")
@@ -145,14 +191,20 @@ func (s *otpStore) verify(purpose, email, code string) error {
 	ctx := context.Background()
 	now := time.Now()
 
+	tx, err := s.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var (
 		id        int64
 		stored    string
 		expiresAt int64
 		attempts  int
 	)
-	err := s.pool.QueryRowContext(ctx,
-		"SELECT id, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND purpose = ? AND used = 0 ORDER BY id DESC LIMIT 1",
+	err = tx.QueryRowContext(ctx,
+		"SELECT id, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND purpose = ? AND used = 0 ORDER BY id DESC LIMIT 1 FOR UPDATE",
 		email, purpose).Scan(&id, &stored, &expiresAt, &attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return badRequest("验证码已过期，请重新获取")
@@ -163,22 +215,24 @@ func (s *otpStore) verify(purpose, email, code string) error {
 	// 作废整代（同 email+purpose 的全部活跃行）：库里同代可能有多行（发过多次），
 	// 只废最新一行挡不住拿旧码来试——旧内存实现一个 key 只有一条，语义天然如此
 	burnGeneration := func() {
-		_, _ = s.pool.ExecContext(ctx,
+		_, _ = tx.ExecContext(ctx,
 			"UPDATE otp_codes SET used = 1 WHERE email = ? AND purpose = ? AND used = 0", email, purpose)
 	}
 	if now.UnixMilli() > expiresAt || attempts >= otpMaxTries {
 		burnGeneration()
+		_ = tx.Commit()
 		return badRequest("验证码已过期，请重新获取")
 	}
 	if subtle.ConstantTimeCompare([]byte(stored), []byte(sha256Hex(code))) != 1 {
-		_, _ = s.pool.ExecContext(ctx, "UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?", id)
+		_, _ = tx.ExecContext(ctx, "UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?", id)
 		if attempts+1 >= otpMaxTries {
 			burnGeneration()
 		}
+		_ = tx.Commit()
 		return badRequest("验证码错误，请重新输入")
 	}
 	burnGeneration()
-	return nil
+	return tx.Commit()
 }
 
 // revoke 作废刚生成的码——只在「码已生成但信没发出去」时用，否则用户要白等
