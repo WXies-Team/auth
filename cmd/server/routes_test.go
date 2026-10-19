@@ -427,6 +427,69 @@ func TestAdminGateKeepsNonAdminsOut(t *testing.T) {
 	}
 }
 
+// M1 回归：cookie 会话调 /auth/change-password 不许把自己断掉——
+// 本会话行保活（cookie 照用）、其它会话全被踢、响应里不许出现非法 aud 的 JWT、
+// sessions 表不许留下 app='web' 却没有 web_token_hash 的僵尸行。
+func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
+	e := newRouteEnv(t)
+	uid := seedUser(t, e, "web-chpw@example.com", "secret123", "user")
+	sess, csrf := loginCookie(t, e, "web-chpw@example.com", "secret123")
+	withCSRF := func(r *http.Request) {
+		r.AddCookie(sess)
+		r.AddCookie(csrf)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	// 另一台设备：App 侧 JWT 登录（改密后应被吊销）
+	appResp, err := e.svc.Login("web-chpw@example.com", "secret123", "calorie-diary", auth.SessionMeta{})
+	if err != nil {
+		t.Fatalf("App 登录: %v", err)
+	}
+
+	// 改密（cookie + CSRF；登录即强认证，15 分钟窗内直接过）
+	rec := e.do(t, "POST", "/auth/change-password",
+		`{"oldPassword":"secret123","newPassword":"newsecret9"}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("web 改密应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	// 响应形状仍 {token,email}，但 token 必须是空串——绝不给 app='web' 的会话签 JWT
+	var resp authResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("改密回执解析: %v（%s）", err, rec.Body.String())
+	}
+	if resp.Token != "" {
+		t.Errorf("web 改密不该回 JWT（aud='web' 是死 token），得到 %q", resp.Token)
+	}
+	if resp.Email != "web-chpw@example.com" {
+		t.Errorf("回执 email 应为库里当前邮箱，得到 %q", resp.Email)
+	}
+
+	// 本会话仍可用：cookie + CSRF 打 /web/session 应 200
+	after := e.do(t, "POST", "/web/session", `{}`, withCSRF)
+	if after.Code != http.StatusOK {
+		t.Fatalf("改密后本 web 会话应仍可用，得到 %d（%s）", after.Code, after.Body.String())
+	}
+
+	// 其它会话被踢：App 侧 JWT 当场失效
+	if _, err := e.svc.Verify("Bearer "+appResp.Token, "calorie-diary"); err == nil {
+		t.Error("改密后其它会话应被吊销")
+	}
+
+	// sessions 表无僵尸行：web 行要么带 web_token_hash 且活着，要么已吊销；
+	// 不许出现 app='web' AND web_token_hash IS NULL AND revoked_at IS NULL
+	var zombies int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE user_id = ? AND app = 'web' AND web_token_hash IS NULL AND revoked_at IS NULL",
+		uid).Scan(&zombies); err != nil || zombies != 0 {
+		t.Errorf("不该留下无 web_token_hash 的活 web 行，得到 %d (err=%v)", zombies, err)
+	}
+	// 活跃行只有本会话一条（其它都被吊销）
+	var active int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NULL", uid).Scan(&active); err != nil || active != 1 {
+		t.Errorf("改密后应只剩本会话一条活跃行，得到 %d (err=%v)", active, err)
+	}
+}
+
 // cookieNamed 从响应里取指定名字的 cookie。
 func cookieNamed(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {

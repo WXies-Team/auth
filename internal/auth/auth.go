@@ -865,7 +865,7 @@ func (s *Service) ResetPassword(rawEmail, code, newPassword string) error {
 	if err != nil {
 		return err
 	}
-	return s.setPasswordAndRevoke(uid, newHash)
+	return s.setPasswordAndRevoke(uid, newHash, 0)
 }
 
 // Logout 递增 token_version——**这是 token 层吊销的唯一机制**：所有已签发 token 的
@@ -915,7 +915,8 @@ func (s *Service) loadUserAuth(userID int64) (email, hashed string, err error) {
 // 同一事务里把全部会话行也置 revoked_at：token 层判死的那批设备，会话行若留着，
 // 设备列表就是一列没有 token 的活死行（找回密码最明显——用户重登拿到新会话，
 // 旧行永远挂着没人踢得掉）。换发的新会话由 reissueToken 另建（找回密码没有换发）。
-func (s *Service) setPasswordAndRevoke(userID int64, newHash string) error {
+// keepSID > 0 时该行保活：web 会话改密走这条（cookie 不换发，续用当前行）。
+func (s *Service) setPasswordAndRevoke(userID int64, newHash string, keepSID int64) error {
 	ctx := context.Background()
 	tx, err := s.pool.BeginTx(ctx, nil)
 	if err != nil {
@@ -928,7 +929,7 @@ func (s *Service) setPasswordAndRevoke(userID int64, newHash string) error {
 		newHash, userID); err != nil {
 		return fmt.Errorf("改密: %w", err)
 	}
-	if err := revokeUserSessions(ctx, tx, userID, 0); err != nil {
+	if err := revokeUserSessions(ctx, tx, userID, keepSID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -939,6 +940,11 @@ func (s *Service) setPasswordAndRevoke(userID int64, newHash string) error {
 
 // reissueToken 读吊销后的新版本号并换发 token：当前设备拿它无缝续用，
 // 其他设备的旧 ver 已对不上（被登出的只会是它们）。aud 沿用调用方现会话的 app。
+//
+// **web 会话（app='web'）不换发**：cookie 值即会话凭据本身，当前行已由
+// setPasswordAndRevoke 的 keepSID 保活，cookie 继续有效；给它签 JWT 毫无意义
+//（aud='web' 不在白名单，签出来就是一枚谁也不认的死 token）。回体形状保持
+// {token,email}，token 恒空串——凭据只在 cookie 里。
 //
 // 邮箱从**库**取而不是沿用 token claim：改绑邮箱不 bump token_version，走到这里的
 // token 其 email claim 可能还是旧值——把旧邮箱签回新 token，会让「验证码收与验
@@ -953,6 +959,9 @@ func (s *Service) reissueToken(c Caller) (*Response, error) {
 		"SELECT token_version, email FROM users WHERE id = ?", c.UID).Scan(&next, &email); err != nil {
 		return nil, fmt.Errorf("读新版本号: %w", err)
 	}
+	if c.App == webAppLabel {
+		return &Response{Token: "", Email: email}, nil
+	}
 	sid, err := s.createSession(c.UID, c.App, c.Meta)
 	if err != nil {
 		return nil, err
@@ -964,7 +973,18 @@ func (s *Service) reissueToken(c Caller) (*Response, error) {
 	return &Response{Token: tok, Email: email}, nil
 }
 
+// changeKeepSID 是改密时**保活**的会话行 id：web 会话保当前行（cookie 不换发，
+// 续用；不留 app='web' 无 web_token_hash 的僵尸行）；App 会话回 0 = 全吊销后
+// 由 reissueToken 另建新行换新 JWT。
+func changeKeepSID(c Caller) int64 {
+	if c.App == webAppLabel {
+		return c.SID
+	}
+	return 0
+}
+
 // ChangePassword 校验旧密码、改密并**顺带吊销**（版本 +1），返回新 token 让当前设备继续用。
+// App 会话换发新 JWT；web 会话不换发（token 恒空串、当前行保活，凭据只在 cookie，见 reissueToken）。
 func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (resp *Response, err error) {
 	// 改密是安全敏感操作：成败必记（ASVS V16.3）。detail 不带任何口令字段。
 	defer func() {
@@ -990,7 +1010,8 @@ func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (res
 	if err != nil {
 		return nil, err
 	}
-	if err := s.setPasswordAndRevoke(c.UID, newHash); err != nil {
+	// web 会话保活当前行、App 会话全吊销后换发（见 changeKeepSID / reissueToken）
+	if err := s.setPasswordAndRevoke(c.UID, newHash, changeKeepSID(c)); err != nil {
 		return nil, err
 	}
 	return s.reissueToken(c)
@@ -1025,7 +1046,7 @@ func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (resp
 	if err != nil {
 		return nil, err
 	}
-	if err := s.setPasswordAndRevoke(c.UID, newHash); err != nil {
+	if err := s.setPasswordAndRevoke(c.UID, newHash, changeKeepSID(c)); err != nil {
 		return nil, err
 	}
 	return s.reissueToken(c)
