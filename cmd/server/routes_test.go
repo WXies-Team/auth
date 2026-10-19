@@ -490,6 +490,51 @@ func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
 	}
 }
 
+// m3 回归：过期/失效的残留 cookie 不再绑架同浏览器的 Bearer 请求——cookie 校验
+// 失败但带了 Authorization 头时继续尝试 Bearer，Bearer 成功即放行；两者皆败才 401。
+func TestResolveCallerStaleCookieFallsBackToBearer(t *testing.T) {
+	e := newRouteEnv(t)
+	seedUser(t, e, "stale-cookie@example.com", "secret123", "user")
+	resp, err := e.svc.Login("stale-cookie@example.com", "secret123", "calorie-diary", auth.SessionMeta{})
+	if err != nil {
+		t.Fatalf("取 JWT: %v", err)
+	}
+
+	// 残留的失效 cookie + 有效 Bearer：按 Bearer 放行（旧实现被 cookie 绑架成 401）
+	rec := e.do(t, "GET", "/api/sessions", "", func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: auth.WebCookieName, Value: "stale-leftover-token"})
+		r.Header.Set("Authorization", "Bearer "+resp.Token)
+	})
+	if rec.Code != http.StatusOK {
+		t.Errorf("残留 cookie + 有效 Bearer 应按 Bearer 放行，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	// 残留 cookie + Bearer 也无效：401（两者皆败）
+	rec = e.do(t, "GET", "/api/sessions", "", func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: auth.WebCookieName, Value: "stale-leftover-token"})
+		r.Header.Set("Authorization", "Bearer bogus.token.here")
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("两者皆败应 401，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	// 只有残留 cookie、没带 Bearer：维持原语义 401
+	rec = e.do(t, "GET", "/api/sessions", "", func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: auth.WebCookieName, Value: "stale-leftover-token"})
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("只有失效 cookie 应 401，得到 %d", rec.Code)
+	}
+	// 正常 cookie 会话不受影响
+	sess, csrf := loginCookie(t, e, "stale-cookie@example.com", "secret123")
+	rec = e.do(t, "POST", "/web/session", `{}`, func(r *http.Request) {
+		r.AddCookie(sess)
+		r.AddCookie(csrf)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	})
+	if rec.Code != http.StatusOK {
+		t.Errorf("正常 cookie 会话应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+}
+
 // cookieNamed 从响应里取指定名字的 cookie。
 func cookieNamed(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {

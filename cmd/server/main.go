@@ -469,11 +469,28 @@ func readMethod(method string) bool {
 //
 // 只有「非 JWT 形状」才落到 3：JWT 的验签失败在解析阶段就出错、不打库，
 // 少一次无谓的点查；真 503（DB 抖动）原样往上抛，不能被当成「换个凭据再试」。
+//
+// **cookie 校验失败且带了 Bearer 头时继续尝试 Bearer**：浏览器会把过期/被踢的
+// 残留 cookie 一并发上来，旧实现被它绑架成 401——同一浏览器里的 API 调用方
+//（App WebView、脚本）明明带着有效 Bearer 也进不来。cookie 失败分两档：
+// 503（DB 抖动）仍原样上抛（不能把抖动当成「换凭据再试」）；401 才回落 Bearer，
+// 两者皆败才 401。
 func resolveCaller(svc *auth.Service, r *http.Request) (auth.WebCaller, error) {
-	if ck, err := r.Cookie(auth.WebCookieName); err == nil && ck.Value != "" {
-		return svc.ValidWebSession(ck.Value)
-	}
 	header := r.Header.Get("Authorization")
+	if ck, err := r.Cookie(auth.WebCookieName); err == nil && ck.Value != "" {
+		wc, werr := svc.ValidWebSession(ck.Value)
+		if werr == nil {
+			return wc, nil
+		}
+		if header == "" {
+			return auth.WebCaller{}, werr
+		}
+		var he *auth.HTTPError
+		if errors.As(werr, &he) && he.Code == http.StatusServiceUnavailable {
+			return auth.WebCaller{}, werr
+		}
+		// 401 的残留 cookie：落到下面的 Bearer 尝试
+	}
 	if header == "" {
 		return auth.WebCaller{}, &auth.HTTPError{Code: 401, Message: "请先登录"}
 	}
