@@ -32,6 +32,9 @@ const (
 	// OWASP 的 15~30 分钟参考区间对这个场景过激，属 documented deviation（ASVS 7.1.1）。
 	webIdleTTL     = 7 * 24 * time.Hour
 	webAbsoluteTTL = 90 * 24 * time.Hour
+	// WebCookieMaxAgeSeconds 是会话 cookie 的绝对寿命（与 webAbsoluteTTL 同值的秒数）。
+	// 路由层给 Set-Cookie 用——cookie 的读写在 HTTP 层，业务层不碰它。
+	WebCookieMaxAgeSeconds = 90 * 24 * 3600
 	// ReauthWindow 是「强认证（输密码 / 过 TOTP）」的有效窗：改密、改邮、绑解 2FA、
 	// 管理写操作都要求它在 15 分钟内（ASVS V7.5.1）。
 	ReauthWindow = 15 * time.Minute
@@ -209,6 +212,54 @@ func (s *Service) RequireReauth(sid int64) error {
 		return &HTTPError{401, MsgReauthRequired}
 	}
 	return nil
+}
+
+// Reauth 完成一次强认证并刷新**本会话**的 reauth_at：密码或 TOTP 码二选一。
+//
+// 密码路复用 checkPassword（与登录同一份凭据判定，含防枚举的恒时假比对），
+// 并按 uid 比对而不是邮箱——token 里的邮箱可能已是旧值，uid 才是会话的锚。
+// 成败都进审计：这是「持登录态重拿高危操作许可」的动作，被反复尝试值得看见。
+func (s *Service) Reauth(c Caller, password, totpCode string) (err error) {
+	method := "totp"
+	if strings.TrimSpace(password) != "" {
+		method = "password"
+	}
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditReauth, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+			Detail: map[string]string{"method": method},
+		})
+	}()
+	switch {
+	case strings.TrimSpace(password) != "":
+		uid, _, err := s.checkPassword(c.Email, password)
+		if err != nil {
+			return err
+		}
+		if uid != c.UID {
+			// 邮箱对不上说明 token 身份与库不一致（改绑竞态等），按凭据错误处理
+			return unauthorized("密码不正确")
+		}
+	case strings.TrimSpace(totpCode) != "":
+		enabled, err := s.TOTPEnabled(c.UID)
+		if err != nil {
+			return err
+		}
+		if !enabled {
+			return badRequest("两步验证尚未开启，请改用密码验证")
+		}
+		ok, err := s.VerifyTOTPCode(c.UID, totpCode)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return badRequest("验证码错误，请重新输入")
+		}
+	default:
+		return badRequest("请输入密码或验证码")
+	}
+	return s.MarkReauth(c.SID)
 }
 
 // SessionRole 取当前会话用户的 role（管理后台每请求现查，不缓存——与 token_version

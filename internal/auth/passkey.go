@@ -562,7 +562,7 @@ func (s *Service) credentialIDFor(passkeyID int64) (string, error) {
 //
 // 只为列表页 current 标记服务，丢了最多是少一行高亮——会话与凭证本体都在库里。
 // 单实例假设与限流层一致（仓 AGENTS 已声明），重启即清。
-func (s *Service) markPasskeyLogin(sid int64, credentialID string) {
+func (s *Service) MarkPasskeyLogin(sid int64, credentialID string) {
 	s.credBySIDMu.Lock()
 	defer s.credBySIDMu.Unlock()
 	if s.credBySID == nil {

@@ -192,7 +192,7 @@ func TestPasskeyCredentialStorageAndSignCount(t *testing.T) {
 	}
 
 	// 列表 + current 标记（本会话登录用的那把才亮）
-	svc.markPasskeyLogin(987654321098765, base64.RawURLEncoding.EncodeToString(cred.ID))
+	svc.MarkPasskeyLogin(987654321098765, base64.RawURLEncoding.EncodeToString(cred.ID))
 	list, err := svc.ListPasskeys(c.UID, 987654321098765)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("列表: %v (n=%d)", err, len(list))

@@ -15,7 +15,7 @@ import (
 //	拿它换 TOTP/恢复码，验过才建会话；没开 2FA 直接建会话。
 //	邮箱验证码登录**不叠** TOTP——邮件通道本身就是持有因子（ASVS V6.3.6）。
 const (
-	loginStateTTL  = 5 * time.Minute
+	loginStateTTL   = 5 * time.Minute
 	loginStateFails = 5
 )
 

@@ -430,7 +430,7 @@ func (s *Service) AdminSetConfig(actor Caller, key, value string) (err error) {
 			Action: AuditAdminConfig, OK: err == nil, ActorUID: uidPtr(actor.UID),
 			ActorEmail: maskEmail(actor.Email), Meta: actor.Meta,
 			Detail: map[string]string{
-				"key":             key,
+				"key":              key,
 				"configuredBefore": boolWord(before),
 			},
 		})
@@ -565,6 +565,21 @@ func (s *Service) AdminAIUsage(days int) (*AIUsageReport, error) {
 	}
 	report.Quota = q
 	return report, nil
+}
+
+// HasPassword 回账号是否设过密码（overview 页与后台详情共用一句判定：
+// NULL 与空串都算「没密码」，那正是纯验证码并入账号的形态）。
+func (s *Service) HasPassword(uid int64) (bool, error) {
+	var pw sql.NullString
+	err := s.pool.QueryRowContext(context.Background(),
+		"SELECT password_hash FROM users WHERE id = ?", uid).Scan(&pw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, unauthorized("登录已过期，请重新登录")
+	}
+	if err != nil {
+		return false, fmt.Errorf("查密码状态: %w", err)
+	}
+	return pw.Valid && strings.TrimSpace(pw.String) != "", nil
 }
 
 // HasMFA 是管理后台「强制 MFA」的判定：绑了 TOTP 或至少一把 passkey。

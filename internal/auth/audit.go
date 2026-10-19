@@ -98,6 +98,10 @@ func (s *Service) Audit(e AuditEvent) {
 	}
 }
 
+// MaskEmail 是掩码邮箱的导出入口：路由层在补老端点的审计时也要同一套口径
+//（本地部分只留首字符），两处各写一遍必然漂。
+func MaskEmail(email string) string { return maskEmail(email) }
+
 // AuditFromError 是「拿 err 直接落一条」的便携形态：err==nil 即成功。
 func (s *Service) AuditFromError(e AuditEvent, err error) {
 	e.OK = err == nil
@@ -140,7 +144,7 @@ type AuditQuery struct {
 // AuditLimit / AuditOffsetCap：审计查询的页大小与翻页上限。50 是管理台一页
 // 放得下的量；偏移上限挡住「无脑翻到表底」把连接池拖住。
 const (
-	AuditLimit    = 50
+	AuditLimit     = 50
 	AuditOffsetCap = 100000
 )
 

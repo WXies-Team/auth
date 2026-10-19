@@ -180,6 +180,10 @@ type WebSessionResponse struct {
 	CSRFToken    string `json:"csrfToken"`
 	TotpEnabled  bool   `json:"totpEnabled"`
 	PasskeyCount int    `json:"passkeyCount"`
+	// PasswordSet 是规格 A2.3 字段之外的**附加只读位**：概览页要如实显示
+	// 「密码这一行现在是什么状态」，而纯验证码并入的账号本来就没有密码——
+	// 加字段不改既有字段，老调用方零影响。
+	PasswordSet bool `json:"passwordSet"`
 }
 
 // WebReauthRequest 是 POST /web/reauth 的请求体：Password 与 TOTPCode 二选一，
@@ -205,6 +209,12 @@ type PasskeyRenameRequest struct {
 //（enable / disable / regenerate-recovery-codes 都只要一个码）。
 type CodeRequest struct {
 	Code string `json:"code"`
+}
+
+// RecoveryCodesResponse 是 /api/totp/enable 与 regenerate-recovery-codes 的回执：
+// 恢复码**只在这一次响应里出现**，服务端此后只有哈希，忘了就只能换发。
+type RecoveryCodesResponse struct {
+	RecoveryCodes []string `json:"recoveryCodes"`
 }
 
 // ApiError 对应 ApiError：所有非 200 回执的统一响应体。
