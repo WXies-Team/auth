@@ -462,7 +462,7 @@ function initPasskeys() {
     try {
       const rows = await api('/api/passkeys');
       if (!rows.length) {
-        list.innerHTML = '<div class="empty">还没有 Passkey，点右上角「添加 Passkey」创建一个。</div>';
+        list.innerHTML = '<div class="empty">还没有 Passkey，点击右上角「添加 Passkey」创建一个。</div>';
         return;
       }
       list.innerHTML = '';
@@ -1190,9 +1190,29 @@ function closeDialog(dlg) {
   if (dlg.open && typeof dlg.close === 'function') dlg.close(); else dlg.removeAttribute('open');
 }
 
+/* tablist 的键盘行为：左右键与 Home/End 在同组标签间移动焦点并切换，
+   否则 role=tab 只能用 Tab 一个个跳，读屏/键盘用户拿不到「一组控件」的语义。 */
+function wireTabs() {
+  $$('.tabs[role="tablist"]').forEach(list => {
+    const tabs = $$('[role="tab"]', list);
+    tabs.forEach((tab, i) => tab.addEventListener('keydown', e => {
+      let j = -1;
+      if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') j = 0;
+      else if (e.key === 'End') j = tabs.length - 1;
+      if (j < 0) return;
+      e.preventDefault();
+      tabs[j].focus();
+      tabs[j].click();
+    }));
+  });
+}
+
 /* ---------- 入口 ---------- */
 document.addEventListener('DOMContentLoaded', () => {
   wireReauth();
+  wireTabs();
   initAdminGuard();
   initLogin();
   initConsole();
