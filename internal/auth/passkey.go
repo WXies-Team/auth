@@ -421,6 +421,11 @@ func (s *Service) RenamePasskey(c Caller, id int64, name string) (err error) {
 
 // DeletePasskey 删凭证。守卫：**至少保留一种登录方式**——若这是最后一把 passkey
 // 且账号既无密码也没开两步验证，拒绝（恢复手段不得弱于常规登录，OWASP MFA CS）。
+//
+// 守卫与 DELETE 在**同一事务**里，计数走 `SELECT COUNT(*) … FOR UPDATE`：
+// InnoDB 对计数扫描到的行加排他锁，并发删两把时后来者会等前者提交后重新数，
+// 看到的总数已是 1 → 守卫拦下。旧实现「先查后删」两步分离，并发下两把能同时
+// 通过「总数=2」的检查再各自删掉，账号当场失去最后一种登录方式。
 func (s *Service) DeletePasskey(c Caller, id int64) (err error) {
 	defer func() {
 		s.Audit(AuditEvent{
@@ -430,8 +435,14 @@ func (s *Service) DeletePasskey(c Caller, id int64) (err error) {
 	}()
 	uid := c.UID
 	ctx := context.Background()
+	tx, err := s.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var rp string
-	err = s.pool.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		"SELECT rp_id FROM passkeys WHERE id = ? AND user_id = ?", id, uid).Scan(&rp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &HTTPError{404, "该 Passkey 不存在"}
@@ -441,17 +452,18 @@ func (s *Service) DeletePasskey(c Caller, id int64) (err error) {
 	}
 
 	var total int
-	if err := s.pool.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM passkeys WHERE user_id = ? AND rp_id = ?", uid, passkeyRPID).Scan(&total); err != nil {
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM passkeys WHERE user_id = ? AND rp_id = ? FOR UPDATE",
+		uid, passkeyRPID).Scan(&total); err != nil {
 		return fmt.Errorf("数 passkey: %w", err)
 	}
 	if total <= 1 {
 		var pw sql.NullString
 		var totp int
-		if err := s.pool.QueryRowContext(ctx, "SELECT password_hash FROM users WHERE id = ?", uid).Scan(&pw); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT password_hash FROM users WHERE id = ?", uid).Scan(&pw); err != nil {
 			return fmt.Errorf("查密码: %w", err)
 		}
-		if err := s.pool.QueryRowContext(ctx,
+		if err := tx.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM totp_factors WHERE user_id = ? AND enabled = 1", uid).Scan(&totp); err != nil {
 			return fmt.Errorf("查两步验证: %w", err)
 		}
@@ -460,9 +472,12 @@ func (s *Service) DeletePasskey(c Caller, id int64) (err error) {
 			return badRequest("这是最后一种登录方式，删除后将无法登录：请先设置密码或开启两步验证")
 		}
 	}
-	if _, err := s.pool.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM passkeys WHERE id = ? AND user_id = ? AND rp_id = ?", id, uid, passkeyRPID); err != nil {
 		return fmt.Errorf("删除 passkey: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交删除: %w", err)
 	}
 	return nil
 }

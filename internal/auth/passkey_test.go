@@ -3,6 +3,8 @@ package auth
 import (
 	"encoding/base64"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -275,5 +277,53 @@ func TestDeletePasskeyGuardsLastLoginMethod(t *testing.T) {
 	cerr := svc.DeletePasskey(withPwd, 999999999999999999)
 	if code, _ := httpMsg(cerr); code != 404 {
 		t.Errorf("别人的/不存在的凭证应 404，得到 %d", code)
+	}
+}
+
+// m2 回归：删除守卫与 DELETE 并入同一事务、计数 FOR UPDATE——账号只剩两把 passkey
+// 且无密码无 2FA 时，并发删两把必有一方吃 400，绝不允许两把同时消失。
+func TestDeletePasskeyConcurrentKeepsOneLoginMethod(t *testing.T) {
+	svc, mailer := newTestService(t)
+	c := newPasskeyUser(t, svc, mailer, "pk-race@example.com")
+	// 造「无密码 + 无 2FA」形态：守卫是唯一的保命闸
+	if _, err := svc.pool.Exec("UPDATE users SET password_hash = NULL WHERE id = ?", c.UID); err != nil {
+		t.Fatalf("去掉密码: %v", err)
+	}
+	idA, err := svc.insertCredential(c.UID, "A", &webauthn.Credential{ID: []byte("cred-race-a"), PublicKey: []byte{1}})
+	if err != nil {
+		t.Fatalf("落凭证 A: %v", err)
+	}
+	idB, err := svc.insertCredential(c.UID, "B", &webauthn.Credential{ID: []byte("cred-race-b"), PublicKey: []byte{1}})
+	if err != nil {
+		t.Fatalf("落凭证 B: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var oks, guards atomic.Int64
+	start := make(chan struct{})
+	for _, id := range []int64{idA, idB} {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+			<-start
+			err := svc.DeletePasskey(c, id)
+			switch {
+			case err == nil:
+				oks.Add(1)
+			case strings.Contains(err.Error(), "最后一种登录方式"):
+				guards.Add(1)
+			default:
+				t.Errorf("意外错误: %v", err)
+			}
+		}(id)
+	}
+	close(start)
+	wg.Wait()
+	if oks.Load() != 1 || guards.Load() != 1 {
+		t.Errorf("并发删两把应恰好一成一拒，得到 成功=%d 拦下=%d", oks.Load(), guards.Load())
+	}
+	var remain int
+	if err := svc.pool.QueryRow("SELECT COUNT(*) FROM passkeys WHERE user_id = ?", c.UID).Scan(&remain); err != nil || remain != 1 {
+		t.Errorf("最后应恰好剩一把，得到 %d (err=%v)", remain, err)
 	}
 }
