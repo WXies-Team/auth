@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -281,8 +282,10 @@ func internalVerify(v verifier) http.Handler {
 }
 
 // userEnsurer 是 internalEnsure 依赖的最小接口：路由层测试注入假实现，不必拉起真库。
+// Audit 也收进接口：并入成功后要补一条审计（actor 是 hook_token 持有方，匿名事件）。
 type userEnsurer interface {
 	EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.EnsureUserResult, error)
+	Audit(e auth.AuditEvent)
 }
 
 // internalEnsure 是存量用户并入端点：POST /internal/users/ensure，
@@ -318,6 +321,15 @@ func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
 		}
 		// 结果按入参顺序回，uid 是 int64（writeJSON 不会把它转成浮点）
 		results, err := svc.EnsureUsers(entries)
+		// 并入是账号生命周期的大动作（存量迁移的唯一入口）：成功必记（m9）。
+		// actor 是 hook_token 持有方——迁移脚本没有用户身份，落匿名事件，
+		// detail 只记批量数（邮箱在 users 表里，审计表不留明文）。
+		if err == nil {
+			svc.Audit(auth.AuditEvent{
+				Action: auth.AuditInternalEnsure, OK: true,
+				Detail: map[string]string{"count": strconv.Itoa(len(entries))},
+			})
+		}
 		writeResult(w, results, err)
 	})
 }

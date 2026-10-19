@@ -43,6 +43,9 @@ const (
 	AuditAdminSession   = "admin.session.revoke"
 	AuditAdminConfig    = "admin.config.set"
 	AuditAdminAuditView = "admin.audit.view"
+	// AuditInternalEnsure 存量用户并入（POST /internal/users/ensure）：actor 是
+	// hook_token 的持有方（迁移脚本，无用户身份 → 匿名事件），detail 记批量数。
+	AuditInternalEnsure = "internal.ensure"
 
 	// auditRetention：审计行保留 90 天。更久的对个人账号服务没有决策价值，
 	// 只剩隐私暴露面（ASVS V16.1 要求定义保留期）。

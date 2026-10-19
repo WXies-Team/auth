@@ -242,10 +242,11 @@ func TestInternalVerifyRateLimitPerApp(t *testing.T) {
 
 // fakeEnsurer 实现 userEnsurer：并入端点的鉴权与解码链路不依赖真库。
 type fakeEnsurer struct {
-	got   []protocol.EnsureUserEntry
-	res   []protocol.EnsureUserResult
-	err   error
-	calls int
+	got    []protocol.EnsureUserEntry
+	res    []protocol.EnsureUserResult
+	err    error
+	calls  int
+	audits []auth.AuditEvent
 }
 
 func (f *fakeEnsurer) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.EnsureUserResult, error) {
@@ -253,6 +254,8 @@ func (f *fakeEnsurer) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protoco
 	f.got = entries
 	return f.res, f.err
 }
+
+func (f *fakeEnsurer) Audit(e auth.AuditEvent) { f.audits = append(f.audits, e) }
 
 // 存量并入端点：Bearer hook_token 对不上（含键没配）一律 401 且不碰业务；
 // 对上了才解码并转交 EnsureUsers，回执 uid 必须是整数文本。
@@ -334,5 +337,42 @@ func TestInternalEnsureAuthAndPassthrough(t *testing.T) {
 	internalEnsure(lookup, f).ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "下标 1") {
 		t.Errorf("业务错误应原样翻译，得到 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// m9：成功后补一条 internal.ensure 审计（actor 是 hook_token 持有方 → 匿名，
+	// detail 只记批量数）；失败与鉴权拒绝都不记
+	f = &fakeEnsurer{res: []protocol.EnsureUserResult{{Email: "a@b.com", UID: 1234567}}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	internalEnsure(lookup, f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("鉴权通过应 200，得到 %d", rec.Code)
+	}
+	if len(f.audits) != 1 {
+		t.Fatalf("成功并入应记 1 条审计，得到 %d 条", len(f.audits))
+	}
+	ae := f.audits[0]
+	if ae.Action != auth.AuditInternalEnsure || !ae.OK || ae.ActorUID != nil {
+		t.Errorf("审计事件不对: %+v", ae)
+	}
+	if ae.Detail["count"] != "1" {
+		t.Errorf("审计 detail.count 应为批量数 1，得到 %q", ae.Detail["count"])
+	}
+
+	f = &fakeEnsurer{err: &auth.HTTPError{Code: 400, Message: "下标 1 的条目: 邮箱格式不正确"}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	internalEnsure(lookup, f).ServeHTTP(rec, req)
+	if len(f.audits) != 0 {
+		t.Errorf("失败并入不该记成功审计，得到 %d 条", len(f.audits))
+	}
+	f = &fakeEnsurer{}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
+	internalEnsure(lookup, f).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || len(f.audits) != 0 {
+		t.Errorf("鉴权拒绝不该记审计，得到 code=%d audits=%d", rec.Code, len(f.audits))
 	}
 }
