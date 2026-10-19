@@ -210,17 +210,17 @@ func TestRenamePasskey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("落凭证: %v", err)
 	}
-	if err := svc.RenamePasskey(c.UID, id, "  新的名字  "); err != nil {
+	if err := svc.RenamePasskey(c, id, "  新的名字  "); err != nil {
 		t.Fatalf("改名: %v", err)
 	}
 	var name string
 	if err := svc.pool.QueryRow("SELECT name FROM passkeys WHERE id = ?", id).Scan(&name); err != nil || name != "新的名字" {
 		t.Errorf("名字应 trim 后落库，得到 %q err=%v", name, err)
 	}
-	if err := svc.RenamePasskey(c.UID, id, "   "); err == nil {
+	if err := svc.RenamePasskey(c, id, "   "); err == nil {
 		t.Error("空名应拒绝")
 	}
-	cerr := svc.RenamePasskey(c.UID, 1234567890123456789, "x")
+	cerr := svc.RenamePasskey(c, 1234567890123456789, "x")
 	if code, _ := httpMsg(cerr); code != 404 {
 		t.Errorf("不存在的 id 应 404，得到 %d", code)
 	}
@@ -236,7 +236,7 @@ func TestDeletePasskeyGuardsLastLoginMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("落凭证: %v", err)
 	}
-	if err := svc.DeletePasskey(withPwd.UID, idA); err != nil {
+	if err := svc.DeletePasskey(withPwd, idA); err != nil {
 		t.Errorf("有密码的账号应能删 passkey: %v", err)
 	}
 
@@ -249,7 +249,7 @@ func TestDeletePasskeyGuardsLastLoginMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("落凭证: %v", err)
 	}
-	err = svc.DeletePasskey(noPwd.UID, idB)
+	err = svc.DeletePasskey(noPwd, idB)
 	if err == nil || !strings.Contains(err.Error(), "最后一种登录方式") {
 		t.Errorf("应拒绝并说明原因，得到 %v", err)
 	}
@@ -267,11 +267,11 @@ func TestDeletePasskeyGuardsLastLoginMethod(t *testing.T) {
 		time.Now().UnixMilli(), noPwd.UID); err != nil {
 		t.Fatalf("置 enabled: %v", err)
 	}
-	if err := svc.DeletePasskey(noPwd.UID, idB); err != nil {
+	if err := svc.DeletePasskey(noPwd, idB); err != nil {
 		t.Errorf("有两步验证兜底时应能删: %v", err)
 	}
 	// 不属于自己的 id → 404（与不存在同形，不给存在性探针）
-	cerr := svc.DeletePasskey(withPwd.UID, 999999999999999999)
+	cerr := svc.DeletePasskey(withPwd, 999999999999999999)
 	if code, _ := httpMsg(cerr); code != 404 {
 		t.Errorf("别人的/不存在的凭证应 404，得到 %d", code)
 	}

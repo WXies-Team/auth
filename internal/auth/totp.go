@@ -169,7 +169,15 @@ func (s *Service) TOTPStatus(uid int64) (TOTPStatus, error) {
 // 已绑定时按**重置流程**走：新 secret 只作为 pending 进来，旧 secret 与 enabled
 // 原样保留——发起 setup 的人哪怕是一时被冒用，也废不掉受害者手上那台验证器，
 // 直到新码在 enable 里被验过（A1.2 第 3 步）。
-func (s *Service) SetupTOTP(c Caller) (*TOTPSetup, error) {
+func (s *Service) SetupTOTP(c Caller) (setup *TOTPSetup, err error) {
+	defer func() {
+		// setup 只是 pending：没启用前它不是安全能力的变化，但它是「有人在动
+		// 两步验证」的信号，成败都记
+		s.Audit(AuditEvent{
+			Action: AuditTOTPSetup, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+		})
+	}()
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      totpIssuer,
 		AccountName: c.Email,
@@ -234,7 +242,21 @@ func keyImage(key *otp.Key) ([]byte, error) {
 
 // EnableTOTP 验一次码才启用（先验后启），同事务生成 10 个恢复码——
 // 两步不同批的话，「已启用但没有恢复码」的中间态会让 TOTP 一丢就锁死账号。
-func (s *Service) EnableTOTP(c Caller, code string) ([]string, error) {
+func (s *Service) EnableTOTP(c Caller, code string) (codes []string, err error) {
+	defer func() {
+		if err == nil {
+			// 启用与恢复码生成是同一批动作的两件事，各记一条（规格 A2.2「审计×2」）
+			s.Audit(AuditEvent{
+				Action: AuditTOTPEnable, OK: true, ActorUID: uidPtr(c.UID),
+				ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+			})
+			s.Audit(AuditEvent{
+				Action: AuditRecoveryGen, OK: true, ActorUID: uidPtr(c.UID),
+				ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+				Detail: map[string]string{"reason": "enable"},
+			})
+		}
+	}()
 	if strings.TrimSpace(code) == "" {
 		return nil, badRequest("请输入验证码")
 	}
@@ -265,7 +287,7 @@ func (s *Service) EnableTOTP(c Caller, code string) ([]string, error) {
 		return nil, err
 	}
 	now := time.Now()
-	codes, err := generateRecoveryCodes()
+	codes, err = generateRecoveryCodes()
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +324,13 @@ func (s *Service) EnableTOTP(c Caller, code string) ([]string, error) {
 // DisableTOTP 关闭两步验证：当前 TOTP 码或恢复码任一可解（TOTP 手机丢了就靠
 // 恢复码收尾，堵死「丢了手机+没恢复码」之外的任何死锁）。解绑同时删恢复码，
 // 并吊销其它会话——因子变了，别让旧设备继续挂着（ASVS 7.4.3）。
-func (s *Service) DisableTOTP(c Caller, code string) error {
+func (s *Service) DisableTOTP(c Caller, code string) (err error) {
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditTOTPDisable, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+		})
+	}()
 	if strings.TrimSpace(code) == "" {
 		return badRequest("请输入验证码")
 	}
@@ -313,7 +341,7 @@ func (s *Service) DisableTOTP(c Caller, code string) error {
 	if f == nil || !f.Enabled {
 		return badRequest("两步验证尚未开启")
 	}
-	used, err := s.consumeRecoveryCode(c.UID, code)
+	used, err := s.consumeRecoveryCode(c.UID, code, c.Meta)
 	if err != nil {
 		return err
 	}
@@ -322,7 +350,7 @@ func (s *Service) DisableTOTP(c Caller, code string) error {
 		if !ok {
 			return badRequest("验证码错误，请重新输入")
 		}
-		// 记下命中步进：换发恢复码用过的码，不能再拿来解绑
+		// 记下命中步进：解绑用过的码，不能再拿来换发恢复码
 		if _, err := s.pool.ExecContext(context.Background(),
 			"UPDATE totp_factors SET last_used_timestep = ? WHERE user_id = ?", step, c.UID); err != nil {
 			return fmt.Errorf("记录 TOTP timestep: %w", err)
@@ -348,7 +376,17 @@ func (s *Service) DisableTOTP(c Caller, code string) error {
 }
 
 // RegenerateRecoveryCodes 换发恢复码：验 TOTP 或任一旧恢复码，整组换新、旧组即废。
-func (s *Service) RegenerateRecoveryCodes(c Caller, code string) ([]string, error) {
+func (s *Service) RegenerateRecoveryCodes(c Caller, code string) (codes []string, err error) {
+	defer func() {
+		// 换发即整组作废，是安全事件：成功必记（失败由调用方的 4xx 体现）
+		if err == nil {
+			s.Audit(AuditEvent{
+				Action: AuditRecoveryGen, OK: true, ActorUID: uidPtr(c.UID),
+				ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+				Detail: map[string]string{"reason": "regenerate"},
+			})
+		}
+	}()
 	if strings.TrimSpace(code) == "" {
 		return nil, badRequest("请输入验证码")
 	}
@@ -359,7 +397,7 @@ func (s *Service) RegenerateRecoveryCodes(c Caller, code string) ([]string, erro
 	if f == nil || !f.Enabled {
 		return nil, badRequest("两步验证尚未开启")
 	}
-	used, err := s.consumeRecoveryCode(c.UID, code)
+	used, err := s.consumeRecoveryCode(c.UID, code, c.Meta)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +411,7 @@ func (s *Service) RegenerateRecoveryCodes(c Caller, code string) ([]string, erro
 			return nil, fmt.Errorf("记录 TOTP timestep: %w", err)
 		}
 	}
-	codes, err := generateRecoveryCodes()
+	codes, err = generateRecoveryCodes()
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +500,10 @@ func (s *Service) verifyTOTPAt(secret, code string, lastStep int64) (int64, bool
 
 // consumeRecoveryCode 尝试消费一个恢复码：命中即置 used=1 并回 true。
 // 归一化在服务端做（去空格/连字符、大写）——手抄时多打个空格不该判错。
-func (s *Service) consumeRecoveryCode(uid int64, code string) (bool, error) {
+//
+// 只有**命中**才落 recovery.consume 审计：拿乱码试的失败轮次已经在
+// login.fail 里计着，逐次记只会让表被爆破尝试灌满。
+func (s *Service) consumeRecoveryCode(uid int64, code string, meta SessionMeta) (bool, error) {
 	norm := normalizeRecoveryCode(code)
 	if norm == "" {
 		return false, nil
@@ -477,6 +518,11 @@ func (s *Service) consumeRecoveryCode(uid int64, code string) (bool, error) {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("读消费结果: %w", err)
+	}
+	if n == 1 {
+		s.Audit(AuditEvent{
+			Action: AuditRecoveryUse, OK: true, ActorUID: uidPtr(uid), Meta: meta,
+		})
 	}
 	return n == 1, nil
 }

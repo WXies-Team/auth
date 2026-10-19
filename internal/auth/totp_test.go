@@ -174,14 +174,14 @@ func TestRecoveryCodesSingleUseAndRegeneration(t *testing.T) {
 		t.Fatalf("enable: %v", err)
 	}
 	// 连字符、空白、大小写都归一化（手抄不算错）
-	used, err := svc.consumeRecoveryCode(c.UID, "  "+codes[0]+" ")
+	used, err := svc.consumeRecoveryCode(c.UID, "  "+codes[0]+" ", SessionMeta{})
 	if err != nil || !used {
 		t.Fatalf("首个恢复码应可用: used=%v err=%v", used, err)
 	}
-	if used, _ := svc.consumeRecoveryCode(c.UID, codes[0]); used {
+	if used, _ := svc.consumeRecoveryCode(c.UID, codes[0], SessionMeta{}); used {
 		t.Error("恢复码只能用一次")
 	}
-	if used, _ := svc.consumeRecoveryCode(c.UID, "AAAA-BBBB-CCCC-DDDD"); used {
+	if used, _ := svc.consumeRecoveryCode(c.UID, "AAAA-BBBB-CCCC-DDDD", SessionMeta{}); used {
 		t.Error("乱造的码不该命中")
 	}
 
@@ -195,11 +195,11 @@ func TestRecoveryCodesSingleUseAndRegeneration(t *testing.T) {
 		t.Errorf("换发应回 %d 个，得到 %d", recoveryCodeCount, len(next))
 	}
 	for _, rc := range codes[1:] {
-		if used, _ := svc.consumeRecoveryCode(c.UID, rc); used {
+		if used, _ := svc.consumeRecoveryCode(c.UID, rc, SessionMeta{}); used {
 			t.Errorf("旧组恢复码在换发后必须作废: %q", rc)
 		}
 	}
-	if used, _ := svc.consumeRecoveryCode(c.UID, next[0]); !used {
+	if used, _ := svc.consumeRecoveryCode(c.UID, next[0], SessionMeta{}); !used {
 		t.Error("新组首个恢复码应可用")
 	}
 }

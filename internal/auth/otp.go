@@ -129,6 +129,9 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 	}
 	// 过期行清理：表常年只有几十~几百行，全表扫可忽略；失败不挡发码
 	_, _ = s.pool.ExecContext(ctx, "DELETE FROM otp_codes WHERE created_at < ?", now.Add(-otpRetention).UnixMilli())
+	// 审计行的 90 天保留期同样挂在发码路径上清（规格 A1.4：不引入后台 goroutine，
+	// 借高频且已有的清理点顺手做）
+	cleanAuditLogs(s.pool)
 	return code, nil
 }
 

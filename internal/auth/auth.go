@@ -433,7 +433,17 @@ func (s *Service) userExists(email string) (bool, error) {
 // **验证码必填**：校验放在「查重」之后——注册状态本就是既有接口对所有请求可见的
 // 信息，提前验证码校验换不来任何防护，只会让老客户端看到陌生的「验证码错误」。
 // meta 是本次请求的来源（IP/UA），注册即登录，所以同样要建一行登录会话。
-func (s *Service) Register(rawEmail, password, code, app string, meta SessionMeta) (*Response, error) {
+func (s *Service) Register(rawEmail, password, code, app string, meta SessionMeta) (resp *Response, err error) {
+	// 审计成败都记：注册是账号生命周期的起点，失败尝试（验证码错、邮箱已占）
+	// 同样有排查价值。uid 在生成后回填，defer 闭包读的是最终值。
+	var uid int64
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditRegister, OK: err == nil, ActorUID: uidPtr(uid),
+			ActorEmail: maskEmail(normalizeEmail(rawEmail)), Meta: meta,
+			Detail: map[string]string{"app": app},
+		})
+	}()
 	email := normalizeEmail(rawEmail)
 	if err := validateEmail(email); err != nil {
 		return nil, err
@@ -461,7 +471,7 @@ func (s *Service) Register(rawEmail, password, code, app string, meta SessionMet
 	}
 
 	// 雪花 id 由服务生成，不走 LastInsertId——users.id 不是自增列
-	uid := s.ids.Generate().Int64()
+	uid = s.ids.Generate().Int64()
 	// 用户行与会话行同批提交：会话插入单走一次、失败了却把账号留下，用户重试
 	// 只会撞「该邮箱已注册」，而他手里既没有 token 也没有会话。
 	ctx := context.Background()
@@ -566,26 +576,36 @@ func (s *Service) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.En
 
 // Login 校验凭据并签发 token。邮箱不存在与密码错误**返回同一句话**，
 // 避免被人用来枚举哪些邮箱注册过。meta（IP/UA）给这次登录建 session 行。
-func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (*Response, error) {
+func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (resp *Response, err error) {
+	// 审计：成功/失败都记，detail.method=password 与另外两条登录路区分。
+	// 密码**绝不**进 detail（测试有白盒断言钉这一条）。
+	var uid int64
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(uid),
+			ActorEmail: maskEmail(normalizeEmail(rawEmail)), Meta: meta,
+			Detail: map[string]string{"method": "password", "app": app},
+		})
+	}()
 	// app 格式错是客户端 bug，先于凭据校验回 400（凭据类 401 会误导排障）
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
-	id, version, err := s.checkPassword(rawEmail, password)
+	uid, version, err := s.checkPassword(rawEmail, password)
 	if err != nil {
 		return nil, err
 	}
 	// 兼容开关（默认关）：账号开了 2FA 且该 App 在 totp_enforce_apps 名单里 →
 	// 拒绝老端点密码登录，提示升级。判定放在密码验过**之后**——没对上密码的
 	// 请求不该听得出「这账号开了 2FA」。
-	if s.enforceTOTPFor(app, id) {
+	if s.enforceTOTPFor(app, uid) {
 		return nil, &HTTPError{401, "请升级应用后使用新版登录"}
 	}
-	sid, err := s.createSession(id, app, meta)
+	sid, err := s.createSession(uid, app, meta)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := s.createToken(id, normalizeEmail(rawEmail), app, version, sid)
+	tok, err := s.createToken(uid, normalizeEmail(rawEmail), app, version, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -745,19 +765,27 @@ func (s *Service) SendChangeEmailCode(c Caller, rawEmail string) error {
 // 「验证码已过期」。**未注册先于验码返回**：没发过码的邮箱若先验码只会回
 // 「验证码已过期」，那不是可执行的下一步，「邮箱未注册，请先注册」才是。
 // 免密登录，与 Login 同语义：只签发、不动 token_version（不吊销其它会话）。
-func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta) (*Response, error) {
+func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta) (resp *Response, err error) {
+	var uid int64
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(uid),
+			ActorEmail: maskEmail(normalizeEmail(rawEmail)), Meta: meta,
+			Detail: map[string]string{"method": "email_code", "app": app},
+		})
+	}()
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
-	id, version, email, err := s.checkLoginCode(rawEmail, code)
+	uid, version, email, err := s.checkLoginCode(rawEmail, code)
 	if err != nil {
 		return nil, err
 	}
-	sid, err := s.createSession(id, app, meta)
+	sid, err := s.createSession(uid, app, meta)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := s.createToken(id, email, app, version, sid)
+	tok, err := s.createToken(uid, email, app, version, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -912,7 +940,14 @@ func (s *Service) reissueToken(c Caller) (*Response, error) {
 }
 
 // ChangePassword 校验旧密码、改密并**顺带吊销**（版本 +1），返回新 token 让当前设备继续用。
-func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (*Response, error) {
+func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (resp *Response, err error) {
+	// 改密是安全敏感操作：成败必记（ASVS V16.3）。detail 不带任何口令字段。
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditPasswordChange, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+		})
+	}()
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
 	}
@@ -940,7 +975,14 @@ func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (*Re
 // 邮箱**，验证通过即改密并 token_version+1 吊销其他设备；当前设备拿返回的新 token
 // 无缝续用（与 ChangePassword 同一契约）。
 // 强度校验放在验码之前：先拒弱密码、不白烧一次码的试错次数。
-func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (*Response, error) {
+func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (resp *Response, err error) {
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditPasswordChange, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+			Detail: map[string]string{"method": "code"},
+		})
+	}()
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
 	}
@@ -964,7 +1006,15 @@ func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (*Res
 // **不 bump token_version**：改邮箱不是凭证变更，现会话保持登录（与改密相反）。
 // 通知信失败只记日志——信没发出去不该把已经完成的改绑回滚成 500。
 // 码信与两封通知信的品牌都取现会话的 app（见 brandFor），三封信同源不漂。
-func (s *Service) ChangeEmail(c Caller, password, rawEmail, code string) error {
+func (s *Service) ChangeEmail(c Caller, password, rawEmail, code string) (err error) {
+	defer func() {
+		// 改绑前后两个邮箱都在事件里（都掩码）：用户要能认出「哪次改绑发给了谁」
+		s.Audit(AuditEvent{
+			Action: AuditEmailChange, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+			Detail: map[string]string{"newEmail": maskEmail(normalizeEmail(rawEmail))},
+		})
+	}()
 	email := normalizeEmail(rawEmail)
 	if err := validateEmail(email); err != nil {
 		return err

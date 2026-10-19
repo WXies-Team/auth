@@ -262,6 +262,11 @@ func (s *Service) FinishPasskeyRegistration(c Caller, ceremonyID int64, body []b
 	if err != nil {
 		return nil, err
 	}
+	s.Audit(AuditEvent{
+		Action: AuditPasskeyCreate, OK: true, ActorUID: uidPtr(c.UID),
+		ActorEmail: maskEmail(c.Email), Meta: meta,
+		Detail: map[string]string{"name": name, "credentialId": base64.RawURLEncoding.EncodeToString(cred.ID)},
+	})
 	return &PasskeyInfo{ID: id, Name: name, CreatedAt: time.Now().UnixMilli(), LastUsedAt: 0}, nil
 }
 
@@ -386,14 +391,22 @@ func (s *Service) ListPasskeys(uid, currentSID int64) ([]PasskeyInfo, error) {
 }
 
 // RenamePasskey 只改名字：名字是纯展示字段，动它不碰凭证与仪式。
-func (s *Service) RenamePasskey(uid, id int64, name string) error {
+// 吃 Caller 而不是裸 uid——审计要 actor 的邮箱与来源（IP/UA），这两样只在会话身份里。
+func (s *Service) RenamePasskey(c Caller, id int64, name string) (err error) {
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditPasskeyRename, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+			Detail: map[string]string{"name": name},
+		})
+	}()
 	name = truncateRunes(strings.TrimSpace(name), 64)
 	if name == "" {
 		return badRequest("名称不能为空")
 	}
 	res, err := s.pool.ExecContext(context.Background(),
 		"UPDATE passkeys SET name = ? WHERE id = ? AND user_id = ? AND rp_id = ?",
-		name, id, uid, passkeyRPID)
+		name, id, c.UID, passkeyRPID)
 	if err != nil {
 		return fmt.Errorf("改名: %w", err)
 	}
@@ -405,10 +418,17 @@ func (s *Service) RenamePasskey(uid, id int64, name string) error {
 
 // DeletePasskey 删凭证。守卫：**至少保留一种登录方式**——若这是最后一把 passkey
 // 且账号既无密码也没开两步验证，拒绝（恢复手段不得弱于常规登录，OWASP MFA CS）。
-func (s *Service) DeletePasskey(uid, id int64) error {
+func (s *Service) DeletePasskey(c Caller, id int64) (err error) {
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditPasskeyDelete, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+		})
+	}()
+	uid := c.UID
 	ctx := context.Background()
 	var rp string
-	err := s.pool.QueryRowContext(ctx,
+	err = s.pool.QueryRowContext(ctx,
 		"SELECT rp_id FROM passkeys WHERE id = ? AND user_id = ?", id, uid).Scan(&rp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &HTTPError{404, "该 Passkey 不存在"}

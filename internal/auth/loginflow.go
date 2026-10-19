@@ -34,6 +34,21 @@ type WebLoginResult struct {
 	usedMethod string
 }
 
+// resUID / resEmail 从登录回执里取审计要用的身份（失败时回执为 nil → 匿名事件）。
+func resUID(res *WebLoginResult) int64 {
+	if res == nil {
+		return 0
+	}
+	return res.UID
+}
+
+func resEmail(res *WebLoginResult, fallback string) string {
+	if res == nil {
+		return fallback
+	}
+	return res.Email
+}
+
 // loginStateRow 是 login_states 一行的读出结果。
 type loginStateRow struct {
 	uid    int64
@@ -42,7 +57,19 @@ type loginStateRow struct {
 
 // WebLoginPassword 密码登录第一步：验密码 → 无 2FA 直接建会话，有 2FA 发中间态。
 // 凭据判定复用 checkPassword（与老端点 /auth/login 同一份实现）。
-func (s *Service) WebLoginPassword(rawEmail, password string, meta SessionMeta) (*WebLoginResult, error) {
+func (s *Service) WebLoginPassword(rawEmail, password string, meta SessionMeta) (res *WebLoginResult, err error) {
+	// 登录失败必记（method=password）；**两步中间态不算成功也不算失败**——
+	// 密码对了但还没过第二步，真正的结论由 WebLoginTOTP 那条事件给出。
+	defer func() {
+		if err == nil && (res == nil || res.Session == nil) {
+			return
+		}
+		s.Audit(AuditEvent{
+			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(resUID(res)),
+			ActorEmail: maskEmail(normalizeEmail(rawEmail)), Meta: meta,
+			Detail: map[string]string{"method": "password"},
+		})
+	}()
 	uid, _, err := s.checkPassword(rawEmail, password)
 	if err != nil {
 		return nil, err
@@ -73,7 +100,14 @@ func (s *Service) WebLoginPassword(rawEmail, password string, meta SessionMeta) 
 }
 
 // WebLoginEmailCode 邮箱验证码登录：一路建到底，**不叠 TOTP**（理由见包注释）。
-func (s *Service) WebLoginEmailCode(rawEmail, code string, meta SessionMeta) (*WebLoginResult, error) {
+func (s *Service) WebLoginEmailCode(rawEmail, code string, meta SessionMeta) (res *WebLoginResult, err error) {
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(resUID(res)),
+			ActorEmail: maskEmail(normalizeEmail(rawEmail)), Meta: meta,
+			Detail: map[string]string{"method": "email_code"},
+		})
+	}()
 	uid, _, email, err := s.checkLoginCode(rawEmail, code)
 	if err != nil {
 		return nil, err
@@ -89,19 +123,33 @@ func (s *Service) WebLoginEmailCode(rawEmail, code string, meta SessionMeta) (*W
 //
 // 错码记进 login_state 的 attempts，错 5 次整条烧毁（与邮箱验证码同口径）——
 // 中间态是「已知密码」的凭证，必须比普通表单更抗爆破。
-func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta SessionMeta) (*WebLoginResult, error) {
+func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta SessionMeta) (res *WebLoginResult, err error) {
+	// method 在进分支前就定下来：失败那次也要说清用户输的是哪种码
+	method := "totp"
+	if strings.TrimSpace(recoveryCode) != "" {
+		method = "recovery"
+	}
+	defer func() {
+		// 中间态本身过期/不存在：这不是「输错码」，不进登录失败统计
+		if err != nil && strings.Contains(err.Error(), "登录请求已过期") {
+			return
+		}
+		s.Audit(AuditEvent{
+			Action: AuditLogin, OK: err == nil, ActorUID: uidPtr(resUID(res)),
+			ActorEmail: maskEmail(resEmail(res, "")), Meta: meta,
+			Detail: map[string]string{"method": method},
+		})
+	}()
 	st, err := s.peekLoginState(loginToken)
 	if err != nil {
 		return nil, err
 	}
 	var ok bool
-	method := "totp"
 	if rc := strings.TrimSpace(recoveryCode); rc != "" {
-		ok, err = s.consumeRecoveryCode(st.uid, rc)
+		ok, err = s.consumeRecoveryCode(st.uid, rc, meta)
 		if err != nil {
 			return nil, err
 		}
-		method = "recovery"
 	} else {
 		ok, err = s.VerifyTOTPCode(st.uid, strings.TrimSpace(code))
 		if err != nil {
