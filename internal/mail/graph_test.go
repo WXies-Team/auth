@@ -127,6 +127,48 @@ func TestSendTreatsNonAcceptedAsError(t *testing.T) {
 	}
 }
 
+// m13 回归：token URL 拼接前校验 tenantID 的 GUID 形态——带 /、..、@ 的脏值
+// 不能进 URL（会把携带 client_secret 的取票请求指到租户端点的任意路径）。
+// 覆盖 tokenURL 的测试形态不走拼接、不受影响。
+func TestSendRejectsNonGUIDTenantID(t *testing.T) {
+	for _, bad := range []string{
+		"not-a-guid",
+		"evil/../../v2.0/token?x=",
+		"e777001e-385e-40e1-9603-90838b1427fb/../x",
+		"user@host",
+	} {
+		s := &Sender{
+			client: &http.Client{Timeout: time.Second},
+			cfg: func(key string) string {
+				return map[string]string{
+					"mail_tenant_id":     bad,
+					"mail_client_id":     "id",
+					"mail_client_secret": "sec",
+				}[key]
+			},
+			// tokenURL 留空 → 走生产拼接路径（不会真出网：GUID 校验先失败）
+			tokenURL: "",
+			sendURL:  "http://127.0.0.1:0/sendMail",
+		}
+		err := s.Send(context.Background(), "Auth", "u@example.com", "s", "<p>b</p>")
+		if !errors.Is(err, errBadTenant) {
+			t.Errorf("tenantID=%q 应报 errBadTenant，得到 %v", bad, err)
+		}
+	}
+	// 合法 GUID 过闸（regex 层直接断言；Send 出网路径由 TestSendCarriesBrandDisplayName
+	// 覆盖——那里的测试形态覆盖 tokenURL 不走拼接）
+	if !tenantIDUUID.MatchString("e777001e-385e-40e1-9603-90838b1427fb") {
+		t.Error("标准 GUID 应过形态校验")
+	}
+	for _, ok := range []string{
+		"E777001E-385E-40E1-9603-90838B1427FB", // 大写同样合法
+	} {
+		if !tenantIDUUID.MatchString(ok) {
+			t.Errorf("%q 应过形态校验", ok)
+		}
+	}
+}
+
 // 缺凭据直接回「未配置」，且一个网络请求都不发：拿空 tenant 去撞微软端点只会
 // 得到费解的 401，运维看不出是自己没配。
 func TestSendWithoutCredentialFailsOffline(t *testing.T) {

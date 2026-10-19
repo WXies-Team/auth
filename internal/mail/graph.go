@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -48,6 +49,18 @@ type ConfigFunc func(key string) string
 // errNoCredential 是「app_config 缺 mail_* 键」的唯一出口，调用方按「邮件服务
 // 暂不可用」处理（auth 侧回 503），绝不能当成微软侧故障去重试。
 var errNoCredential = errors.New("邮件凭据未配置（app_config 缺 mail_tenant_id / mail_client_id / mail_client_secret）")
+
+// tenantIDUUID 是 Azure AD 租户 ID 的 GUID 形态。mail_tenant_id 会被直接拼进
+// token URL（graphTokenURL + tenantID + "/oauth2/v2.0/token"）：不校验形态的话，
+// 一个带 "/"、".." 或 "@" 的脏值能把携带 client_secret 的取票请求指到
+// login.microsoftonline.com 上的任意路径——凭据虽不至于泄给第三方主机，
+// 但会以费解的方式失败并把 secret 打进对端访问日志。生产值恒为 GUID
+//（线上核过：app_config 的 mail_tenant_id 是标准 8-4-4-4-12），校验零成本。
+var tenantIDUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// errBadTenant 是「mail_tenant_id 不是 GUID」的唯一出口，与 errNoCredential 同样
+// 属于配置态错误：路由侧回 503，运维看日志改键，不重试。
+var errBadTenant = errors.New("mail_tenant_id 配置无效（应为 GUID 形态）")
 
 // Sender 发一封信。零值不可用，用 [New]。
 type Sender struct {
@@ -126,6 +139,10 @@ func (s *Sender) Send(ctx context.Context, fromName, to, subject, html string) e
 	}
 	tokenURL := s.tokenURL
 	if tokenURL == "" {
+		// 拼 URL 前先验 GUID 形态（见 tenantIDUUID）；测试覆盖 tokenURL 时不走这条
+		if !tenantIDUUID.MatchString(tenantID) {
+			return fmt.Errorf("%w: %q", errBadTenant, tenantID)
+		}
 		tokenURL = graphTokenURL + tenantID + "/oauth2/v2.0/token"
 	}
 	sendURL := s.sendURL
