@@ -71,3 +71,7 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 - A Laravel leftover `vendor/` dir once made `go build` fail with "inconsistent vendoring" —
   Go auto-enables -mod=vendor when a `vendor/` exists. Never reintroduce one (no vendoring here).
 - Email templates carry brand strings; tests pin them (`【Horatio 账号】…`) — rebrand = update both.
+- The three delete-hook keys (`hook_token` / `hook_calorie_diary` / `hook_expense_diary` in
+  `app_config`) **must all be set in production**: a missing key is the legitimate "skip this
+  App" state (real-DB tests rely on it to avoid any network call), so don't "fix" it; lose one
+  App key in prod and that App's business rows turn into orphans silently on every delete.

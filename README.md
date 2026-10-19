@@ -20,12 +20,15 @@
 | `POST /auth/change-password-code` | 验证码改密 |
 | `POST /auth/send-change-email-code` | 新邮箱发改绑验证码 |
 | `POST /auth/change-email` | 改绑邮箱 |
-| `POST /auth/delete` | 注销账号（删本服务数据；业务数据清理由日记服务的 internal 钩子负责） |
+| `POST /auth/delete` | 注销账号：先逐个调日记服务的注销钩子清业务数据，全成功才删本服务数据（钩子失败回 503 中止） |
 | `POST /internal/verify` | 内部接口：日记服务的 withUID 中间件验 token + aud，回 `{uid,email,app}` |
+| `POST /internal/users/ensure` | 内部接口：存量用户批量并入（`Bearer hook_token`，单批 ≤100 条，整批一个事务） |
 | `GET /health` | 健康检查（碰数据库）；`mailConfigured` / `jwtConfigured` 自查位 |
 
 登录 / 注册 / 验证码登录的请求体带 `app`（`calorie-diary` / `expense-diary` 白名单），
 作为 JWT 的 aud——下游服务只接受为自己应用签发的 token。
+
+`/internal/*` 只放行环回与受信内网来源（其余 403），不经 nginx 暴露。
 
 ## 本地命令
 
@@ -44,6 +47,8 @@ ci/build-server.sh    # 测试 + 打包 dist/server.tar（CI 部署用的同一�
 | 环境变量 | `MYSQL_DSN` | MySQL 连接串，密码绝不入库（模板见 `.env.example`） |
 | 环境变量 | `JWT_SECRET` | HS256 密钥，**少于 32 字节拒启** |
 | `app_config` 表 | `mail_tenant_id` / `mail_client_id` / `mail_client_secret` | Microsoft Graph 发信凭据，部署时人工灌，改库 10 秒内热生效 |
+| `app_config` 表 | `hook_token` | 注销钩子与 `/internal/users/ensure` 共用的 Bearer，与日记侧共享；没配则并入端点一律 401 |
+| `app_config` 表 | `hook_calorie_diary` / `hook_expense_diary` | 各 App 的 `/internal/delete-user` 地址；**键缺失 = 注销时跳过该 App**（只在测试/开发态成立），改库 10 秒内热生效 |
 
 ## 部署
 
