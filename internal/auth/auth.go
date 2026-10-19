@@ -644,9 +644,14 @@ func (s *Service) checkPassword(rawEmail, password string) (int64, int, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("查用户: %w", err)
 	}
-	// password_hash 为 NULL（预留的纯验证码账号形态）时任何密码都不匹配：
-	// compare 对空串自然失败，等价于「这账号没有密码可对」
-	if !hashed.Valid || !verify(password, hashed.String) {
+	// password_hash 为 NULL（纯验证码账号形态）时也烧一次等价的 cost12 bcrypt：
+	// 这类账号没有可比对的散列，跳过比对会让「存在但无密码」的响应比「密码错」
+	// 快几百毫秒，把无密码账号的存在性漏出去（与「邮箱不存在」分支同款防护）。
+	if !hashed.Valid {
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
+		return 0, 0, unauthorized("邮箱或密码错误")
+	}
+	if !verify(password, hashed.String) {
 		return 0, 0, unauthorized("邮箱或密码错误")
 	}
 	return id, version, nil
