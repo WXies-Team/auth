@@ -137,6 +137,49 @@ type Service struct {
 	// credBySID 记「本会话用哪把 Passkey 登录」（列表页 current 标记），见 passkey.go。
 	credBySIDMu sync.RWMutex
 	credBySID   map[int64]string
+	// enforceCfg 读 totp_enforce_apps（老客户端密码登录的兼容开关，默认空=不拦）。
+	// nil 时恒放行（测试形态与「配置还没接」的形态一致）。
+	enforceCfg ConfigFunc
+}
+
+// SetEnforceApps 注入兼容开关的配置读取器（生产传 cfg.Require，测试不设即全放行）。
+func (s *Service) SetEnforceApps(f ConfigFunc) { s.enforceCfg = f }
+
+// enforceTOTPFor 判定这条老端点密码登录要不要被拦：app 在 totp_enforce_apps 名单里
+// **且**该账号已启用两步验证。
+//
+// 这是老客户端唯一的行为开关（规格 D1）：默认空名单 = 一行影响都没有；翻开关是
+// 作者在 App 覆盖率够了之后的显式动作。读键失败按未配置放行——兼容开关读不出来
+// 不该变成全站拦登录。
+func (s *Service) enforceTOTPFor(app string, uid int64) bool {
+	if s.enforceCfg == nil || app == "" {
+		return false
+	}
+	raw, err := s.enforceCfg("totp_enforce_apps")
+	if err != nil {
+		slog.Warn("读 totp_enforce_apps 失败，按未配置处理", "err", err)
+		return false
+	}
+	if !containsCSV(raw, app) {
+		return false
+	}
+	enabled, err := s.TOTPEnabled(uid)
+	if err != nil {
+		// DB 抖动时不拦：开关的目的是渐进迁移，不是把老客户端误杀在抖动上
+		slog.Warn("查两步验证状态失败，放行老端点登录", "uid", uid, "err", err)
+		return false
+	}
+	return enabled
+}
+
+// containsCSV 判断 value 是否在逗号分隔的列表里（大小写敏感，App 名是标识符）。
+func containsCSV(list, value string) bool {
+	for _, item := range strings.Split(list, ",") {
+		if strings.TrimSpace(item) == value {
+			return true
+		}
+	}
+	return false
 }
 
 // NewService 组装服务。除 JWT 密钥外还要求 TOTP_ENC_KEY 就位：TOTP secret 必须存
@@ -528,15 +571,41 @@ func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (*Resp
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
+	id, version, err := s.checkPassword(rawEmail, password)
+	if err != nil {
+		return nil, err
+	}
+	// 兼容开关（默认关）：账号开了 2FA 且该 App 在 totp_enforce_apps 名单里 →
+	// 拒绝老端点密码登录，提示升级。判定放在密码验过**之后**——没对上密码的
+	// 请求不该听得出「这账号开了 2FA」。
+	if s.enforceTOTPFor(app, id) {
+		return nil, &HTTPError{401, "请升级应用后使用新版登录"}
+	}
+	sid, err := s.createSession(id, app, meta)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := s.createToken(id, normalizeEmail(rawEmail), app, version, sid)
+	if err != nil {
+		return nil, err
+	}
+	return &Response{Token: tok, Email: normalizeEmail(rawEmail)}, nil
+}
+
+// checkPassword 校验邮箱+密码，回 uid 与当前 token_version。
+//
+// **JWT 路（Login）与 web 密码登录共用这一处**：凭据判定只有一份实现，防枚举的
+// 恒时假比对（邮箱不存在也烧一次 cost12 bcrypt）才不会在某条路上漏掉。
+// 语义与旧版逐条一致：邮箱格式错、超长密码一律按「邮箱或密码错误」回 401——
+// 客户端把它们当凭据类处理，细分原因等于给爆破递进度条。
+func (s *Service) checkPassword(rawEmail, password string) (int64, int, error) {
 	email := normalizeEmail(rawEmail)
-	// 登录也过邮箱格式校验（注册有、登录没有是校验面不一致）；文案与凭据错误
-	// 同一句，不给邮箱枚举开口子
 	if err := validateEmail(email); err != nil {
-		return nil, unauthorized("邮箱或密码错误")
+		return 0, 0, unauthorized("邮箱或密码错误")
 	}
 	// 超长密码直接判失败：bcrypt 对超 72 字节的输入会返回错误，别让它变成 500
 	if len(password) > maxPasswordB {
-		return nil, unauthorized("邮箱或密码错误")
+		return 0, 0, unauthorized("邮箱或密码错误")
 	}
 	var (
 		id      int64
@@ -550,25 +619,17 @@ func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (*Resp
 		// **计时侧信道**：邮箱不存在的分支也要烧一次等价的 cost12 bcrypt，
 		// 把响应延迟拉平到与「密码错」一致，否则可枚举注册过的邮箱
 		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
-		return nil, unauthorized("邮箱或密码错误")
+		return 0, 0, unauthorized("邮箱或密码错误")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("查用户: %w", err)
+		return 0, 0, fmt.Errorf("查用户: %w", err)
 	}
 	// password_hash 为 NULL（预留的纯验证码账号形态）时任何密码都不匹配：
 	// compare 对空串自然失败，等价于「这账号没有密码可对」
 	if !hashed.Valid || !verify(password, hashed.String) {
-		return nil, unauthorized("邮箱或密码错误")
+		return 0, 0, unauthorized("邮箱或密码错误")
 	}
-	sid, err := s.createSession(id, app, meta)
-	if err != nil {
-		return nil, err
-	}
-	tok, err := s.createToken(id, email, app, version, sid)
-	if err != nil {
-		return nil, err
-	}
-	return &Response{Token: tok, Email: email}, nil
+	return id, version, nil
 }
 
 // SendCode 发送「注册 / 找回密码 / 登录」验证码。purpose 走白名单。
@@ -688,23 +749,8 @@ func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta)
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
-	email := normalizeEmail(rawEmail)
-	if err := validateEmail(email); err != nil {
-		return nil, err
-	}
-	var (
-		id      int64
-		version int
-	)
-	err := s.pool.QueryRowContext(context.Background(),
-		"SELECT id, token_version FROM users WHERE email = ?", email).Scan(&id, &version)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, badRequest("邮箱未注册，请先注册")
-	}
+	id, version, email, err := s.checkLoginCode(rawEmail, code)
 	if err != nil {
-		return nil, fmt.Errorf("查用户: %w", err)
-	}
-	if err := s.otps.verify(PurposeLogin, email, code); err != nil {
 		return nil, err
 	}
 	sid, err := s.createSession(id, app, meta)
@@ -716,6 +762,32 @@ func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta)
 		return nil, err
 	}
 	return &Response{Token: tok, Email: email}, nil
+}
+
+// checkLoginCode 校验「登录」用途的邮箱验证码，回 uid / token_version / 归一化邮箱。
+// **JWT 路（LoginByEmailCode）与 web 邮箱验证码登录共用**：报错顺序（格式 → 未注册 →
+// 验码）与文案只此一份，两条路不会漂。
+func (s *Service) checkLoginCode(rawEmail, code string) (int64, int, string, error) {
+	email := normalizeEmail(rawEmail)
+	if err := validateEmail(email); err != nil {
+		return 0, 0, "", err
+	}
+	var (
+		id      int64
+		version int
+	)
+	err := s.pool.QueryRowContext(context.Background(),
+		"SELECT id, token_version FROM users WHERE email = ?", email).Scan(&id, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, "", badRequest("邮箱未注册，请先注册")
+	}
+	if err != nil {
+		return 0, 0, "", fmt.Errorf("查用户: %w", err)
+	}
+	if err := s.otps.verify(PurposeLogin, email, code); err != nil {
+		return 0, 0, "", err
+	}
+	return id, version, email, nil
 }
 
 // ResetPassword 用验证码重置密码：校验通过即改 hash 并 **token_version+1**——
