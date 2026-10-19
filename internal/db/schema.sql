@@ -48,3 +48,25 @@ CREATE TABLE IF NOT EXISTS app_config (
     value  TEXT        NOT NULL,
     PRIMARY KEY (`key`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- 登录会话：三条登录路（注册即登录 / 密码登录 / 验证码登录）与改密换发各建一行，
+-- token 的 sid claim 指向它——「已登录设备」列表与踢人就作用在这张表上。
+--
+-- id 是雪花（与 users.id 同一个 s.ids，不自增）；device 是从 UA 尽力解析出的短标签
+--（解析不出存 UA 原文截断），user_agent 留原文以便下次解析规则变好后回填口径。
+-- revoked_at 非空 = 已登出/被踢：列表只回 IS NULL 的行；踢人不改 token_version，
+-- 所以被踢设备的 token 靠 /internal/verify 的会话校验当场失效。
+-- last_seen_at 由 verify 节流回写（旧于 60 秒才写），按它倒序排设备列表。
+CREATE TABLE IF NOT EXISTS sessions (
+    id           BIGINT       NOT NULL,
+    user_id      BIGINT       NOT NULL,
+    app          VARCHAR(32)  NOT NULL,
+    device       VARCHAR(191) NOT NULL,
+    ip           VARCHAR(45)  NOT NULL,
+    user_agent   VARCHAR(512) NOT NULL,
+    created_at   BIGINT       NOT NULL,
+    last_seen_at BIGINT       NOT NULL,
+    revoked_at   BIGINT       NULL,
+    PRIMARY KEY (id),
+    KEY idx_sessions_user (user_id, revoked_at)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;

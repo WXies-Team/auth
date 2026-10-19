@@ -100,6 +100,11 @@ type Caller struct {
 	UID   int64
 	Email string
 	App   string
+	// SID 是本 token 绑定的登录会话 id：设备列表的 current、踢人时保留谁都看它。
+	SID int64
+	// Meta 是本次请求的来源（IP + UA），改密换发新 token 时给新会话建行用；
+	// 由路由层的 withUID 从 *http.Request 填，业务层不碰 HTTP。
+	Meta SessionMeta
 }
 
 // VerifyResult 是 /internal/verify 的成功回执。
@@ -174,18 +179,21 @@ func verify(password, hashed string) bool {
 
 // createToken 签发 JWT。
 //
-// **uid 以 JSON 数字（int64）进 claims**：序列化无损；解析侧必须配
+// **uid 与 sid 都以 JSON 数字（int64）进 claims**：序列化无损；解析侧必须配
 // jwt.WithJSONNumber（见 parseToken），否则 63 位雪花 id 过一遍 float64 就花位。
+// sid 指向本次登录建的会话行——校验时要对上（见 sessionAlive），没有 sid 的 token
+// 一律不认（切换到会话表之前的存量 token，客户端重登即消）。
 //
 // 签名与校验都发生在本服务，aud 只做下游服务之间的权限边界标记（A 服务的 token
 // 不能被 B 服务接受），所以单密钥即可，不需要按应用分密钥。
-func (s *Service) createToken(userID int64, email, app string, version int) (string, error) {
+func (s *Service) createToken(userID int64, email, app string, version int, sid int64) (string, error) {
 	claims := jwt.MapClaims{
 		"aud":   app,
 		"iss":   issuer,
 		"uid":   userID,
 		"email": email,
 		"ver":   version,
+		"sid":   sid,
 		"exp":   time.Now().Add(tokenTTL).Unix(),
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.secret))
@@ -240,10 +248,16 @@ func bearerToken(header string) (string, bool) {
 	return token, token != ""
 }
 
-// ValidUserID 校验 JWT（aud 在白名单内）并**查库比对 ver**，返回会话身份。
+// ValidUserID 校验 JWT（aud 在白名单内）、**查库比对 ver** 并确认会话还活着，
+// 返回会话身份。
 //
 // 只验签名不验 ver 的话，logout / 改密的吊销就完全失效——正是靠
-// tokenVersion(uid) == claims.ver 挡住已登出的 token。
+// tokenVersion(uid) == claims.ver 挡住已登出的 token；会话是第二道闸：
+// 设备列表里被踢的那台靠 sessionAlive 判失效（踢人不 bump token_version，
+// 只有会话层能拦住它——不拦的话被踢设备还能调改密注销这类 auth 端点）。
+//
+// **没有 sid 的 token 一律 401**：切换到会话表之前签的存量 token 全部要求重登
+// （作者定案：切换后客户端全部重登，线上存量为 0，不为它们留兼容分支）。
 func (s *Service) ValidUserID(bearer string) (Caller, error) {
 	token, ok := bearerToken(bearer)
 	if !ok {
@@ -259,8 +273,9 @@ func (s *Service) ValidUserID(bearer string) (Caller, error) {
 	}
 	uid, ok1 := claimInt64(claims, "uid")
 	ver, ok2 := claimInt64(claims, "ver")
-	email, ok3 := claims["email"].(string)
-	if !ok1 || !ok2 || !ok3 {
+	sid, ok3 := claimInt64(claims, "sid")
+	email, ok4 := claims["email"].(string)
+	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return Caller{}, unauthorized("登录已过期，请重新登录")
 	}
 	stored, err := s.tokenVersion(uid)
@@ -272,12 +287,22 @@ func (s *Service) ValidUserID(bearer string) (Caller, error) {
 	if stored != int(ver) {
 		return Caller{}, unauthorized("登录已过期，请重新登录")
 	}
-	return Caller{UID: uid, Email: email, App: aud[0]}, nil
+	alive, err := s.sessionAlive(uid, sid)
+	if err != nil {
+		return Caller{}, &HTTPError{503, "服务暂时不可用，请稍后重试"}
+	}
+	if !alive {
+		return Caller{}, unauthorized("登录已过期，请重新登录")
+	}
+	return Caller{UID: uid, Email: email, App: aud[0], SID: sid}, nil
 }
 
 // Verify 供日记服务的 withUID 中间件调用：验签 + **aud 精确匹配**期望应用 +
-// 查库比对 token_version。通过回 uid/email/app，否则 401（DB 抖动 503，
-// 调用方按普通失败重试，别把一次超时当成会话失效）。
+// 查库比对 token_version + **会话未被踢**。通过回 uid/email/app，否则 401（DB 抖动
+// 503，调用方按普通失败重试，别把一次超时当成会话失效）。
+//
+// 会话闸与 ValidUserID 同源（sessionAlive）：设备列表踢掉一台，被踢设备的 token
+// 在**所有**入口当场失效，而不是只在日记侧失效；无 sid 的存量 token 同样 401。
 func (s *Service) Verify(bearer, expectApp string) (*VerifyResult, error) {
 	token, ok := bearerToken(bearer)
 	if !ok {
@@ -295,8 +320,9 @@ func (s *Service) Verify(bearer, expectApp string) (*VerifyResult, error) {
 	}
 	uid, ok1 := claimInt64(claims, "uid")
 	ver, ok2 := claimInt64(claims, "ver")
-	email, ok3 := claims["email"].(string)
-	if !ok1 || !ok2 || !ok3 {
+	sid, ok3 := claimInt64(claims, "sid")
+	email, ok4 := claims["email"].(string)
+	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return nil, unauthorized("登录已过期，请重新登录")
 	}
 	stored, err := s.tokenVersion(uid)
@@ -304,6 +330,13 @@ func (s *Service) Verify(bearer, expectApp string) (*VerifyResult, error) {
 		return nil, &HTTPError{503, "服务暂时不可用，请稍后重试"}
 	}
 	if stored != int(ver) {
+		return nil, unauthorized("登录已过期，请重新登录")
+	}
+	alive, err := s.sessionAlive(uid, sid)
+	if err != nil {
+		return nil, &HTTPError{503, "服务暂时不可用，请稍后重试"}
+	}
+	if !alive {
 		return nil, unauthorized("登录已过期，请重新登录")
 	}
 	return &VerifyResult{UID: uid, Email: email, App: aud[0]}, nil
@@ -332,7 +365,8 @@ func (s *Service) userExists(email string) (bool, error) {
 //
 // **验证码必填**：校验放在「查重」之后——注册状态本就是既有接口对所有请求可见的
 // 信息，提前验证码校验换不来任何防护，只会让老客户端看到陌生的「验证码错误」。
-func (s *Service) Register(rawEmail, password, code, app string) (*Response, error) {
+// meta 是本次请求的来源（IP/UA），注册即登录，所以同样要建一行登录会话。
+func (s *Service) Register(rawEmail, password, code, app string, meta SessionMeta) (*Response, error) {
 	email := normalizeEmail(rawEmail)
 	if err := validateEmail(email); err != nil {
 		return nil, err
@@ -361,10 +395,18 @@ func (s *Service) Register(rawEmail, password, code, app string) (*Response, err
 
 	// 雪花 id 由服务生成，不走 LastInsertId——users.id 不是自增列
 	uid := s.ids.Generate().Int64()
-	_, err = s.pool.ExecContext(context.Background(),
-		"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
-		uid, email, hashed, time.Now().UnixMilli())
+	// 用户行与会话行同批提交：会话插入单走一次、失败了却把账号留下，用户重试
+	// 只会撞「该邮箱已注册」，而他手里既没有 token 也没有会话。
+	ctx := context.Background()
+	tx, err := s.pool.BeginTx(ctx, nil)
 	if err != nil {
+		return nil, fmt.Errorf("开事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err = tx.ExecContext(ctx,
+		"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
+		uid, email, hashed, time.Now().UnixMilli()); err != nil {
 		// 并发下同邮箱先被占：uq_users_email 挡住，翻译成人话（与 ChangeEmail 同口径；
 		// 顺带把含邮箱的 MySQL 错误串挡在日志外）
 		var me *mysql.MySQLError
@@ -373,7 +415,14 @@ func (s *Service) Register(rawEmail, password, code, app string) (*Response, err
 		}
 		return nil, fmt.Errorf("创建用户: %w", err)
 	}
-	tok, err := s.createToken(uid, email, app, 1)
+	sid, err := s.createSessionOn(tx, uid, app, meta)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交注册: %w", err)
+	}
+	tok, err := s.createToken(uid, email, app, 1, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -449,8 +498,8 @@ func (s *Service) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.En
 }
 
 // Login 校验凭据并签发 token。邮箱不存在与密码错误**返回同一句话**，
-// 避免被人用来枚举哪些邮箱注册过。
-func (s *Service) Login(rawEmail, password, app string) (*Response, error) {
+// 避免被人用来枚举哪些邮箱注册过。meta（IP/UA）给这次登录建 session 行。
+func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (*Response, error) {
 	// app 格式错是客户端 bug，先于凭据校验回 400（凭据类 401 会误导排障）
 	if err := validateApp(app); err != nil {
 		return nil, err
@@ -487,7 +536,11 @@ func (s *Service) Login(rawEmail, password, app string) (*Response, error) {
 	if !hashed.Valid || !verify(password, hashed.String) {
 		return nil, unauthorized("邮箱或密码错误")
 	}
-	tok, err := s.createToken(id, email, app, version)
+	sid, err := s.createSession(id, app, meta)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := s.createToken(id, email, app, version, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +660,7 @@ func (s *Service) SendChangeEmailCode(c Caller, rawEmail string) error {
 // 「验证码已过期」。**未注册先于验码返回**：没发过码的邮箱若先验码只会回
 // 「验证码已过期」，那不是可执行的下一步，「邮箱未注册，请先注册」才是。
 // 免密登录，与 Login 同语义：只签发、不动 token_version（不吊销其它会话）。
-func (s *Service) LoginByEmailCode(rawEmail, code, app string) (*Response, error) {
+func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta) (*Response, error) {
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
@@ -630,7 +683,11 @@ func (s *Service) LoginByEmailCode(rawEmail, code, app string) (*Response, error
 	if err := s.otps.verify(PurposeLogin, email, code); err != nil {
 		return nil, err
 	}
-	tok, err := s.createToken(id, email, app, version)
+	sid, err := s.createSession(id, app, meta)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := s.createToken(id, email, app, version, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -667,12 +724,27 @@ func (s *Service) ResetPassword(rawEmail, code, newPassword string) error {
 	return s.setPasswordAndRevoke(uid, newHash)
 }
 
-// Logout 递增 token_version——**这是吊销的唯一机制**：所有已签发 token 的 ver 都对不上了。
+// Logout 递增 token_version——**这是 token 层吊销的唯一机制**：所有已签发 token 的
+// ver 都对不上了。同时把该用户全部会话行置 revoked_at：两层必须同进同退，
+// 否则设备列表里留下的是一批「token 早死了、行还活着」的活死行，用户踢也踢不掉。
+// 两个动作放一个事务——只成一半（token 死了行还挂着）就是上面那种半吊子状态。
 func (s *Service) Logout(userID int64) error {
-	_, err := s.pool.ExecContext(context.Background(),
-		"UPDATE users SET token_version = token_version + 1 WHERE id = ?", userID)
+	ctx := context.Background()
+	tx, err := s.pool.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("吊销会话: %w", err)
+		return fmt.Errorf("开事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE users SET token_version = token_version + 1 WHERE id = ?", userID); err != nil {
+		return fmt.Errorf("吊销 token: %w", err)
+	}
+	if err := revokeUserSessions(ctx, tx, userID, 0); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交登出: %w", err)
 	}
 	return nil
 }
@@ -695,24 +767,48 @@ func (s *Service) loadUserAuth(userID int64) (email, hashed string, err error) {
 // setPasswordAndRevoke 写入新口令散列并 **token_version+1**：吊销该账号全部已签发 token
 //（与 Logout/注销同一套机制）。改密的三条路——原密码、验证码、找回密码——共用这一处，
 // 「改密必吊销」不会在某条路上漏掉。
+//
+// 同一事务里把全部会话行也置 revoked_at：token 层判死的那批设备，会话行若留着，
+// 设备列表就是一列没有 token 的活死行（找回密码最明显——用户重登拿到新会话，
+// 旧行永远挂着没人踢得掉）。换发的新会话由 reissueToken 另建（找回密码没有换发）。
 func (s *Service) setPasswordAndRevoke(userID int64, newHash string) error {
-	if _, err := s.pool.ExecContext(context.Background(),
+	ctx := context.Background()
+	tx, err := s.pool.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
 		"UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?",
 		newHash, userID); err != nil {
 		return fmt.Errorf("改密: %w", err)
+	}
+	if err := revokeUserSessions(ctx, tx, userID, 0); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交改密: %w", err)
 	}
 	return nil
 }
 
 // reissueToken 读吊销后的新版本号并换发 token：当前设备拿它无缝续用，
 // 其他设备的旧 ver 已对不上（被登出的只会是它们）。aud 沿用调用方现会话的 app。
+//
+// 旧会话行已由 setPasswordAndRevoke 同批吊销（token 层与会话层一起走），
+// 这里只给本设备建一行新会话，换发的 token 绑它。
 func (s *Service) reissueToken(c Caller) (*Response, error) {
 	var next int
 	if err := s.pool.QueryRowContext(context.Background(),
 		"SELECT token_version FROM users WHERE id = ?", c.UID).Scan(&next); err != nil {
 		return nil, fmt.Errorf("读新版本号: %w", err)
 	}
-	tok, err := s.createToken(c.UID, c.Email, c.App, next)
+	sid, err := s.createSession(c.UID, c.App, c.Meta)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := s.createToken(c.UID, c.Email, c.App, next, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -876,6 +972,11 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 	if _, err := tx.ExecContext(context.Background(),
 		"DELETE FROM otp_codes WHERE email = ?", email); err != nil {
 		return fmt.Errorf("清空验证码记录: %w", err)
+	}
+	// 会话行按 uid 清：账号都删了，设备列表的行只剩隐私残留，没人再踢得掉它们
+	if _, err := tx.ExecContext(context.Background(),
+		"DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("清空登录会话: %w", err)
 	}
 	if _, err := tx.ExecContext(context.Background(),
 		"DELETE FROM users WHERE id = ?", userID); err != nil {

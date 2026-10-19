@@ -94,7 +94,7 @@ func TestEnsureUsersMigratesExistingAndNew(t *testing.T) {
 		t.Errorf("password_hash 应落 NULL，得到 %#v", nullHash)
 	}
 	// NULL 形态的账号：免密登录照常可用，密码登录按「密码不匹配」失败
-	if _, err := svc.Login("codeonly@example.com", "whatever123", "calorie-diary"); err == nil {
+	if _, err := svc.Login("codeonly@example.com", "whatever123", "calorie-diary", testMeta); err == nil {
 		t.Error("没有密码的账号不该能用密码登录")
 	}
 	if err := svc.SendCode("codeonly@example.com", PurposeLogin, "calorie-diary"); err != nil {

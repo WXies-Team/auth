@@ -105,8 +105,8 @@ func main() {
 	//（撞库与爆破的主要目标），发码是**真的投一封信**、更贵，每 IP 5 次/分；
 	// 每邮箱 60 秒冷却 + 每日 10 条 + 收件人总闸 15 条在 auth 内部，换 IP 也躲不掉。
 	// 响应只回 sent=true，不回任何关于邮箱存在与否的额外信息（业务文案走 writeResult）。
-	mux.Handle("POST /auth/register", withLogging(limit("register", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, _ *http.Request) {
-		resp, err := authSvc.Register(r.Email, r.Password, r.Code, r.App)
+	mux.Handle("POST /auth/register", withLogging(limit("register", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, req *http.Request) {
+		resp, err := authSvc.Register(r.Email, r.Password, r.Code, r.App, sessMeta(req))
 		writeResult(w, resp, err)
 	}))))
 	// send-code 的 app 是可选字段：只决定这封验证码邮件的品牌（空白 = 中性品牌
@@ -117,12 +117,12 @@ func main() {
 	mux.Handle("POST /auth/reset-password", withLogging(limitN("reset-password", 5, jsonBody[protocol.ResetPasswordRequest](func(r *protocol.ResetPasswordRequest, w http.ResponseWriter, _ *http.Request) {
 		writeResult(w, map[string]bool{"ok": true}, authSvc.ResetPassword(r.Email, r.Code, r.Password))
 	}))))
-	mux.Handle("POST /auth/login", withLogging(limit("login", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, _ *http.Request) {
-		resp, err := authSvc.Login(r.Email, r.Password, r.App)
+	mux.Handle("POST /auth/login", withLogging(limit("login", jsonBody[protocol.AuthRequest](func(r *protocol.AuthRequest, w http.ResponseWriter, req *http.Request) {
+		resp, err := authSvc.Login(r.Email, r.Password, r.App, sessMeta(req))
 		writeResult(w, resp, err)
 	}))))
-	mux.Handle("POST /auth/login-code", withLogging(limit("login-code", jsonBody[protocol.LoginCodeRequest](func(r *protocol.LoginCodeRequest, w http.ResponseWriter, _ *http.Request) {
-		resp, err := authSvc.LoginByEmailCode(r.Email, r.Code, r.App)
+	mux.Handle("POST /auth/login-code", withLogging(limit("login-code", jsonBody[protocol.LoginCodeRequest](func(r *protocol.LoginCodeRequest, w http.ResponseWriter, req *http.Request) {
+		resp, err := authSvc.LoginByEmailCode(r.Email, r.Code, r.App, sessMeta(req))
 		writeResult(w, resp, err)
 	}))))
 
@@ -200,8 +200,31 @@ func main() {
 		writeResult(w, map[string]bool{"ok": true}, authSvc.DeleteAccount(c.UID, req.Password))
 	}))
 
+	// ---- 已登录设备（会话管理）----
+	// 三个端点都走 authed + 按 uid 限流。列表单独一个 scope：设备页多刷几次
+	// 不该把「踢人」的额度挤掉（同 scope 会共用 uid 那一个桶）。
+	mux.Handle("GET /api/sessions", authedLimited("sessions", 30, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
+		list, err := authSvc.ListSessions(c.UID, c.SID)
+		writeResult(w, list, err)
+	}))
+	// 踢单台：别人会话与不存在的 id 同回 404（不给存在性探针），幂等 200；
+	// 踢掉当前 sid 也放行——客户端自己处理本地登出。
+	mux.Handle("DELETE /api/sessions/{id}", authedLimited("session-kick", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "参数不正确")
+			return
+		}
+		writeResult(w, map[string]bool{"ok": true}, authSvc.RevokeSession(c.UID, id))
+	}))
+	// 退出其它设备：只动会话层（不 bump token_version），当前 token 照用。
+	mux.Handle("POST /api/sessions/revoke-others", authedLimited("session-revoke-others", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
+		writeResult(w, map[string]bool{"ok": true}, authSvc.RevokeOtherSessions(c.UID, c.SID))
+	}))
+
 	// ---- 内部校验（日记服务的 withUID 中间件调用）----
-	// 验签 + token_version 比对 + aud 精确匹配期望应用。限流按来源 IP 600/分：
+	// 验签 + token_version 比对 + aud 精确匹配期望应用 + 会话未被踢（sid 行健在）。
+	// 限流按来源 IP 600/分：
 	// 调用方是同机的日记服务（一次业务请求调一次 verify），正常量级远低于此；
 	// 600 是给多租户共享留的余量，挡的是误配置成公网可达后的打爆。
 	// 环回/受信内网守卫在限流之外：先把公网来源挡在读体与限流计数之前。
@@ -472,6 +495,8 @@ func withLogging(next http.Handler) http.Handler {
 }
 
 // withUID 解 Bearer 并把 Caller 放进 context；失败直接回 401/503。
+// 顺带把本次请求的来源（IP/UA）填进 Caller.Meta：改密换发新 token 时要拿它
+// 给新会话建行——过了这层再想取原始请求就取不到了。
 func withUID(svc *auth.Service, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, err := svc.ValidUserID(r.Header.Get("Authorization"))
@@ -480,8 +505,16 @@ func withUID(svc *auth.Service, next http.Handler) http.Handler {
 			writeResult(w, nil, err)
 			return
 		}
+		caller.Meta = sessMeta(r)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey, caller)))
 	})
+}
+
+// sessMeta 取登录会话要记的来源：IP 用限流同一套 clientIP（受信代理口径——
+// 生产里裸 RemoteAddr 恒是同机 nginx，记它等于所有设备一个 IP），
+// UA 取原文，设备标签由 auth 包解析（解析不出就存原文）。
+func sessMeta(r *http.Request) auth.SessionMeta {
+	return auth.SessionMeta{IP: clientIP(r), UserAgent: r.UserAgent()}
 }
 
 // loopbackOnly 只放行环回与受信内网来源的请求，其余 403。

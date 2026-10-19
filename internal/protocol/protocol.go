@@ -118,6 +118,21 @@ type EnsureUserResult struct {
 	UID   int64  `json:"uid"`
 }
 
+// SessionInfo 是 GET /api/sessions 的一条「已登录设备」（本服务新增的端点，
+// 不属于与日记客户端既有 /auth/* 逐字对齐的那批 DTO）。
+//
+// ID 是 63 位雪花：用 int64 字段接收（decode 成 float64 会丢低位）；
+// Current 标出发起本次请求的那台——踢谁都行，踢掉自己等于本地登出。
+type SessionInfo struct {
+	ID         int64  `json:"id"`
+	App        string `json:"app"`
+	Device     string `json:"device"`
+	IP         string `json:"ip"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Current    bool   `json:"current"`
+}
+
 // ApiError 对应 ApiError：所有非 200 回执的统一响应体。
 type ApiError struct {
 	Message string `json:"message"`
