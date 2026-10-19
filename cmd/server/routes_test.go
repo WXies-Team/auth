@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,7 +46,7 @@ func newRouteEnv(t *testing.T) *routeEnv {
 	}
 	// 每轮清干净（与 internal/auth 的用例同一张测试 schema，互不残留）
 	for _, table := range []string{"users", "otp_codes", "sessions", "passkeys", "totp_factors",
-		"recovery_codes", "webauthn_challenges", "login_states", "audit_logs", "ai_usage", "app_config"} {
+		"recovery_codes", "webauthn_challenges", "login_states", "audit_logs", "ai_usage", "app_config", "user_profile"} {
 		if _, err := pool.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("清空 %s: %v", table, err)
 		}
@@ -572,6 +573,146 @@ func TestAdminConfigNeverLeaksSecret(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("白名单外的键应 404，得到 %d", rec.Code)
 	}
+}
+
+// ---- 用户档案（GET/PUT /api/profile）----
+
+// 回执形状恰好四字段、Bearer 与 cookie 会话两种凭据都能读写；未登录 401，
+// cookie 进来的非 GET 照吃 CSRF 闸（老端点同款，Bearer 不受影响）。
+func TestProfileRoutesShapeAndSessionKinds(t *testing.T) {
+	e := newRouteEnv(t)
+	uid := seedUser(t, e, "profile-route@example.com", "secret123", "user")
+	resp, err := e.svc.Login("profile-route@example.com", "secret123", "calorie-diary", auth.SessionMeta{})
+	if err != nil {
+		t.Fatalf("取 JWT: %v", err)
+	}
+	bearer := func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+resp.Token) }
+
+	// 未登录：401
+	if rec := e.do(t, "GET", "/api/profile", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("未登录读档案应 401，得到 %d", rec.Code)
+	}
+
+	// 无行 → 默认值，且形状恰好四字段
+	rec := e.do(t, "GET", "/api/profile", "", bearer)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("读档案应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	if got := keysOf(t, rec.Body.Bytes()); got != "avatarColor,avatarImage,nickname,updatedAt" {
+		t.Errorf("档案回执形状应恰为四字段，得到 %s", got)
+	}
+	var def struct {
+		Nickname    string  `json:"nickname"`
+		AvatarColor int     `json:"avatarColor"`
+		AvatarImage *string `json:"avatarImage"`
+		UpdatedAt   int64   `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &def); err != nil {
+		t.Fatalf("解析默认档案: %v", err)
+	}
+	if def.Nickname != "" || def.AvatarColor != 0 || def.AvatarImage != nil || def.UpdatedAt != 0 {
+		t.Errorf("默认档案应全为零值，得到 %+v", def)
+	}
+
+	// Bearer PUT → GET 往返
+	avatar := base64OfBytes(2048)
+	putBody := `{"nickname":"路由昵称","avatarColor":7,"avatarImage":"` + avatar + `"}`
+	if rec := e.do(t, "PUT", "/api/profile", putBody, bearer); rec.Code != http.StatusOK {
+		t.Fatalf("PUT 档案应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	rec = e.do(t, "GET", "/api/profile", "", bearer)
+	var got struct {
+		Nickname    string  `json:"nickname"`
+		AvatarColor int     `json:"avatarColor"`
+		AvatarImage *string `json:"avatarImage"`
+		UpdatedAt   int64   `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析档案: %v", err)
+	}
+	if got.Nickname != "路由昵称" || got.AvatarColor != 7 || got.AvatarImage == nil ||
+		*got.AvatarImage != avatar || got.UpdatedAt == 0 {
+		t.Errorf("PUT→GET 应往返一致，得到 %+v", got)
+	}
+	// 库里确实落了行（且是这个 uid 的）
+	var rows int
+	if err := e.pool.QueryRow("SELECT COUNT(*) FROM user_profile WHERE user_id = ?", uid).Scan(&rows); err != nil || rows != 1 {
+		t.Errorf("user_profile 应有该 uid 的一行，得到 rows=%d err=%v", rows, err)
+	}
+	// PUT 落审计（HTTP 链路走通后 profile.update 应有 ok 行）
+	var audits int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE action = 'profile.update' AND result = 'ok' AND actor_uid = ?",
+		uid).Scan(&audits); err != nil || audits == 0 {
+		t.Errorf("PUT 应落 profile.update 审计，得到 %d err=%v", audits, err)
+	}
+
+	// cookie 会话：同吃 CSRF 闸——缺 X-CSRF-Token 的 PUT 403，带上则 200
+	sess, csrf := loginCookie(t, e, "profile-route@example.com", "secret123")
+	withCookies := func(r *http.Request) { r.AddCookie(sess); r.AddCookie(csrf) }
+	if rec := e.do(t, "PUT", "/api/profile", `{"nickname":"x","avatarColor":1,"avatarImage":null}`, withCookies); rec.Code != http.StatusForbidden {
+		t.Errorf("cookie 调 PUT 缺 CSRF 头应 403，得到 %d", rec.Code)
+	}
+	withCSRF := func(r *http.Request) {
+		withCookies(r)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	if rec := e.do(t, "PUT", "/api/profile", `{"nickname":"cookie昵称","avatarColor":2,"avatarImage":null}`, withCSRF); rec.Code != http.StatusOK {
+		t.Errorf("cookie 带 CSRF 的 PUT 应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	if rec := e.do(t, "GET", "/api/profile", "", withCookies); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "cookie昵称") {
+		t.Errorf("cookie GET 应读回刚写的档案，得到 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// 头像体积两层闸：解码后 >700KB（包还在 1.5MB 之内）→ 业务层**具体文案**的 413；
+// 请求体整体 >1.5MB → MaxBytesReader 的通用 413。两层都是 413，前者才带 next 指引。
+func TestProfileRouteRejectsOversizedAvatar(t *testing.T) {
+	e := newRouteEnv(t)
+	seedUser(t, e, "profile-big@example.com", "secret123", "user")
+	resp, err := e.svc.Login("profile-big@example.com", "secret123", "calorie-diary", auth.SessionMeta{})
+	if err != nil {
+		t.Fatalf("取 JWT: %v", err)
+	}
+	bearer := func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+resp.Token) }
+
+	// 解码 701KB 的合法 base64：包约 935KB < 1.5MB，走得到业务层校验
+	tooBig := base64OfBytes(701 * 1024)
+	rec := e.do(t, "PUT", "/api/profile",
+		`{"nickname":"n","avatarColor":1,"avatarImage":"`+tooBig+`"}`, bearer)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限头像应 413，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	msg := rec.Body.String()
+	if !strings.Contains(msg, "过大") || !strings.Contains(msg, "压缩") {
+		t.Errorf("413 文案应带 what+next，得到 %s", msg)
+	}
+	// 拒掉之后档案不许被写进去
+	var rows int
+	if err := e.pool.QueryRow("SELECT COUNT(*) FROM user_profile").Scan(&rows); err != nil || rows != 0 {
+		t.Errorf("被拒的写入不该留行，得到 %d err=%v", rows, err)
+	}
+	// 失败也落审计（fail 行）
+	var fails int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE action = 'profile.update' AND result = 'fail'").Scan(&fails); err != nil || fails == 0 {
+		t.Errorf("被拒的 PUT 应落 fail 审计，得到 %d err=%v", fails, err)
+	}
+
+	// 请求体整体超 1.5MB → 通用 413（连业务校验都不必进）
+	huge := base64OfBytes(1600 * 1024) // 解码 1.6MB → base64 约 2.13MB
+	rec = e.do(t, "PUT", "/api/profile",
+		`{"nickname":"n","avatarColor":1,"avatarImage":"`+huge+`"}`, bearer)
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "请求体过大") {
+		t.Errorf("包超 1.5MB 应通用 413，得到 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// base64OfBytes 造指定解码字节数的合法 base64（cmd/server 这边不与 internal/auth 共享
+// 测试辅助函数，各自一份更直白）。
+func base64OfBytes(decodedBytes int) string {
+	return base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", decodedBytes)))
 }
 
 // loginCookie 走一遍密码登录，回两枚 cookie（会话 + CSRF）。

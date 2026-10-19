@@ -164,6 +164,30 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 		writeResult(w, map[string]bool{"ok": true}, revErr)
 	}))
 
+	// ---- 用户档案（昵称 / 头像色 / 头像图）----
+	// 三件套收归本服务统一存取（OIDC UserInfo 同款思路：档案归身份提供方），
+	// 两个日记 App 的 profiles 资料列由 scripts/migrate-profile-to-auth.sh 并入后，
+	// 客户端改走这里读写。Bearer 与 cookie 会话都走 authed：cookie 的非 GET 还吃
+	// withUID 里的 CSRF 闸，Bearer 不受影响（与既有老端点同款）。
+	// 读写各占一个按 uid 的限流键（authedLimited 内按 scope:uid 计数），互不挤兑；
+	// PUT 是本地编辑动作，30/分 已远超人手速，IP 外层仍由 authedLimited 的 120/分 兜底。
+	mux.Handle("GET /api/profile", authedLimited("profile", 60, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
+		prof, err := authSvc.GetProfile(c.UID)
+		writeResult(w, prof, err)
+	}))
+	// 请求体上限单独放大到 1.5MB：700KB 解码 ≈ 955,736 个 base64 字符（见
+	// auth.maxAvatarImageBytes 的实测依据），64KB 的通用上限装不下。1.5MB 之内的
+	// 超限头像由业务层回**具体文案**的 413（「过大…压缩后重新上传」），更大的包
+	// 仍被 MaxBytesReader 挡成通用 413——两层都是 413，后者只是提示更笼统。
+	mux.Handle("PUT /api/profile", authedLimited("profile-update", 30, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req protocol.ProfileUpdateRequest
+		if !decodeOr400Limit(w, r, &req, maxProfileBodyBytes) {
+			return
+		}
+		prof, err := authSvc.UpdateProfile(c, req)
+		writeResult(w, prof, err)
+	}))
+
 	// ---- 内部校验（日记服务的 withUID 中间件调用）----
 	// 验签 + token_version 比对 + aud 精确匹配期望应用 + 会话未被踢（sid 行健在）。
 	// 限流在 handler 内部按 app 分键 600/分（见 internalVerify 的注释——两个调用方

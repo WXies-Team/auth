@@ -35,6 +35,11 @@ import (
 // 请求体上限：认证请求都是小 JSON，64KB 足够挡住异常大包
 const maxBodyBytes = 64 << 10
 
+// maxProfileBodyBytes 是 PUT /api/profile 单独放大的请求体上限（1.5MB）：档案带
+// 头像 base64，700KB 解码上限对应 955,736 个字符（见 internal/auth 的
+// maxAvatarImageBytes 及其实测依据），通用 64KB 装不下。其余端点一律 maxBodyBytes。
+const maxProfileBodyBytes = 1536 * 1024
+
 type ctxKey int
 
 // callerKey 放业务身份（老端点只认它）；webCallerKey 放双凭据解析的完整现场
@@ -319,11 +324,13 @@ func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
 
 // ---- 以下为通用中间件与 JSON 工具 ----
 
-// decode 解码请求体。**故意不拒绝未知字段**——日记客户端的 DTO 可能多发字段，
+// decodeLimited 解码请求体。**故意不拒绝未知字段**——日记客户端的 DTO 可能多发字段，
 // 客户端多发不该报错（否则加字段会让老客户端直接失败）。
 // 超限走 http.MaxBytesReader：截断回结构化 413 而不是静默截断后的 400。
-func decode(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+// limit 由调用方给：常规端点 maxBodyBytes（64KB），PUT /api/profile 单独放大到
+// maxProfileBodyBytes——头像 base64 装不下小包口径，但只放大这一条路由。
+func decodeLimited(w http.ResponseWriter, r *http.Request, v any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	err := json.NewDecoder(r.Body).Decode(v)
 	var maxErr *http.MaxBytesError
 	if errors.As(err, &maxErr) {
@@ -337,7 +344,12 @@ var errBodyTooLarge = errors.New("body too large")
 // decodeOr400：decode 失败统一回执——超限 413、其余 400。全部 decode 入口共用，
 // 避免每处手抄错误映射再漏掉 413。
 func decodeOr400(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := decode(w, r, v); err != nil {
+	return decodeOr400Limit(w, r, v, maxBodyBytes)
+}
+
+// decodeOr400Limit 同 decodeOr400 但可指定请求体上限（档案端点用）。
+func decodeOr400Limit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	if err := decodeLimited(w, r, v, limit); err != nil {
 		if errors.Is(err, errBodyTooLarge) {
 			writeError(w, http.StatusRequestEntityTooLarge, "请求体过大")
 		} else {
