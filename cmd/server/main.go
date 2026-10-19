@@ -372,8 +372,13 @@ func decodeOr400Limit(w http.ResponseWriter, r *http.Request, v any, limit int64
 	return true
 }
 
+// writeJSON 是全部 JSON 回执的唯一出口：Content-Type + **Cache-Control: no-store**
+//（规格 B1 原文要求「全部会话响应 no-store」，落到实现层即所有 JSON 响应——
+// 登录/改密/会话回执落在共享缓存或浏览器 bfcache 里，等于把凭据外泄给下一个
+// 用同一台机器的人）。限流 429 与 recover 500 也走这里，同样带 no-store。
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

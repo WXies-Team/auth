@@ -307,7 +307,7 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 - 会话 cookie：`__Host-auth_web`（`Secure; HttpOnly; SameSite=Strict; Path=/`；`__Host-` 前缀为 OWASP 推荐形态）；值=32 字节 CSPRNG base64url（≥128 位熵，ASVS 7.2.3）；服务端只存 sha256（`sessions.web_token_hash`），常数时间比对（雪flake sid 可预测不能直接进 cookie——identifier/verifier 思路）。
 - **CSRF：同步器 token 模式**（有状态站点 OWASP 定案）。双 cookie：`__Host-auth_web_csrf`（非 HttpOnly JS 可读）+ sha256 存 `sessions.web_csrf_hash`。所有 `/web/*`、`/admin/*` 非 GET 必须带 `X-CSRF-Token`，不符 403。SameSite=Strict 只当纵深防御不单独依赖（OWASP：SameSite 是 defense in depth，Lax 有 GET 顶层导航缺口）。自定义头是 OWASP 给 API-driven 站点的推荐路径。
 - 超时：空闲 7 天（last_seen_at，已有 60s 节流）/ 绝对 90 天（created_at，对齐 JWT TTL）。OWASP 15-30 分钟参考区间对个人控制台过激——**文档化偏离**（ASVS 7.1.1 允许 documented+justified）：低敏个人数据、设备列表已有踢人自卫。
-- 登出：吊销行 + `Clear-Site-Data` 头；全部会话响应 `Cache-Control: no-store`。web 登录/改密回体 `{token,email}` 形状不变但 **token 恒空串**——凭据只在 HttpOnly cookie，前端（internal/ui/app.js）不读 body token。
+- 登出：吊销行 + `Clear-Site-Data` 头；**全部 JSON 响应**（writeJSON 唯一出口：登录/会话/错误回执、限流 429、recover 500）统一 `Cache-Control: no-store`。web 登录/改密回体 `{token,email}` 形状不变但 **token 恒空串**——凭据只在 HttpOnly cookie，前端（internal/ui/app.js）不读 body token。
 - 与 Bearer 并存：`/webauthn/*`、`/api/totp*`、`/api/passkeys*` 双凭据；**`/admin/*` 只收 cookie**（缩小面）。web 登录=sessions 又一行（app='web'），App 设备页自然看到并可踢。
 
 ## B2 页面清单（零 CDN：html/template+内联 CSS/JS；图标内联 SVG；系统字体）

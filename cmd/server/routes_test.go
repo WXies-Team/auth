@@ -535,6 +535,33 @@ func TestResolveCallerStaleCookieFallsBackToBearer(t *testing.T) {
 	}
 }
 
+// m11 回归：全部 JSON 响应统一 Cache-Control: no-store（规格 B1 原文要求）——
+// 登录/会话回执落在共享缓存或浏览器 bfcache 里等于把凭据外泄给下一个用它的人。
+func TestJSONResponsesCarryNoStore(t *testing.T) {
+	e := newRouteEnv(t)
+	seedUser(t, e, "nostore@example.com", "secret123", "user")
+	// web-login 桶按 IP 分键且包级共享，本用例自带来源 IP 别挤别的用例
+	ip1 := fromIP("198.51.100.71")
+	ip2 := fromIP("198.51.100.72")
+
+	for _, tc := range []struct {
+		name, method, path, body string
+		mutate                   func(*http.Request)
+	}{
+		{"登录成功", "POST", "/web/login/password", `{"email":"nostore@example.com","password":"secret123"}`, ip1},
+		{"业务错误", "POST", "/auth/login", `{"email":"nostore@example.com","password":"wrong","app":"calorie-diary"}`, ip2},
+		{"参数错误", "POST", "/auth/login", `{"email":`, nil},
+		{"鉴权回执", "GET", "/api/sessions", "", func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer bogus.token.here")
+		}},
+	} {
+		rec := e.do(t, tc.method, tc.path, tc.body, tc.mutate)
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control 应为 no-store，得到 %q (status=%d)", tc.name, got, rec.Code)
+		}
+	}
+}
+
 // cookieNamed 从响应里取指定名字的 cookie。
 func cookieNamed(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	for _, c := range rec.Result().Cookies() {
