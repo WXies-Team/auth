@@ -43,9 +43,9 @@ func TestEnsureColumnProbesAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// EnsureSchema 二跑必须幂等，且四个新列（role / web_token_hash / web_csrf_hash /
-// reauth_at）与六张新表都要就位——它们是 web 管理台的地基，缺一列启动后的第一次
-// web 登录就会炸在 SQL 上。
+// EnsureSchema 二跑必须幂等，且五个补列（role / web_token_hash / web_csrf_hash /
+// reauth_at / login_states.app）与六张新表都要就位——它们是 web 管理台与 C 批登录
+// 分流的地基，缺一列启动后的第一次登录就会炸在 SQL 上。
 func TestEnsureSchemaIdempotentWithWebColumns(t *testing.T) {
 	dsn := os.Getenv("TEST_MYSQL_DSN")
 	if dsn == "" {

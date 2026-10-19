@@ -150,6 +150,10 @@ var extraColumns = []columnDef{
 		"ALTER TABLE sessions ADD COLUMN web_csrf_hash CHAR(64) NULL"},
 	{"sessions", "reauth_at",
 		"ALTER TABLE sessions ADD COLUMN reauth_at BIGINT NULL"},
+	// 两步登录中间态要记住第一步声明的目标应用（C 批）：第二步 /web/login/totp 读它
+	// 决定发 web 会话还是业务 JWT。DEFAULT 'web' 让存量行与 web 流程共用一个取值。
+	{"login_states", "app",
+		"ALTER TABLE login_states ADD COLUMN app VARCHAR(32) NOT NULL DEFAULT 'web'"},
 }
 
 // ensureColumn 幂等地补一列：先查 information_schema，没有才执行 DDL。

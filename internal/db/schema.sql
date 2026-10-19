@@ -90,9 +90,10 @@ CREATE TABLE IF NOT EXISTS user_profile (
     PRIMARY KEY (user_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
--- Web 管理台的三张列变更（role / web_token_hash / web_csrf_hash / reauth_at）由
--- internal/db 的 ensureColumn 在启动时按 information_schema 探测后补：MySQL 的
--- ADD COLUMN 没有 IF NOT EXISTS，写进本文件会撞「重复列」错误让二跑的启动失败。
+-- 四处列变更（role / web_token_hash / web_csrf_hash / reauth_at）与两步登录中间态的
+-- login_states.app 由 internal/db 的 ensureColumn 在启动时按 information_schema
+-- 探测后补：MySQL 的 ADD COLUMN 没有 IF NOT EXISTS，写进本文件会撞「重复列」错误
+-- 让二跑的启动失败。
 
 -- 审计日志（ASVS V16.2/V16.3）：认证成败、授权失败、配置改动都落这里。
 -- 只增不改不删（应用层不可篡改；物理篡改风险见规格 D8）；保留 90 天，过期行在
