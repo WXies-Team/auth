@@ -257,6 +257,11 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 	actorEmail = maskEmail(email)
 	var ok bool
 	if rc := strings.TrimSpace(recoveryCode); rc != "" {
+		// n7：实耗恢复码时中间态的 method 如实改账 'recovery'——beginLoginState
+		// 恒写 'totp'，失败重试留下的行、审计回联都该能看出用户当时用的哪种码
+		if err := s.setLoginStateMethod(loginToken, "recovery"); err != nil {
+			return nil, err
+		}
 		ok, err = s.consumeRecoveryCode(st.uid, email, rc, meta)
 		if err != nil {
 			return nil, err
@@ -388,4 +393,15 @@ func (s *Service) failLoginState(token string) error {
 func (s *Service) burnLoginState(token string) {
 	_, _ = s.pool.ExecContext(context.Background(),
 		"DELETE FROM login_states WHERE token_hash = ?", sha256Hex(token))
+}
+
+// setLoginStateMethod 如实回写第二步实耗的因子（totp / recovery）。
+// beginLoginState 恒写 'totp'（密码路只有 TOTP 一种预告因子），恢复码真的被
+// 提交时改账——失败重试留下的行据此能看出爆破走的是哪条通道（n7）。
+func (s *Service) setLoginStateMethod(token, method string) error {
+	if _, err := s.pool.ExecContext(context.Background(),
+		"UPDATE login_states SET method = ? WHERE token_hash = ?", method, sha256Hex(token)); err != nil {
+		return fmt.Errorf("记录登录因子: %w", err)
+	}
+	return nil
 }

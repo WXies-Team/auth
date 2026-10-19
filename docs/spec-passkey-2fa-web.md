@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 ```
 
-**事件清单**：`register`、`login.success`/`login.fail`（detail.method=password/email_code/totp/recovery_code/passkey）、`logout`、`password.change`、`password.reset`、`email.change`、`passkey.create/rename/delete`、`totp.setup/enable/disable`、`recovery.generate/consume`、`session.kick`；admin 操作前缀 `admin.`：`admin.user.role_change`、`admin.user.session_revoke`、`admin.session.revoke`、`admin.config.set`（**只记 key 与「旧值是否已配置」，不记值**）、`admin.audit.view`。保留 90 天（照 otpRetention 清理模式挂发码路径）；表只增无业务 UPDATE/DELETE（应用层不可篡改；物理防篡改为已声明残余风险）。
+**事件清单**：`register`、`login.success`/`login.fail`（detail.method=password/email_code/totp/recovery/passkey——与代码实值一致，恢复码的 method 落 `recovery`）、`logout`、`password.change`、`password.reset`、`email.change`、`passkey.create/rename/delete`、`totp.setup/enable/disable`、`recovery.generate/consume`、`session.kick`；admin 操作前缀 `admin.`：`admin.user.role_change`、`admin.user.session_revoke`、`admin.session.revoke`、`admin.config.set`（**只记 key 与「旧值是否已配置」，不记值**）、`admin.audit.view`、内部并入 `internal.ensure`。保留 90 天（照 otpRetention 清理模式挂发码路径）；表只增无业务 UPDATE/DELETE（应用层不可篡改；物理防篡改为已声明残余风险）。
 
 ### A1.5 表结构变更汇总（全部幂等）
 

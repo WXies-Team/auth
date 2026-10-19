@@ -226,6 +226,74 @@ func TestWebLoginEmailCode(t *testing.T) {
 	}
 }
 
+// n7 回归：第二步实耗恢复码时 login_states.method 如实落 'recovery'
+//（beginLoginState 恒写 'totp'，恢复码路把中间态改账——失败重试留下的行、
+// 5 次烧毁的行都应能看出用户当时在用哪种码）。
+func TestLoginStateMethodRecordsRecoveryUse(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "ls-recovery@example.com", "secret123")
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("取身份: %v", err)
+	}
+	setup, err := svc.SetupTOTP(c)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	codes, err := svc.EnableTOTP(c, currentCode(t, setup.Secret))
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	meta := SessionMeta{IP: "203.0.113.60", UserAgent: "Safari"}
+
+	res, err := svc.WebLoginPassword("ls-recovery@example.com", "secret123", meta, "")
+	if err != nil || res.Status != "2fa_required" {
+		t.Fatalf("应进两步: %+v err=%v", res, err)
+	}
+	// 先用一个错的恢复码：行留下（未烧毁），method 应已是 recovery
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "AAAA-BBBB-CCCC-DDDD", meta); err == nil {
+		t.Fatal("乱造恢复码应失败")
+	}
+	var method string
+	if err := svc.pool.QueryRow(
+		"SELECT method FROM login_states WHERE token_hash = ?", sha256Hex(res.LoginToken)).Scan(&method); err != nil {
+		t.Fatalf("查中间态: %v", err)
+	}
+	if method != "recovery" {
+		t.Errorf("走了恢复码路的中间态 method 应为 recovery，得到 %q", method)
+	}
+	// 对码完成登录前先确认失败重试不改账：换 TOTP 错码路，method 保持 totp
+	//（成功路径行会被 burnLoginState 烧掉，改账发生在烧之前——由下面的成功路隐式覆盖）
+	res2, err := svc.WebLoginPassword("ls-recovery@example.com", "secret123", meta, "")
+	if err != nil || res2.Status != "2fa_required" {
+		t.Fatalf("再进两步: %+v err=%v", res2, err)
+	}
+	if _, err := svc.WebLoginTOTP(res2.LoginToken, "000000", "", meta); err == nil {
+		t.Fatal("错码应失败")
+	}
+	if err := svc.pool.QueryRow(
+		"SELECT method FROM login_states WHERE token_hash = ?", sha256Hex(res2.LoginToken)).Scan(&method); err != nil {
+		t.Fatalf("查中间态 2: %v", err)
+	}
+	if method != "totp" {
+		t.Errorf("TOTP 错码路不该把 method 改成 recovery，得到 %q", method)
+	}
+	// 成功路：恢复码完成登录（行被烧，但审计 detail.method 已有 recovery——
+	// TestAppTwoStepCarriesAppThroughLoginState 钉过；这里补 login_states 改账的时序）
+	res3, err := svc.WebLoginPassword("ls-recovery@example.com", "secret123", meta, "")
+	if err != nil || res3.Status != "2fa_required" {
+		t.Fatalf("三进两步: %+v err=%v", res3, err)
+	}
+	if _, err := svc.WebLoginTOTP(res3.LoginToken, "", codes[len(codes)-1], meta); err != nil {
+		t.Fatalf("恢复码应完成登录: %v", err)
+	}
+	var leftover int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM login_states WHERE token_hash = ?", sha256Hex(res3.LoginToken)).Scan(&leftover); err != nil || leftover != 0 {
+		t.Errorf("成功后中间态应被烧掉（改账不改变用后即焚），得到 %d (err=%v)", leftover, err)
+	}
+}
+
 // 老端点的兼容开关 totp_enforce_apps：默认（未配置 / 空名单）一行影响都没有；
 // 名单内且账号开了 2FA 才拦，回 401 提示升级。
 func TestEnforceAppsSwitch(t *testing.T) {
