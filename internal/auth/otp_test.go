@@ -195,7 +195,10 @@ func TestOTPStoreLifecycle(t *testing.T) {
 		t.Errorf("用掉一代后应能立刻再发: %v", err)
 	}
 
-	// 跨用途隔离：注册码不能在登录流程用
+	// 跨用途隔离：注册码不能在登录流程用。先烧掉上面"立刻再发"留下的活跃注册代——
+	// 否则注册行还在，拿登录码来撞得到的是「验证码错误」（行在、码不匹配）而非
+	//「过期」（该 purpose 无行）；两种都是拒绝，但这条钉的是 purpose 分键语义。
+	s.revoke(PurposeRegister, ctx)
 	loginCode, err := s.issue(PurposeLogin, ctx)
 	if err != nil {
 		t.Fatalf("发登录码失败: %v", err)

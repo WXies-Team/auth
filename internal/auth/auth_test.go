@@ -80,14 +80,16 @@ func registerViaCode(t *testing.T, svc *Service, m *recordMailer, email, passwor
 	return resp
 }
 
-// codeIn 从 mailer 记下的正文里取 6 位码（模板里没有别的 6 位数字）。
+// codeIn 从验证码卡片里取 6 位码。必须锚定 class="code" 的那个 <div>，不能裸匹配
+// \d{6}——邮件外壳深色模式样式里有 background-color:#000000，同样6位数字且排在正文
+// 前面，裸正则会稳定取到它（真库测试首轮就栽在这里：抽出000000、真码在后一位）。
 func codeIn(t *testing.T, m *recordMailer) string {
 	t.Helper()
-	code := regexp.MustCompile(`\d{6}`).FindString(m.html)
-	if len(code) != 6 {
+	code := regexp.MustCompile(`class="code"[^>]*>(\d{6})</div>`).FindStringSubmatch(m.html)
+	if len(code) != 2 {
 		t.Fatalf("邮件正文里找不到 6 位验证码: %s", m.html)
 	}
-	return code
+	return code[1]
 }
 
 func httpMsg(err error) (int, string) {
@@ -236,7 +238,9 @@ func TestJWTClaimsAndRevocation(t *testing.T) {
 	reg := registerViaCode(t, svc, mailer, "jwt@example.com", "secret123")
 
 	claims := jwt.MapClaims{}
-	parsed, err := jwt.ParseWithClaims(reg.Token, claims, func(j *jwt.Token) (any, error) {
+	// WithJSONNumber 与生产 ValidUserID 的解析口径一致：不加它数字 claim 是 float64，
+	// claimInt64 只认 json.Number 会读成0（这条断言最初就是被前面的注册失败挡着没跑到）
+	parsed, err := jwt.NewParser(jwt.WithJSONNumber()).ParseWithClaims(reg.Token, claims, func(j *jwt.Token) (any, error) {
 		return []byte(testSecret), nil
 	})
 	if err != nil || !parsed.Valid {
