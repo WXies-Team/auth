@@ -56,8 +56,10 @@ func newTestService(t *testing.T) (*Service, *recordMailer) {
 	if err := db.EnsureSchema(pool); err != nil {
 		t.Fatalf("建表: %v", err)
 	}
-	// 每次跑清干净：测试库专用，绝不碰生产
-	for _, table := range []string{"users", "otp_codes", "sessions"} {
+	// 每次跑清干净：测试库专用，绝不碰生产。Web 管理台的新表同批清——它们按
+	// user_id 存行，残留会让下一轮断言读到上一轮的 passkey / 挑战 / 中间态。
+	for _, table := range []string{"users", "otp_codes", "sessions", "passkeys", "totp_factors",
+		"recovery_codes", "webauthn_challenges", "login_states", "ai_usage"} {
 		if _, err := pool.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("清空 %s: %v", table, err)
 		}
