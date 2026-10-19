@@ -199,6 +199,8 @@ func splitList(raw string) []string {
 
 // health 复刻日记服务的 /health 语义：**ping 数据库**（DB 挂了返回 5xx，
 // deploy-server.sh 靠 `curl -fsS` 判定失败并自动回滚），再给两个配置开关位。
+// 开关位**刻意外显**（定案不改）：本服务的健康即运维监控面，布尔只报
+//「凭据配没配」，不含任何敏感值。
 func health(pool *sql.DB, cfg *config.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Ping 带 2s 超时：连接池被占满时 /health 不能无限排队——
