@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/snowflake"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 
@@ -493,6 +494,67 @@ func TestDeleteAccountRemovesData(t *testing.T) {
 	// 原 token 随账号一起失效
 	if _, err := svc.ValidUserID("Bearer " + reg.Token); err == nil {
 		t.Error("注销后原 token 应失效")
+	}
+}
+
+// 注销要把 Web 管理台的行一并带走，审计留痕但匿名——账号没了，凭证与中间态
+// 都是没人再能吊销的废票；审计删掉则等于「注销即可抹痕迹」。
+func TestDeleteAccountClearsWebData(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "del-web@example.com", "secret123")
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("校验失败: %v", err)
+	}
+	if _, err := svc.CreateWebSession(c.UID, SessionMeta{IP: "10.0.0.2", UserAgent: "Chrome"}); err != nil {
+		t.Fatalf("建 web 会话: %v", err)
+	}
+	if _, err := svc.insertCredential(c.UID, "待清凭证", &webauthn.Credential{ID: []byte("cred-del"), PublicKey: []byte{1}}); err != nil {
+		t.Fatalf("落凭证: %v", err)
+	}
+	if _, err := svc.SetupTOTP(c); err != nil {
+		t.Fatalf("setup totp: %v", err)
+	}
+	if _, err := svc.pool.Exec(
+		"INSERT INTO recovery_codes (user_id, code_hash, used, created_at) VALUES (?,?,0,?)",
+		c.UID, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", time.Now().UnixMilli()); err != nil {
+		t.Fatalf("落恢复码: %v", err)
+	}
+	if _, err := svc.beginLoginState(c.UID); err != nil {
+		t.Fatalf("落登录中间态: %v", err)
+	}
+	if _, _, err := svc.BeginPasskeyLogin(); err != nil {
+		t.Fatalf("落仪式中间态: %v", err)
+	}
+	if _, err := svc.otps.issue(PurposeLogin, "del-web@example.com"); err != nil {
+		t.Fatalf("落验证码: %v", err)
+	}
+	// 注册与登录都已各记一条审计（actor_email 现在非空）
+	var beforeEmails int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE actor_uid = ? AND actor_email <> ''", c.UID).Scan(&beforeEmails); err != nil || beforeEmails == 0 {
+		t.Fatalf("注销前应有带邮箱的审计行, n=%d err=%v", beforeEmails, err)
+	}
+
+	if err := svc.DeleteAccount(c.UID, "secret123"); err != nil {
+		t.Fatalf("注销失败: %v", err)
+	}
+	// 按 uid 存的表全部清空
+	for _, table := range []string{"sessions", "passkeys", "totp_factors", "recovery_codes", "login_states", "webauthn_challenges"} {
+		var n int
+		if err := svc.pool.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE user_id = ?", c.UID).Scan(&n); err != nil || n != 0 {
+			t.Errorf("注销后 %s 不该剩行，得到 n=%d err=%v", table, n, err)
+		}
+	}
+	// 审计行仍在，但邮箱已清空
+	var kept, leaked int
+	_ = svc.pool.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE actor_uid = ?", c.UID).Scan(&kept)
+	_ = svc.pool.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE actor_uid = ? AND actor_email <> ''", c.UID).Scan(&leaked)
+	if kept == 0 {
+		t.Error("审计行必须保留（注销不是抹痕迹的按钮）")
+	}
+	if leaked != 0 {
+		t.Errorf("审计行还剩 %d 行带邮箱", leaked)
 	}
 }
 

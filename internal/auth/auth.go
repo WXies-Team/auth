@@ -1124,6 +1124,20 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 		"DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
 		return fmt.Errorf("清空登录会话: %w", err)
 	}
+	// Web 管理台的四张按 uid 存行的表同批清（passkey / TOTP / 恢复码 / 仪式中间态），
+	// 外加两步登录的中间态——它们是 5 分钟的在途凭证，账号没了还挂着就是一张废票。
+	for _, table := range []string{"passkeys", "totp_factors", "recovery_codes", "webauthn_challenges", "login_states"} {
+		if _, err := tx.ExecContext(context.Background(),
+			"DELETE FROM "+table+" WHERE user_id = ?", userID); err != nil {
+			return fmt.Errorf("清空 %s: %w", table, err)
+		}
+	}
+	// 审计行**留着但匿名化**：删掉它等于给「注销自己账号就能抹掉操作痕迹」开后门，
+	// 事件本身要继续对得起 ASVS V16；邮箱清空后行里只剩雪花 uid，账号已不存在。
+	if _, err := tx.ExecContext(context.Background(),
+		"UPDATE audit_logs SET actor_email = '' WHERE actor_uid = ?", userID); err != nil {
+		return fmt.Errorf("匿名化审计: %w", err)
+	}
 	if _, err := tx.ExecContext(context.Background(),
 		"DELETE FROM users WHERE id = ?", userID); err != nil {
 		return fmt.Errorf("删除账号: %w", err)
