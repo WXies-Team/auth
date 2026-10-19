@@ -23,6 +23,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from that family (calorie-diary's copy was deleted when accounts moved here, `34f7d0ab`); divergences are the 7-digit random uid / aud / OTP-in-DB, all commented in place |
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
 | Sessions / device management | `internal/auth/session.go` + `sessions` comments in `internal/db/schema.sql` (kick = session layer only, `token_version` untouched) |
+| User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` in `cmd/server/routes.go`; one-off merge of the two diaries' `profiles` columns = `scripts/migrate-profile-to-auth.sh` (rules + known data shapes in its header) |
 | User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
 | Web console (login, passkey, TOTP, admin) | `docs/spec-passkey-2fa-web.md` first — it is the authoritative spec (session mechanism, endpoint tables, page list); then `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go` for logic and `cmd/server/{web,admin,ui}.go` + `internal/ui/` for HTTP/pages |
 

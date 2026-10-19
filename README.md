@@ -24,6 +24,8 @@
 | `GET /api/sessions` | 自己的已登录设备列表（按最近活跃倒序，`current` 标本机） |
 | `DELETE /api/sessions/{id}` | 踢单台设备（只能踢自己的，别人的与不存在同回 404，幂等） |
 | `POST /api/sessions/revoke-others` | 退出除本机外的全部设备（只动会话层，本机 token 照用） |
+| `GET /api/profile` | 档案三件套（昵称/头像色/头像图），无行回默认值 `{nickname:"",avatarColor:0,avatarImage:null,updatedAt:0}` |
+| `PUT /api/profile` | 全量替换三字段（服务端置 `updatedAt` 为毫秒）：昵称 trim 后 ≤64 字、头像为标准 base64 且解码后 ≤700KB（超限 413） |
 | `POST /internal/verify` | 内部接口：日记服务的 withUID 中间件验 token + aud，回 `{uid,email,app}` |
 | `POST /internal/users/ensure` | 内部接口：存量用户批量并入（`Bearer hook_token`，单批 ≤100 条，整批一个事务） |
 | `GET /health` | 健康检查（碰数据库）；`mailConfigured` / `jwtConfigured` 自查位 |
