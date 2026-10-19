@@ -280,7 +280,7 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 | `DELETE /admin/sessions/{id}` | 同 | 幂等；审计 |
 | `GET /admin/audit?action=&actor=&target=&from=&to=&limit=&offset=` | 同 | 审计查询倒序分页 |
 | `GET /admin/config` | 同 | 白名单键（mail_*/hook_*/llm_*/fcm*/ai_*）→ `[{key,configured,hint}]`；**secret 只回 configured+末4位 hint**；非 secret 回全文 |
-| `PUT /admin/config/{key}` | 同 | `{value}`；空串=删键；未知键 404；提示「≤10 秒热生效」；审计只记 key |
+| `PUT /admin/config/{key}` | 同 | `{value}`；空串=删键；未知键 404；**key 限 ≤64 字符 [A-Za-z0-9_]、`ai_*` 键值必须正整数、`ai_usage_merged_at` 只读（400「此键由迁移脚本写入，不可编辑」——防全站 AI 计数翻倍）**；提示「≤10 秒热生效」；审计只记 key |
 | `GET /admin/ai-usage?days=30` |同 | `{days:[{day,total,byUserTop10}], quota:{perMinute,concurrency,dailyPerUser,dailyGlobal,configured}}`（限额键缺省对齐 quota.go 默认 20/8/500/5000）；空表回 `暂无记录` |
 
 ## A3 实现顺序与测试清单

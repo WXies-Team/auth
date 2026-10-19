@@ -410,6 +410,88 @@ func TestAdminAIUsage(t *testing.T) {
 	}
 }
 
+// m6/m7 回归：配置中心写入闸——key 长度与字符集校验、ai_* 键值必须正整数、
+// ai_usage_merged_at 只读（防全站 AI 计数翻倍），非法输入 400 带中文文案。
+func TestAdminSetConfigValidation(t *testing.T) {
+	svc, mailer := newTestService(t)
+	actor := newPasskeyUser(t, svc, mailer, "admin-cfgval@example.com")
+	actor.Meta = testMeta
+	if _, err := svc.pool.Exec("DELETE FROM app_config"); err != nil {
+		t.Fatalf("清配置表: %v", err)
+	}
+	t.Cleanup(func() { _, _ = svc.pool.Exec("DELETE FROM app_config") })
+
+	// ai_* 键值必须是正整数：负数 / 0 / 非数字 / 带尾巴的数字全拒，且库中不落行
+	for _, bad := range []string{"-1", "0", "abc", "12abc", "1.5", " 3x"} {
+		err := svc.AdminSetConfig(actor, "ai_rate_per_minute", bad)
+		code, msg := httpMsg(err)
+		if code != 400 || !strings.Contains(msg, "正整数") {
+			t.Errorf("ai_rate_per_minute=%q 应 400 且提示正整数，得到 %d %q", bad, code, msg)
+		}
+	}
+	var leaked int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM app_config WHERE `key` = 'ai_rate_per_minute'").Scan(&leaked); err != nil || leaked != 0 {
+		t.Errorf("被拒的值不该落库，得到 %d (err=%v)", leaked, err)
+	}
+	// 合法正整数照写
+	if err := svc.AdminSetConfig(actor, "ai_rate_per_minute", "30"); err != nil {
+		t.Errorf("正整数应写入成功: %v", err)
+	}
+	// 空串 = 删键的语义保留（ai_* 键的清除按钮仍可用）
+	if err := svc.AdminSetConfig(actor, "ai_rate_per_minute", ""); err != nil {
+		t.Errorf("空串应走清除: %v", err)
+	}
+
+	// key 长度 ≤64、字符集限 [A-Za-z0-9_]：超长与带点/横线/空格/中文的一律 400
+	for _, badKey := range []string{
+		"ai_" + strings.Repeat("k", 64), // 总长 67
+		"ai.bad.key",
+		"ai-bad-key",
+		"ai bad key",
+		"ai_配置键",
+	} {
+		err := svc.AdminSetConfig(actor, badKey, "1")
+		code, msg := httpMsg(err)
+		if code != 400 || !strings.Contains(msg, "配置键") {
+			t.Errorf("非法键 %q 应 400 且提示配置键格式，得到 %d %q", badKey, code, msg)
+		}
+	}
+	// 合法键（64 字符整）照常走到白名单判定（不在白名单前缀内 → 404）
+	okKey := strings.Repeat("k", 64)
+	if code, _ := httpMsg(svc.AdminSetConfig(actor, okKey, "1")); code != 404 {
+		t.Errorf("64 字符合法键应过格式闸、落在白名单 404，得到 %d", code)
+	}
+
+	// m7：ai_usage_merged_at 只读——写与删都拒，且文案点名迁移脚本
+	errPut := svc.AdminSetConfig(actor, "ai_usage_merged_at", "1700000000")
+	if code, msg := httpMsg(errPut); code != 400 || !strings.Contains(msg, "迁移脚本") {
+		t.Errorf("写合并标记键应 400「此键由迁移脚本写入，不可编辑」，得到 %d %q", code, msg)
+	}
+	errDel := svc.AdminSetConfig(actor, "ai_usage_merged_at", "")
+	if code, msg := httpMsg(errDel); code != 400 || !strings.Contains(msg, "迁移脚本") {
+		t.Errorf("删合并标记键应同样 400，得到 %d %q", code, msg)
+	}
+	if _, err := svc.pool.Exec(
+		"INSERT INTO app_config (`key`, `value`) VALUES ('ai_usage_merged_at','1690000000')"); err != nil {
+		t.Fatalf("种合并标记键: %v", err)
+	}
+	// GET 照常列得出（只读 ≠ 不可见）
+	items, err := svc.AdminListConfig()
+	if err != nil {
+		t.Fatalf("列配置: %v", err)
+	}
+	var seen bool
+	for _, it := range items {
+		if it.Key == "ai_usage_merged_at" && it.Configured {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Error("ai_usage_merged_at 应照常出现在 GET 列表里（只读不隐藏）")
+	}
+}
+
 // 管理后台的 MFA 门槛：没绑任何凭据的管理员不算数。
 func TestHasMFA(t *testing.T) {
 	svc, mailer := newTestService(t)

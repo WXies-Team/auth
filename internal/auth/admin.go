@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -420,9 +423,26 @@ func (s *Service) AdminListConfig() ([]ConfigItem, error) {
 	return out, nil
 }
 
+// adminMaxConfigKeyLen 是配置键的长度上限：app_config.key 是 VARCHAR(64)，
+// 超长会被 MySQL 截断落库（写进去的键与请求的键不是同一个），在入口就拒。
+const adminMaxConfigKeyLen = 64
+
+// configKeyCharset 限定配置键字符集：字母数字与下划线。键会出现在日志、审计
+// detail 与后台页面里，放开点/横线/空白/非 ASCII 只会养出一堆「看着像注入面」
+// 的脏键（现有键 mail_*/hook_*/llm_*/fcm*/ai_* 全部合规）。
+var configKeyCharset = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// aiUsageMergedAtKey 是合并标记键：由 scripts/migrate-ai-usage-to-auth.sh 写入，
+// **是防全站 AI 计数翻倍的唯一护栏**（见仓 AGENTS）。配置中心对它只读。
+const aiUsageMergedAtKey = "ai_usage_merged_at"
+
 // AdminSetConfig 写一个白名单键：空串 = 删键（「清空提交=不改、单独清除按钮」
 // 是前端约定，服务端只认「value 为空即清除」这一条）。审计只记 key 与旧值是否
 // 已配置——**值本身永远不进审计表**。
+//
+// 三道写入闸（m6/m7）：① key ≤64 字符且只含 [A-Za-z0-9_]；② ai_* 键的值必须是
+// 正整数（四档限额按非正整数解析会静默回默认值，写错的管理员会以为改生效了）；
+// ③ ai_usage_merged_at 只读——删掉它再跑迁移脚本会把全站 AI 计数翻倍。
 func (s *Service) AdminSetConfig(actor Caller, key, value string) (err error) {
 	var before bool
 	defer func() {
@@ -435,11 +455,22 @@ func (s *Service) AdminSetConfig(actor Caller, key, value string) (err error) {
 			},
 		})
 	}()
+	if len(key) == 0 || len(key) > adminMaxConfigKeyLen || !configKeyCharset.MatchString(key) {
+		return badRequest(fmt.Sprintf("配置键格式不正确：仅限字母、数字、下划线，最长 %d 字符", adminMaxConfigKeyLen))
+	}
+	if key == aiUsageMergedAtKey {
+		return badRequest("此键由迁移脚本写入，不可编辑")
+	}
 	if !allowedConfigKey(key) {
 		return &HTTPError{404, "未知配置键"}
 	}
 	if len(value) > adminMaxConfigValue {
 		return badRequest(fmt.Sprintf("配置值过长（最多 %d 字节）", adminMaxConfigValue))
+	}
+	if strings.HasPrefix(key, "ai_") && strings.TrimSpace(value) != "" {
+		if _, err := parseIntConfig(value); err != nil {
+			return badRequest("AI 限额配置值必须是正整数")
+		}
 	}
 	// 先读旧态（给审计用），失败不挡写入
 	var old string
@@ -610,15 +641,14 @@ func clampPage(limit, offset int) (int, int) {
 }
 
 // parseIntConfig 解数字型配置（限额用），非正整数视为解析失败。
+// strconv.ParseInt 全串校验——fmt.Sscan 会把 "12abc"、"1.5" 这类脏值按前缀
+// 解成 12 / 1 放行，写错的配置就静默生效了。
 func parseIntConfig(raw string) (int, error) {
-	var n int
-	if _, err := fmt.Sscan(strings.TrimSpace(raw), &n); err != nil {
-		return 0, err
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n <= 0 || n > int64(math.MaxInt32) {
+		return 0, fmt.Errorf("非正整数")
 	}
-	if n <= 0 {
-		return 0, fmt.Errorf("非正数")
-	}
-	return n, nil
+	return int(n), nil
 }
 
 // boolWord 把布尔转成审计 detail 里的 "true"/"false"（detail 是 map[string]string，
