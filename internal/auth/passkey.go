@@ -13,7 +13,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -583,14 +582,4 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-// parseCeremonyID 把路径里的 ceremonyId 解成 int64（雪花，非法串回 404 而不是 400：
-// 这个值只有服务端发过，客户端拿着乱串说明仪式早就丢了）。
-func parseCeremonyID(raw string) (int64, error) {
-	id, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || id <= 0 {
-		return 0, &HTTPError{404, "验证请求已过期，请重新发起"}
-	}
-	return id, nil
 }

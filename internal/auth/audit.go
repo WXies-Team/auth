@@ -102,12 +102,6 @@ func (s *Service) Audit(e AuditEvent) {
 //（本地部分只留首字符），两处各写一遍必然漂。
 func MaskEmail(email string) string { return maskEmail(email) }
 
-// AuditFromError 是「拿 err 直接落一条」的便携形态：err==nil 即成功。
-func (s *Service) AuditFromError(e AuditEvent, err error) {
-	e.OK = err == nil
-	s.Audit(e)
-}
-
 // uidPtr 把可能为零的 uid 装成审计用的 *int64（0 = 匿名，不落指针）。
 func uidPtr(uid int64) *int64 {
 	if uid == 0 {
