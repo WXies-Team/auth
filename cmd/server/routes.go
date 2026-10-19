@@ -166,11 +166,10 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 
 	// ---- 内部校验（日记服务的 withUID 中间件调用）----
 	// 验签 + token_version 比对 + aud 精确匹配期望应用 + 会话未被踢（sid 行健在）。
-	// 限流按来源 IP 600/分：
-	// 调用方是同机的日记服务（一次业务请求调一次 verify），正常量级远低于此；
-	// 600 是给多租户共享留的余量，挡的是误配置成公网可达后的打爆。
-	// 环回/受信内网守卫在限流之外：先把公网来源挡在读体与限流计数之前。
-	mux.Handle("POST /internal/verify", withLogging(loopbackOnly(limitN("verify", 600, internalVerify(authSvc)))))
+	// 限流在 handler 内部按 app 分键 600/分（见 internalVerify 的注释——两个调用方
+	// 同机回环、同源 127.0.0.1，按 IP 分键会把全站挤成一个桶）。
+	// 环回/受信内网守卫仍在最外层：先把公网来源挡在读体与限流计数之前。
+	mux.Handle("POST /internal/verify", withLogging(loopbackOnly(internalVerify(authSvc))))
 
 	// ---- 内部校验（存量迁移）----
 	// 两个日记服务的历史用户并入本服务的唯一入口：Bearer hook_token 鉴权 +

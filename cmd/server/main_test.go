@@ -200,6 +200,46 @@ func TestLoopbackOnly(t *testing.T) {
 	}
 }
 
+// /internal/verify 的限流按 app 分键：同机回环拓扑下所有调用方同源 127.0.0.1，
+// 按 IP 分键会把两个日记服务挤进同一个桶——打满一个 app 的额度不该牵连另一个。
+func TestInternalVerifyRateLimitPerApp(t *testing.T) {
+	// 把 calorie-diary 的桶清空后占满（key 与 internalVerify 里的拼法一致）：
+	// 同包靠前的 internalVerify 用例可能已留下几跳，不清会把占桶次数算岔；
+	// 测完再清掉，不给同包其它用例留残留
+	drainVerifyBucket := func() {
+		limiter.mu.Lock()
+		delete(limiter.windows, "verify:calorie-diary")
+		limiter.mu.Unlock()
+	}
+	drainVerifyBucket()
+	t.Cleanup(drainVerifyBucket)
+	for i := 0; i < verifyRatePerApp; i++ {
+		if !limiter.allow("verify:calorie-diary", verifyRatePerApp, time.Minute) {
+			t.Fatalf("第 %d 次占桶不该被拒", i+1)
+		}
+	}
+
+	f := &fakeVerifier{res: &auth.VerifyResult{UID: 1, Email: "a@b.com", App: "calorie-diary"}}
+	h := internalVerify(f)
+	req := httptest.NewRequest(http.MethodPost, "/internal/verify", strings.NewReader(`{"app":"calorie-diary"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("额度打满应 429，得到 %d", rec.Code)
+	}
+	if f.gotApp != "" {
+		t.Error("限流拒绝时不该调用 Verify")
+	}
+
+	// 另一个 app 的桶不受牵连，照常放行
+	req = httptest.NewRequest(http.MethodPost, "/internal/verify", strings.NewReader(`{"app":"expense-diary"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expense-diary 不该被 calorie-diary 的额度牵连，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+}
+
 // fakeEnsurer 实现 userEnsurer：并入端点的鉴权与解码链路不依赖真库。
 type fakeEnsurer struct {
 	got   []protocol.EnsureUserEntry

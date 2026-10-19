@@ -235,6 +235,10 @@ type verifier interface {
 	Verify(bearer, expectApp string) (*auth.VerifyResult, error)
 }
 
+// verifyRatePerApp 是 /internal/verify 每个 app 每分钟的上限，额度与原设计一致
+//（600 = 给多租户共享留的余量，挡的是误配置成公网可达后的打爆）。
+const verifyRatePerApp = 600
+
 // internalVerify 是日记服务 withUID 中间件要调的端点：POST /internal/verify，
 // Bearer 用户 token + body {"app":"<期望 aud>"}。通过回 uid/email/app，
 // 否则 401（错误体走 writeResult，含 503 的 DB 抖动分支）。
@@ -247,6 +251,15 @@ func internalVerify(v verifier) http.Handler {
 		// app 缺失/未知在这里挡掉，不进 Verify——期望值都对不上就别浪费一次查库
 		if req.App == "" {
 			writeError(w, http.StatusBadRequest, "参数不正确")
+			return
+		}
+		// 限流**按 app 分键**（键里不含来源）：两个日记服务都经同机回环调用，
+		// clientIP 恒为 127.0.0.1——按 IP 分键等于全站共享一个 600/分桶，两家
+		// 业务互相挤兑成 10rps 天花板。键里不放来源还有个副作用是正向的：
+		// 误配公网可达时攻击者换 IP 也换不出新桶，整体打爆面仍然有界。
+		// 未知 app 值乱敲会攒出无主桶，由 allow 的 >4096 惰性清理兜底。
+		if !limiter.allow("verify:"+req.App, verifyRatePerApp, time.Minute) {
+			limit429(w, r, "verify:"+req.App)
 			return
 		}
 		res, err := v.Verify(r.Header.Get("Authorization"), req.App)
@@ -553,17 +566,23 @@ func limit(scope string, next http.Handler) http.Handler {
 // 拒绝分支因此要自带 nosniff 与访问日志，否则 429 轮次在运维侧不可见。
 func limitN(scope string, max int, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := scope + ":" + clientIP(r)
-		if !limiter.allow(key, max, time.Minute) {
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-			w.Header().Set("Retry-After", "60")
-			slog.Info("request", "method", r.Method, "path", r.URL.Path,
-				"status", http.StatusTooManyRequests, "scope", scope)
-			writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		if !limiter.allow(scope+":"+clientIP(r), max, time.Minute) {
+			limit429(w, r, scope)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// limit429 是限流拒绝的统一回执（limitN 与 internalVerify 的按 app 分键共用）：
+// 429 + Retry-After + nosniff，外加一条 429 状态的访问日志——限流拒绝发生在
+// withLogging 内外的路由都有，少了这条日志，429 轮次在运维侧不可见。
+func limit429(w http.ResponseWriter, r *http.Request, scope string) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Retry-After", "60")
+	slog.Info("request", "method", r.Method, "path", r.URL.Path,
+		"status", http.StatusTooManyRequests, "scope", scope)
+	writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 }
 
 // clientIP 解析真实客户端 IP，只用于限流键。
