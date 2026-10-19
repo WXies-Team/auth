@@ -207,10 +207,11 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	// 速率窗是进程内状态（单实例部署假设，与 auth 自己的限流同款）；本函数启动时
 	// 只被调一次，槽状态即全进程唯一一份（路由级测试各自 newRouteEnv 得到独立实例，
 	// 恰好是测试隔离所需）。
+	// 内部凭据闸（M3）与环回守卫同批挂在最外层：先挡公网来源，再验 hook_token。
 	quotaSvc := ai.NewService(pool, limiter.allow)
-	mux.Handle("POST /internal/ai/check", withLogging(loopbackOnly(internalAICheck(cfg, quotaSvc))))
-	mux.Handle("POST /internal/ai/consume", withLogging(loopbackOnly(internalAIConsume(quotaSvc))))
-	mux.Handle("POST /internal/ai/release", withLogging(loopbackOnly(internalAIRelease(quotaSvc))))
+	mux.Handle("POST /internal/ai/check", withLogging(loopbackOnly(internalTokenGate(cfg.Require, internalAICheck(cfg, quotaSvc)))))
+	mux.Handle("POST /internal/ai/consume", withLogging(loopbackOnly(internalTokenGate(cfg.Require, internalAIConsume(quotaSvc)))))
+	mux.Handle("POST /internal/ai/release", withLogging(loopbackOnly(internalTokenGate(cfg.Require, internalAIRelease(quotaSvc)))))
 
 	// ---- Web 管理台（自助台 + 管理后台 + 页面）----
 	// 全部挂在 /web、/webauthn、/api/{totp,passkeys}、/admin 新路径下：

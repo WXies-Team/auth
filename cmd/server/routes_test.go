@@ -52,6 +52,13 @@ func newRouteEnv(t *testing.T) *routeEnv {
 		}
 	}
 	t.Setenv("TOTP_ENC_KEY", strings.Repeat("k", 32))
+	// 内部凭据（M3）：AI 三端点要验 X-Internal-Token，路由测试统一给一个 hook_token。
+	// 单独验「错头/缺头/键没配」的用例自己改这张表（见 TestAIRouteInternalTokenGate）。
+	if _, err := pool.Exec(
+		"INSERT INTO app_config (`key`, `value`) VALUES ('hook_token', ?)"+
+			" ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)", hookTokenForTest); err != nil {
+		t.Fatalf("种内部令牌: %v", err)
+	}
 	wa, err := auth.NewWebAuthn(nil)
 	if err != nil {
 		t.Fatalf("NewWebAuthn: %v", err)

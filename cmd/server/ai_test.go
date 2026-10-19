@@ -11,13 +11,17 @@ import (
 	"github.com/WXies-Team/auth/internal/protocol"
 )
 
-// doAI 打一个 /internal/ai/* 端点（环回来源，与日记服务同款调用形态）。
+// doAI 打一个 /internal/ai/* 端点（环回来源 + 内部凭据头，与日记服务同款调用形态）。
 func (e *routeEnv) doAI(t *testing.T, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	return e.do(t, "POST", path, body, func(r *http.Request) {
 		r.RemoteAddr = "127.0.0.1:51234"
+		r.Header.Set("X-Internal-Token", hookTokenForTest)
 	})
 }
+
+// hookTokenForTest 与 newRouteEnv 种进 app_config 的 hook_token 对应（M3 的凭据闸）。
+const hookTokenForTest = "route-test-hook-token"
 
 // 种限额键：config.Store 有 10s 缓存，但每个 routeEnv 新建 Store，首轮读即取到。
 func seedAIConfig(t *testing.T, e *routeEnv, kv map[string]string) {
@@ -230,5 +234,45 @@ func TestAIRouteValidation(t *testing.T) {
 	// 非环回来源 403（loopbackOnly，与既有 /internal/* 同款）
 	if rec := e.do(t, "POST", "/internal/ai/check", `{"app":"calorie-diary","uid":7654321}`, nil); rec.Code != http.StatusForbidden {
 		t.Errorf("公网来源应 403，得到 %d", rec.Code)
+	}
+}
+
+// M3：三端点强制 X-Internal-Token（hook_token）——带头对得上放行、错头 401、
+// 缺头 401、键没配（空配置）恒 401 且不碰业务。
+func TestAIRouteInternalTokenGate(t *testing.T) {
+	const body = `{"app":"calorie-diary","uid":7654901}`
+	e := newRouteEnv(t)
+
+	// 带头且对得上 → 放行（真闸门路径，不是一路 401 的假绿）
+	if rec := e.doAI(t, "/internal/ai/check", body); rec.Code != http.StatusOK {
+		t.Fatalf("带头对得上应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	// 错头 → 401，且不进闸门（没占并发槽、没记账）
+	wrong := func(r *http.Request) {
+		r.RemoteAddr = "127.0.0.1:51234"
+		r.Header.Set("X-Internal-Token", "not-the-hook-token")
+	}
+	if rec := e.do(t, "POST", "/internal/ai/check", body, wrong); rec.Code != http.StatusUnauthorized {
+		t.Errorf("错头应 401，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	// 缺头 → 401（三个端点都挂同一道闸）
+	for _, path := range []string{"/internal/ai/check", "/internal/ai/consume", "/internal/ai/release"} {
+		rec := e.do(t, "POST", path, body, func(r *http.Request) { r.RemoteAddr = "127.0.0.1:51234" })
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("缺头打 %s 应 401，得到 %d（%s）", path, rec.Code, rec.Body.String())
+		}
+	}
+	var users int
+	if err := e.pool.QueryRow("SELECT COUNT(*) FROM users WHERE id = 7654901").Scan(&users); err != nil || users != 0 {
+		t.Errorf("401 不该碰业务行，得到 users=%d err=%v", users, err)
+	}
+
+	// 键没配 = 空配置恒 401（哪怕带头的内容恰好是空串也进不来）
+	e2 := newRouteEnv(t)
+	if _, err := e2.pool.Exec("DELETE FROM app_config WHERE `key` = 'hook_token'"); err != nil {
+		t.Fatalf("删内部令牌键: %v", err)
+	}
+	if rec := e2.doAI(t, "/internal/ai/check", body); rec.Code != http.StatusUnauthorized {
+		t.Errorf("空配置应恒 401，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
 }

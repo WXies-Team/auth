@@ -21,7 +21,9 @@ import (
 //
 // 暴露面照抄既有 /internal/*：loopbackOnly 守卫在最外层（公网来源 403），
 // nginx 已整段 404 /internal/*；**不挂 JWT 鉴权**——调用方是同机的日记服务，
-// uid 已由各自的 withUID 验过，这里再验一次 token 既无凭据也无必要。
+// uid 已由各自的 withUID 验过，这里再验一次业务 token 既无凭据也无必要。
+// 内部凭据闸是 X-Internal-Token（hook_token，M3，见 internalTokenGate）：环回
+// 只挡「公网误配反代」，同机的任何进程都打得到这三个端点，凭据闸才挡得住它们。
 // 429 文案与 Retry-After 逐字沿用日记侧现行口径（calorie main.go 的 AI 路由）。
 
 // aiRatePerApp 是三端点每个 app 每分钟的兜底上限，口径与 /internal/verify 一致

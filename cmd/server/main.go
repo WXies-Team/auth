@@ -334,6 +334,34 @@ func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
 	})
 }
 
+// internalTokenGate 是 /internal/ai/* 三端点的内部凭据闸（M3）：头
+// `X-Internal-Token: <hook_token>`。token 来源与 internalEnsure 同一个 app_config 键
+// （10s 热读，改库即生效），比对也同款——各自 sha256 后 subtle 常数时间比，
+// 长度差被散列拉平，直比字符串会按匹配前缀泄露进度。
+// **缺失 / 对不上 / 键没配（want 空）一律 401**：内部凭据没进库就该一条也进不来；
+// 读库失败回 503 而不是 401，别把 DB 抖动的排障方向带偏到「token 插错了」。
+// 闸排在 handler 之前：对不上连请求体都不读。
+func internalTokenGate(tokenFor auth.ConfigFunc, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want, err := tokenFor(auth.HookTokenKey)
+		if err != nil {
+			slog.Error("读 hook_token 失败", "err", err)
+			writeError(w, http.StatusServiceUnavailable, "服务暂时不可用，请稍后重试")
+			return
+		}
+		if want == "" {
+			slog.Warn("hook_token 未配置，AI 端点拒绝一切请求")
+		}
+		wantSum := sha256.Sum256([]byte(want))
+		gotSum := sha256.Sum256([]byte(r.Header.Get("X-Internal-Token")))
+		if want == "" || subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
+			writeError(w, http.StatusUnauthorized, "未授权")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ---- 以下为通用中间件与 JSON 工具 ----
 
 // decodeLimited 解码请求体。**故意不拒绝未知字段**——日记客户端的 DTO 可能多发字段，
