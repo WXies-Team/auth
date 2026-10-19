@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -374,5 +375,23 @@ func TestInternalEnsureAuthAndPassthrough(t *testing.T) {
 	internalEnsure(lookup, f).ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized || len(f.audits) != 0 {
 		t.Errorf("鉴权拒绝不该记审计，得到 code=%d audits=%d", rec.Code, len(f.audits))
+	}
+}
+
+// n9：/health 读配置失败的回执文案必须中性——原先复用「数据库不可用」，把排障
+// 方向带偏到 DB（DB 挂了是另一条 Ping 分支）。
+func TestHealthConfigFailureIsNeutral(t *testing.T) {
+	e := newRouteEnv(t)
+	boom := func(string) (string, error) { return "", errors.New("读配置炸了") }
+	rec := httptest.NewRecorder()
+	health(e.pool, boom).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("配置读取失败应 503，得到 %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "数据库") {
+		t.Errorf("配置读取失败不该写成数据库不可用: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "配置读取失败") {
+		t.Errorf("应回中性的「配置读取失败」，得到 %s", rec.Body.String())
 	}
 }

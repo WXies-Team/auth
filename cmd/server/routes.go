@@ -25,7 +25,7 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	// 判定失败并自动回滚。若改成「永远 200」，部署脚本会在数据库已挂时误判健康。
 	// 限流给到 120/分：部署脚本的回滚/健康轮询 15 次只占 30 秒，且它从 127.0.0.1
 	// 直连、与外部监控不同键；120/分仍能挡住对 /health 的打库轰炸。
-	mux.Handle("GET /health", withLogging(limitN("health", 120, health(pool, cfg))))
+	mux.Handle("GET /health", withLogging(limitN("health", 120, health(pool, cfg.Require))))
 
 	// ---- 无登录态端点 ----
 	// 限流口径与日记服务的 /auth/* 一致：register/login/login-code 每 IP 15 次/分

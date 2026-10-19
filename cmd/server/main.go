@@ -207,7 +207,7 @@ func splitList(raw string) []string {
 // deploy-server.sh 靠 `curl -fsS` 判定失败并自动回滚），再给两个配置开关位。
 // 开关位**刻意外显**（定案不改）：本服务的健康即运维监控面，布尔只报
 //「凭据配没配」，不含任何敏感值。
-func health(pool *sql.DB, cfg *config.Store) http.Handler {
+func health(pool *sql.DB, require func(string) (string, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Ping 带 2s 超时：连接池被占满时 /health 不能无限排队——
 		// 部署健康检查拿不到响应会误判回滚
@@ -218,10 +218,12 @@ func health(pool *sql.DB, cfg *config.Store) http.Handler {
 			return
 		}
 		// 邮件凭据没有兜底值：缺键时发码全 503，/health 给个开关位让部署方自查，
-		// 不用翻日志
-		mailKey, err := cfg.Require("mail_client_secret")
+		// 不用翻日志。读配置失败与「数据库挂了」是两回事，文案分开（n9）——
+		// 写成「数据库不可用」会把排障方向带偏到 DB 上。
+		mailKey, err := require("mail_client_secret")
 		if err != nil {
-			writeError(w, http.StatusServiceUnavailable, "数据库不可用")
+			slog.Error("读邮件凭据配置失败", "err", err)
+			writeError(w, http.StatusServiceUnavailable, "配置读取失败")
 			return
 		}
 		writeJSON(w, http.StatusOK, healthResponse{
