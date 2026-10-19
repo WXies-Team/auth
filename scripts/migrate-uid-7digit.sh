@@ -301,7 +301,9 @@ build_tx() { # $1=计划数组名 $2=映射文件 $3=是否业务库(1/0) → st
     local pass e kind t c rest old new
     echo "START TRANSACTION;"
     for pass in main last; do
-        while IFS=$'\t' read -r old new; do
+        # 工作集是三列（旧号/新号/邮箱）：只写两个变量会让邮箱并进 new，
+        # 下面的整数校验当场中止——第三列必须有归宿
+        while IFS=$'\t' read -r old new _email; do
             [[ "$old" =~ ^[0-9]+$ && "$new" =~ ^[0-9]+$ ]] || die "映射不是整数：$old → $new"
             for e in "${plan[@]}"; do
                 kind="${e%%|*}"
