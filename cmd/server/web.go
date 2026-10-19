@@ -299,7 +299,9 @@ type ceremonyResponse struct {
 }
 
 // writeLoginResult 分流登录回执，两支的回体都是 {token,email}（AuthResponse 同形，
-// C 批零新解析）：还差第二步 → {status,loginToken,methods}；web 流程 → 签双 cookie；
+// C 批零新解析）：还差第二步 → {status,loginToken,methods}；web 流程 → 签双 cookie，
+// **回体 token 恒空串**（凭据只在 HttpOnly cookie 里，回给脚本一个能直连双凭据
+// 路由的会话 token 等于把 CSRF 闸拆了——internal/ui/app.js 全程不读 body token）；
 // App 流程 → 回 JWT 且**一枚 cookie 都不发**（调用方是原生 App，没有 cookie 可用，
 // 也就没有 cookie 会话的 CSRF 闸要吃）。
 func writeLoginResult(svc *auth.Service, w http.ResponseWriter, res *auth.WebLoginResult) {
@@ -315,7 +317,7 @@ func writeLoginResult(svc *auth.Service, w http.ResponseWriter, res *auth.WebLog
 		return
 	}
 	setWebCookies(w, res.Session)
-	writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: res.Session.Token, Email: res.Email})
+	writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: "", Email: res.Email})
 }
 
 // credentialJSON 把 response 归一成库要的 PublicKeyCredential **对象字节**，

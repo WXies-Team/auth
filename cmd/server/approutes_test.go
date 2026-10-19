@@ -132,12 +132,19 @@ func TestAppPasswordLoginRouteReturnsJWT(t *testing.T) {
 	if jar[auth.WebCookieName] == nil || jar[auth.WebCSRFCookieName] == nil {
 		t.Fatalf("web 支必须签两枚 cookie，得到 %v", jar)
 	}
-	webToken := tokenOf(t, web.Body.Bytes())
-	if strings.Contains(webToken, ".") {
-		t.Errorf("web 支的 token 该是 32 字节会话 token，不是 JWT: %q", webToken)
+	// M2：web 回体 token 恒空串（形状仍是 {token,email}），凭据只在 HttpOnly cookie
+	webResp := authResponse{}
+	if err := json.Unmarshal(web.Body.Bytes(), &webResp); err != nil {
+		t.Fatalf("web 回执解析: %v（%s）", err, web.Body.String())
 	}
-	if res := verifyByApp(t, e, webToken, "calorie-diary"); res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("web 会话 token 不该过 /internal/verify，得到 %d", res.StatusCode)
+	if webResp.Token != "" {
+		t.Errorf("web 回体 token 必须恒空（凭据只在 cookie），得到 %q", webResp.Token)
+	}
+	if webResp.Email != "app-route@example.com" {
+		t.Errorf("web 回体 email 应照回，得到 %q", webResp.Email)
+	}
+	if res := verifyByApp(t, e, "", "calorie-diary"); res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("空 token 不该过 /internal/verify，得到 %d", res.StatusCode)
 	}
 }
 
@@ -275,12 +282,16 @@ func TestPasskeyLoginFinishRouteAppAndWeb(t *testing.T) {
 	if jar[auth.WebCookieName] == nil || jar[auth.WebCSRFCookieName] == nil {
 		t.Fatalf("web 支必须签两枚 cookie，得到 %v", jar)
 	}
-	webToken := tokenOf(t, web.Body.Bytes())
-	if strings.Contains(webToken, ".") {
-		t.Errorf("web 支的 token 不该是 JWT: %q", webToken)
+	// M2：web 支回体 token 恒空串，凭据只在 cookie
+	webResp := authResponse{}
+	if err := json.Unmarshal(web.Body.Bytes(), &webResp); err != nil {
+		t.Fatalf("web 回执解析: %v（%s）", err, web.Body.String())
 	}
-	if res := verifyByApp(t, e, webToken, "calorie-diary"); res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("web 会话 token 不该过 verify，得到 %d", res.StatusCode)
+	if webResp.Token != "" {
+		t.Errorf("web 回体 token 必须恒空（凭据只在 cookie），得到 %q", webResp.Token)
+	}
+	if res := verifyByApp(t, e, "", "calorie-diary"); res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("空 token 不该过 verify，得到 %d", res.StatusCode)
 	}
 
 	// ---- 白名单外 400（app 校验在仪式之前，垃圾 ceremonyId 也先报 400）----

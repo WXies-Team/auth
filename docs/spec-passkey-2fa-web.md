@@ -237,7 +237,7 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 | `POST /webauthn/register/options` | 已登录 | `{}` | `{publicKey: <CredentialCreation.publicKey>, ceremonyId}` |
 | `POST /webauthn/register/finish` | 已登录 + reauth≤15min | `{ceremonyId, response}`（浏览器 Credential JSON 透传；日记 App 发的 JSON **字符串**形态由路由层解一层，两形态都交库校验） | `{id, name, createdAt}`；删 ceremony 行；审计 |
 | `POST /webauthn/login/options` | 无 | `{}` | `{publicKey: <CredentialAssertion.publicKey>, ceremonyId}`（discoverable：空 allowCredentials+UV required） |
-| `POST /webauthn/login/finish` | 无 | `{ceremonyId, response, app}`（`app` 可选） | `app` 空：建 session(app='web')+双 cookie+`{token,email}`（**与 AuthResponse 同形**，C 批零新解析）；`app` 在白名单（calorie-diary/expense-diary）：建 session(app=`<app>`)、签**既有格式 JWT**（/auth/login 同一签发助手：同 aud 白名单/ver/sid/90 天）回 `{token,email}`、**不下发 cookie**，白名单外 400；2FA 不影响（passkey 单独成立）；审计 login.success method=passkey（detail 可带 app） |
+| `POST /webauthn/login/finish` | 无 | `{ceremonyId, response, app}`（`app` 可选） | `app` 空：建 session(app='web')+双 cookie+`{token,email}`（**与 AuthResponse 同形**，token 恒空串——凭据只在 cookie）；`app` 在白名单（calorie-diary/expense-diary）：建 session(app=`<app>`)、签**既有格式 JWT**（/auth/login 同一签发助手：同 aud 白名单/ver/sid/90 天）回 `{token,email}`、**不下发 cookie**，白名单外 400；2FA 不影响（passkey 单独成立）；审计 login.success method=passkey（detail 可带 app） |
 | `GET /api/passkeys` | 已登录 | — | `[{id,name,createdAt,lastUsedAt,current}]`（current 按 credential_id） |
 | `PATCH /api/passkeys/{id}` | 已登录 | `{name}`（≤64 trim） | `{ok:true}` |
 | `DELETE /api/passkeys/{id}` | 已登录 + reauth | — | `{ok:true}`；最后一道登录方式守卫 400；审计 |
@@ -256,8 +256,8 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 
 | Method/Path | 请求 | 响应 |
 |---|---|---|
-| `POST /web/login/password` | `{email,password,app}` | 无 2FA：`{token,email}`；有 2FA：`{status:"2fa_required", loginToken, methods:["totp","recovery"]}`。**app 分流（C 批）**：缺省 = web 流程，token 是 web 会话 token + 双 cookie（逐字节不变）；在白名单 = App 流程，token 是业务 JWT、**不下发 cookie**（外值 400）。有 2FA 时 app 随 `login_states.app`（`VARCHAR(32) NOT NULL DEFAULT 'web'`，ensureColumn 幂等补列）带到第二步 |
-| `POST /web/login/totp` | `{loginToken, code}` 或 `{loginToken, recoveryCode}` | `{token,email}`；恢复码消费记审计。**请求里没有 app**：按 `login_states.app` 决定发 web 会话 + 双 cookie（'web'）还是业务 JWT 无 cookie（白名单应用）；audit detail 可带 app |
+| `POST /web/login/password` | `{email,password,app}` | 无 2FA：`{token,email}`；有 2FA：`{status:"2fa_required", loginToken, methods:["totp","recovery"]}`。**app 分流（C 批）**：缺省 = web 流程，双 cookie + 回体 token 恒空串（凭据只在 cookie）；在白名单 = App 流程，token 是业务 JWT、**不下发 cookie**（外值 400）。有 2FA 时 app 随 `login_states.app`（`VARCHAR(32) NOT NULL DEFAULT 'web'`，ensureColumn 幂等补列）带到第二步 |
+| `POST /web/login/totp` | `{loginToken, code}` 或 `{loginToken, recoveryCode}` | `{token,email}`；恢复码消费记审计。**请求里没有 app**：按 `login_states.app` 决定发 web 会话 + 双 cookie（'web'，回体 token 恒空串）还是业务 JWT 无 cookie（白名单应用）；audit detail 可带 app |
 | `POST /web/session`（登录态） | — | `{uid,email,role,csrfToken,totpEnabled,passkeyCount}` |
 | `POST /web/reauth` | cookie + `{password}` 或 `{totpCode}` | `{ok:true}`（刷 reauth_at） |
 | `POST /web/logout` | cookie + CSRF | `{ok:true}`；吊销本行 + `Clear-Site-Data` |
@@ -307,7 +307,7 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 - 会话 cookie：`__Host-auth_web`（`Secure; HttpOnly; SameSite=Strict; Path=/`；`__Host-` 前缀为 OWASP 推荐形态）；值=32 字节 CSPRNG base64url（≥128 位熵，ASVS 7.2.3）；服务端只存 sha256（`sessions.web_token_hash`），常数时间比对（雪flake sid 可预测不能直接进 cookie——identifier/verifier 思路）。
 - **CSRF：同步器 token 模式**（有状态站点 OWASP 定案）。双 cookie：`__Host-auth_web_csrf`（非 HttpOnly JS 可读）+ sha256 存 `sessions.web_csrf_hash`。所有 `/web/*`、`/admin/*` 非 GET 必须带 `X-CSRF-Token`，不符 403。SameSite=Strict 只当纵深防御不单独依赖（OWASP：SameSite 是 defense in depth，Lax 有 GET 顶层导航缺口）。自定义头是 OWASP 给 API-driven 站点的推荐路径。
 - 超时：空闲 7 天（last_seen_at，已有 60s 节流）/ 绝对 90 天（created_at，对齐 JWT TTL）。OWASP 15-30 分钟参考区间对个人控制台过激——**文档化偏离**（ASVS 7.1.1 允许 documented+justified）：低敏个人数据、设备列表已有踢人自卫。
-- 登出：吊销行 + `Clear-Site-Data` 头；全部会话响应 `Cache-Control: no-store`。
+- 登出：吊销行 + `Clear-Site-Data` 头；全部会话响应 `Cache-Control: no-store`。web 登录/改密回体 `{token,email}` 形状不变但 **token 恒空串**——凭据只在 HttpOnly cookie，前端（internal/ui/app.js）不读 body token。
 - 与 Bearer 并存：`/webauthn/*`、`/api/totp*`、`/api/passkeys*` 双凭据；**`/admin/*` 只收 cookie**（缩小面）。web 登录=sessions 又一行（app='web'），App 设备页自然看到并可踢。
 
 ## B2 页面清单（零 CDN：html/template+内联 CSS/JS；图标内联 SVG；系统字体）
