@@ -121,7 +121,53 @@ func EnsureSchema(pool *sql.DB) error {
 			return fmt.Errorf("执行第 %d 条建表语句失败: %w\n语句: %s", i+1, err, truncate(stmt, 160))
 		}
 	}
-	slog.Info("schema ensured", "statements", len(stmts))
+	// 列变更单独走探测式补列：MySQL 的 ADD COLUMN 没有 IF NOT EXISTS，直接写进
+	// schema.sql 会让第二次启动撞 Duplicate column 而拒启。探测用 information_schema
+	//（读元数据，不加表锁），列已存在即整条 no-op。
+	for _, c := range extraColumns {
+		if err := ensureColumn(pool, c.table, c.column, c.ddl); err != nil {
+			return err
+		}
+	}
+	slog.Info("schema ensured", "statements", len(stmts), "columns", len(extraColumns))
+	return nil
+}
+
+// columnDef 是一条「老库补列」的 DDL。table/column 只为探测与报错定位，ddl 才是执行体。
+type columnDef struct {
+	table, column, ddl string
+}
+
+// extraColumns 是 schema.sql 之外的列变更（同一批新增，一次补齐）。
+var extraColumns = []columnDef{
+	{"users", "role",
+		"ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'"},
+	// UNIQUE 建在列上：web cookie 的 sha256 命中查询按唯一键走，且 DB 层兜住
+	//「同一 token 落两行」的实现错误（生成端再随机也挡不住）。
+	{"sessions", "web_token_hash",
+		"ALTER TABLE sessions ADD COLUMN web_token_hash CHAR(64) NULL, ADD UNIQUE KEY uq_sessions_web_token (web_token_hash)"},
+	{"sessions", "web_csrf_hash",
+		"ALTER TABLE sessions ADD COLUMN web_csrf_hash CHAR(64) NULL"},
+	{"sessions", "reauth_at",
+		"ALTER TABLE sessions ADD COLUMN reauth_at BIGINT NULL"},
+}
+
+// ensureColumn 幂等地补一列：先查 information_schema，没有才执行 DDL。
+func ensureColumn(pool *sql.DB, table, column, ddl string) error {
+	var found int
+	err := pool.QueryRow(
+		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+		table, column).Scan(&found)
+	if err != nil {
+		return fmt.Errorf("探测 %s.%s 列: %w", table, column, err)
+	}
+	if found > 0 {
+		return nil
+	}
+	if _, err := pool.Exec(ddl); err != nil {
+		return fmt.Errorf("补 %s.%s 列: %w", table, column, err)
+	}
+	slog.Info("补列完成", "table", table, "column", column)
 	return nil
 }
 

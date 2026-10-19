@@ -32,7 +32,18 @@ func TestSchemaFileEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema.sql 未内嵌: %v", err)
 	}
-	for _, want := range []string{"CREATE TABLE IF NOT EXISTS users", "CREATE TABLE IF NOT EXISTS otp_codes", "CREATE TABLE IF NOT EXISTS app_config"} {
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS users",
+		"CREATE TABLE IF NOT EXISTS otp_codes",
+		"CREATE TABLE IF NOT EXISTS app_config",
+		"CREATE TABLE IF NOT EXISTS sessions",
+		"CREATE TABLE IF NOT EXISTS passkeys",
+		"CREATE TABLE IF NOT EXISTS totp_factors",
+		"CREATE TABLE IF NOT EXISTS recovery_codes",
+		"CREATE TABLE IF NOT EXISTS webauthn_challenges",
+		"CREATE TABLE IF NOT EXISTS login_states",
+		"CREATE TABLE IF NOT EXISTS ai_usage",
+	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("schema.sql 缺少 %q", want)
 		}

@@ -70,3 +70,88 @@ CREATE TABLE IF NOT EXISTS sessions (
     PRIMARY KEY (id),
     KEY idx_sessions_user (user_id, revoked_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- Web 管理台的三张列变更（role / web_token_hash / web_csrf_hash / reauth_at）由
+-- internal/db 的 ensureColumn 在启动时按 information_schema 探测后补：MySQL 的
+-- ADD COLUMN 没有 IF NOT EXISTS，写进本文件会撞「重复列」错误让二跑的启动失败。
+
+-- passkey 凭证。rp_id 必须自己存列——库只按它校验仪式，不替你按 RP 分区凭证。
+CREATE TABLE IF NOT EXISTS passkeys (
+    id               BIGINT       NOT NULL,
+    user_id          BIGINT       NOT NULL,
+    name             VARCHAR(64)  NOT NULL,
+    credential_id    VARCHAR(512) NOT NULL,
+    rp_id            VARCHAR(64)  NOT NULL,
+    public_key       VARBINARY(1024) NOT NULL,
+    sign_count       BIGINT       NOT NULL DEFAULT 0,
+    transports       VARCHAR(64)  NOT NULL DEFAULT '',
+    aaguid           CHAR(32)     NOT NULL DEFAULT '',
+    backup_eligible  TINYINT      NOT NULL DEFAULT 0,
+    backup_state     TINYINT      NOT NULL DEFAULT 0,
+    created_at       BIGINT       NOT NULL,
+    last_used_at     BIGINT       NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_passkeys_cred (credential_id),
+    KEY idx_passkeys_user (user_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- TOTP 因子，一用户一条。enabled=0 是 pending（先验后启）：新 secret 落库后
+-- 旧的 enabled 行保持原样，直到新码验过才整体替换。
+CREATE TABLE IF NOT EXISTS totp_factors (
+    user_id            BIGINT      NOT NULL,
+    secret_cipher      VARBINARY(256) NOT NULL,
+    enabled            TINYINT     NOT NULL DEFAULT 0,
+    last_used_timestep BIGINT      NOT NULL DEFAULT 0,
+    created_at         BIGINT      NOT NULL,
+    confirmed_at       BIGINT      NULL,
+    PRIMARY KEY (user_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- 恢复码：存 HMAC-SHA256（不存明文），用一少一（used=1 不删行，删了就没法数「用过几个」），
+-- 重生成时整组换新、旧组即废。
+CREATE TABLE IF NOT EXISTS recovery_codes (
+    id         INT          NOT NULL AUTO_INCREMENT,
+    user_id    BIGINT       NOT NULL,
+    code_hash  CHAR(64)     NOT NULL,
+    used       TINYINT      NOT NULL DEFAULT 0,
+    used_at    BIGINT       NULL,
+    created_at BIGINT       NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_recovery_user (user_id, used)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- WebAuthn 仪式中间态：SessionData 整体 JSON 落库（库规定唯一持久化形态），
+-- 5 分钟过期、用后即焚——内存 map 撑不过重启，正是本仓把验证码迁库的同款理由。
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+    id           BIGINT      NOT NULL,
+    kind         VARCHAR(16) NOT NULL,
+    user_id      BIGINT      NULL,
+    session_data TEXT        NOT NULL,
+    expires_at   BIGINT      NOT NULL,
+    created_at   BIGINT      NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_chal_exp (expires_at)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- 两步登录中间态：密码已验、TOTP 未验的 5 分钟窗口。token 只存 sha256，
+-- 错 5 次整条烧毁（与邮箱验证码同口径）。
+CREATE TABLE IF NOT EXISTS login_states (
+    token_hash CHAR(64)    NOT NULL,
+    user_id    BIGINT      NOT NULL,
+    method     VARCHAR(16) NOT NULL,
+    attempts   INT         NOT NULL DEFAULT 0,
+    expires_at BIGINT      NOT NULL,
+    created_at BIGINT      NOT NULL,
+    PRIMARY KEY (token_hash),
+    KEY idx_ls_user (user_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
+-- AI 用量计数（管理台看板读，限额键仍在 app_config）。先建空表：迁入逻辑
+-- 由后续批次接，这里只保证看板有表可查。
+CREATE TABLE IF NOT EXISTS ai_usage (
+    scope   VARCHAR(8)  NOT NULL,
+    subject VARCHAR(32) NOT NULL,
+    day     VARCHAR(10) NOT NULL,
+    count   INT         NOT NULL,
+    PRIMARY KEY (scope, subject, day)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
