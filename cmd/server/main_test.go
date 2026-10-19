@@ -266,10 +266,12 @@ func TestInternalEnsureAuthAndPassthrough(t *testing.T) {
 	}
 	body := `[{"email":" a@b.com ","password_hash":null,"created_at":1600000000123}]`
 
-	// 鉴权三种错法：没头、token 键没配、token 不匹配——都不许进 EnsureUsers
+	// 鉴权三种错法：没头、token 键没配、token 不匹配（含只差末位的近似 token，
+	// 钉住常数时间比较的替换没有改坏判定）——都不许进 EnsureUsers
 	for _, c := range []struct{ name, header string }{
 		{"缺 Authorization", ""},
 		{"token 错", "Bearer wrong"},
+		{"token 只差末位", "Bearer mig-secretX"},
 	} {
 		f := &fakeEnsurer{res: []protocol.EnsureUserResult{{Email: "a@b.com", UID: 1}}}
 		h := internalEnsure(lookup, f)

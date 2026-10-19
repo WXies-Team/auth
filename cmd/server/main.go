@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -294,8 +296,12 @@ func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
 		if want == "" {
 			slog.Warn("hook_token 未配置，内部并入端点拒绝一切请求")
 		}
-		// 对不上连请求体都不读：不给为错配凭据白解一次 JSON 的机会
-		if want == "" || r.Header.Get("Authorization") != "Bearer "+want {
+		// 对不上连请求体都不读：不给为错配凭据白解一次 JSON 的机会。
+		// 比较走常数时间（各自 sha256 后再比，长度差也被散列拉平）：直比字符串
+		// 会按匹配前缀泄露进度，等于把这根共享密钥摆上线上逐位爆破的台面。
+		wantSum := sha256.Sum256([]byte("Bearer " + want))
+		gotSum := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if want == "" || subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
 			writeError(w, http.StatusUnauthorized, "未授权")
 			return
 		}
