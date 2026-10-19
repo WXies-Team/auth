@@ -262,7 +262,7 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 | `POST /web/reauth` | cookie + `{password}` 或 `{totpCode}` | `{ok:true}`（刷 reauth_at） |
 | `POST /web/logout` | cookie + CSRF | `{ok:true}`；吊销本行 + `Clear-Site-Data` |
 
-兼容开关：`app_config` 键 `totp_enforce_apps`（逗号分隔，**默认空=老客户端密码登录不拦**）——`/auth/login` 对名单内 app 在用户已启用 2FA 时回 401「请升级应用后使用新版登录」。C 批覆盖率足够后作者手动开。**老客户端不被破坏硬约束下的唯一开关，默认态零影响**（ASVS 6.3.4 一致化只能随客户端淘汰渐进，在此声明）。
+兼容开关：`app_config` 键 `totp_enforce_apps`（逗号分隔，**默认空=老客户端密码登录不拦**）——`/auth/login` 对名单内 app 在用户已启用 2FA 时回 401「请升级应用后使用新版登录」。C 批覆盖率足够后作者手动开。**老客户端不被破坏硬约束下的唯一开关，默认态零影响**（ASVS 6.3.4 一致化只能随客户端淘汰渐进，在此声明）。**已声明残余**：开关只拦密码老端点；邮箱验证码登录通道（/auth/login-code、/web/login/email-code）不叠 2FA（邮件通道算持有因子 + 自带冷却/限额/作废三闸，既有决策），能收该邮箱邮件的攻击者可绕过 TOTP 用验证码登录——收紧入口在 enforceTOTPFor/checkLoginCode，不另起开关。
 
 ### A2.4 用户自助（复用既有）
 

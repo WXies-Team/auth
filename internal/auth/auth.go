@@ -153,6 +153,16 @@ func (s *Service) SetEnforceApps(f ConfigFunc) { s.enforceCfg = f }
 // 这是老客户端唯一的行为开关（规格 D1）：默认空名单 = 一行影响都没有；翻开关是
 // 作者在 App 覆盖率够了之后的显式动作。读键失败按未配置放行——兼容开关读不出来
 // 不该变成全站拦登录。
+//
+// ============================ 已声明的残余（m10） ============================
+// 开关只拦**密码**老端点；邮箱验证码登录通道（/auth/login-code、web 台的
+// /web/login/email-code）**不叠 2FA**——邮件通道本身算持有因子（ASVS V6.3.6：
+// email 不可作认证机制的独立依据，但作为第二因素的替代输入通道业界通行），
+// 这是既有决策：叠上去输入体验差、且验证码已有 60s 冷却 + 日限额 + 5 次作废
+// 三道闸。残余风险：能收到该邮箱邮件的攻击者（邮箱被盗、SIM/转发劫持、
+// 邮箱侧 XSS）可绕过 TOTP 直接用验证码登录。接受该风险的前提是邮箱通道的
+// 安全性强于验证器丢失场景；若某天要收紧，入口就在这里——给 checkLoginCode
+// 路加同款 enforce 判定即可，不要另起开关。
 func (s *Service) enforceTOTPFor(app string, uid int64) bool {
 	if s.enforceCfg == nil || app == "" {
 		return false
