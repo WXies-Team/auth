@@ -113,6 +113,8 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 	cleanAuditLogs(s.pool)
 	// AI 用量行的 90 天保留期同批清（n4）：看板只读近 30 天，过期行只剩对账价值
 	cleanAIUsage(s.pool)
+	// 会话僵尸行同批清（n6）：撤销/绝对过期满 30 天才删，回看窗内留着
+	cleanDeadSessions(s.pool)
 	return code, nil
 }
 
