@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -47,7 +48,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 	// ---- 登录（无登录态，只有 Origin 同源校验：此时没有可搭的 cookie 顺风车）----
 	mux.Handle("POST /web/login/password", withLogging(originGuard(limitN("web-login", 15,
 		jsonBody[protocol.WebLoginRequest](func(req *protocol.WebLoginRequest, w http.ResponseWriter, r *http.Request) {
-			res, err := svc.WebLoginPassword(req.Email, req.Password, sessMeta(r))
+			res, err := svc.WebLoginPassword(req.Email, req.Password, sessMeta(r), req.App)
 			if err != nil {
 				writeResult(w, nil, err)
 				return
@@ -143,7 +144,11 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		}))
 	mux.Handle("POST /webauthn/register/finish", reauthed("passkey-register", 10, jsonAuthedWrapper(
 		func(c auth.WebCaller, req *protocol.PasskeyFinishRequest, w http.ResponseWriter, r *http.Request) {
-			info, err := svc.FinishPasskeyRegistration(c.Caller, req.CeremonyID, req.Response, sessMeta(r))
+			body, ok := credentialJSON(w, req.Response)
+			if !ok {
+				return
+			}
+			info, err := svc.FinishPasskeyRegistration(c.Caller, req.CeremonyID, body, sessMeta(r))
 			if err != nil {
 				writeResult(w, nil, err)
 				return
@@ -161,26 +166,18 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		})))))
 	mux.Handle("POST /webauthn/login/finish", withLogging(originGuard(limitN("passkey-login-finish", 15,
 		jsonBody[protocol.PasskeyFinishRequest](func(req *protocol.PasskeyFinishRequest, w http.ResponseWriter, r *http.Request) {
-			uid, email, credID, err := svc.FinishPasskeyLogin(req.CeremonyID, req.Response)
+			body, ok := credentialJSON(w, req.Response)
+			if !ok {
+				return
+			}
+			// 建会话、签 JWT / 记凭证、审计都在业务层（WebPasskeyLogin）：
+			// 路由层只负责「请求 → 参数 → 回执」与 response 形态的归一。
+			res, err := svc.WebPasskeyLogin(req.CeremonyID, body, req.App, sessMeta(r))
 			if err != nil {
 				writeResult(w, nil, err)
 				return
 			}
-			ws, err := svc.CreateWebSession(uid, sessMeta(r))
-			if err != nil {
-				writeResult(w, nil, err)
-				return
-			}
-			svc.MarkPasskeyLogin(ws.SID, credID)
-			// discoverable 登录带 UV（设备锁/面容/指纹），按强认证记 reauth_at
-			_ = svc.MarkReauth(ws.SID)
-			svc.Audit(auth.AuditEvent{
-				Action: auth.AuditLogin, OK: true, ActorUID: &uid, ActorEmail: email,
-				Meta:   sessMeta(r),
-				Detail: map[string]string{"method": "passkey"},
-			})
-			setWebCookies(w, ws)
-			writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: ws.Token, Email: email})
+			writeLoginResult(svc, w, res)
 		})))))
 
 	// ---- Passkey 管理 ----
@@ -301,17 +298,49 @@ type ceremonyResponse struct {
 	CeremonyID int64 `json:"ceremonyId"`
 }
 
-// writeLoginResult 分流登录回执：完成 → 签 cookie + {token,email}（与 AuthResponse
-// 同形，C 批零新解析）；还差第二步 → {status,loginToken,methods}。
+// writeLoginResult 分流登录回执，两支的回体都是 {token,email}（AuthResponse 同形，
+// C 批零新解析）：还差第二步 → {status,loginToken,methods}；web 流程 → 签双 cookie；
+// App 流程 → 回 JWT 且**一枚 cookie 都不发**（调用方是原生 App，没有 cookie 可用，
+// 也就没有 cookie 会话的 CSRF 闸要吃）。
 func writeLoginResult(svc *auth.Service, w http.ResponseWriter, res *auth.WebLoginResult) {
-	if res.Session == nil {
+	if res.Session == nil && res.JWT == "" {
+		// 中间态回执两支同形：app 不在这里，服务端已随 login_states 带到第二步
 		writeJSON(w, http.StatusOK, protocol.WebLoginPending{
 			Status: res.Status, LoginToken: res.LoginToken, Methods: res.Methods,
 		})
 		return
 	}
+	if res.App != "" {
+		writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: res.JWT, Email: res.Email})
+		return
+	}
 	setWebCookies(w, res.Session)
 	writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: res.Session.Token, Email: res.Email})
+}
+
+// credentialJSON 把 response 归一成库要的 PublicKeyCredential **对象字节**，
+// 两种已上线的形态都收：
+//
+//	网页端（internal/ui/app.js）传 JSON 对象 → 原样透传，web 路的字节一个不变；
+//	日记 App 传 Credential Manager 的 authenticationResponseJson → 那是 JSON **字符串**
+//	（WebAuthDtos.kt 的 response: String），解一层再交库——不解的话库拿到带引号的
+//	字符串，解析直接 400，App 的 passkey 登录/注册全废。
+//
+// 解不动回 400「请求格式不正确」（与 decodeOr400 同一句），不留到库那层变 500。
+func credentialJSON(w http.ResponseWriter, raw json.RawMessage) ([]byte, bool) {
+	if len(raw) == 0 {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return nil, false
+	}
+	if raw[0] != '"' {
+		return raw, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || len(s) == 0 {
+		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		return nil, false
+	}
+	return []byte(s), true
 }
 
 // setWebCookies 签发双 cookie：会话 cookie HttpOnly（脚本读不到），CSRF cookie

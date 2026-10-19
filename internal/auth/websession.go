@@ -154,8 +154,9 @@ func (s *Service) ValidWebSession(token string) (WebCaller, error) {
 }
 
 // ValidWebBearer 识别并解析以 Authorization: Bearer 携带的 **web 会话 token**
-//（C 批 App 拿到的 {token} 就是它）。JWT 走 ValidUserID、web token 走这里，
-// 双凭据互不串用，但两条路各自都要撞 revoked_at 与超时闸。
+//（Web 台登录签的那串）。日记 App 拿到的是 JWT（C 批起 /web/login/* 与
+// /webauthn/login/finish 按 app 分流签发），走 ValidUserID；两种 Bearer 各走各的
+// 解析、互不串用，但两条路各自都要撞 revoked_at 与超时闸。
 func (s *Service) ValidWebBearer(header string) (WebCaller, error) {
 	raw := bearerLike(header)
 	if raw == "" {

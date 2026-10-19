@@ -572,7 +572,7 @@ func TestDeleteAccountClearsWebData(t *testing.T) {
 		c.UID, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", time.Now().UnixMilli()); err != nil {
 		t.Fatalf("落恢复码: %v", err)
 	}
-	if _, err := svc.beginLoginState(c.UID); err != nil {
+	if _, err := svc.beginLoginState(c.UID, ""); err != nil {
 		t.Fatalf("落登录中间态: %v", err)
 	}
 	if _, _, err := svc.BeginPasskeyLogin(); err != nil {

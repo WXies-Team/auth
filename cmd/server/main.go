@@ -429,8 +429,8 @@ func withLogging(next http.Handler) http.Handler {
 
 // withUID 解析**双凭据**并把身份放进 context；失败直接回 401/503。
 //
-// 三条路径（见 resolveCaller）：网页会话 cookie、老客户端的 JWT Bearer、以及
-// C 批 App 拿到的 web token Bearer。顺带做两件事：
+// 三条路径（见 resolveCaller）：网页会话 cookie、JWT Bearer（老客户端的 /auth/login
+// 与日记 App 经 app 分流拿到的同一种 token）、以及 web 会话 token 的 Bearer。顺带做两件事：
 //
 //   - 本次请求的来源（IP/UA）填进 Caller.Meta——改密换发新会话、审计都要它，
 //     过了这层再想取原始请求就取不到了；
@@ -463,8 +463,9 @@ func readMethod(method string) bool {
 // resolveCaller 按优先级解析凭据：
 //
 //  1. 会话 cookie（网页）→ sha256 点查 sessions.web_token_hash；
-//  2. Bearer 是 JWT 形状（三个点）→ 走原有 ValidUserID，**语义与老客户端时代一字不变**；
-//  3. Bearer 不是 JWT 形状（C 批 passkey/验证码登录回的 32 字节 web token）→ 同 1 的点查。
+//  2. Bearer 是 JWT 形状（三个点）→ 走原有 ValidUserID，**语义与老客户端时代一字不变**
+//     （日记 App 经 /web/login/* 与 /webauthn/login/finish 的 app 分流拿到的也是它）；
+//  3. Bearer 不是 JWT 形状（web 台登录签的 32 字节会话 token）→ 同 1 的点查。
 //
 // 只有「非 JWT 形状」才落到 3：JWT 的验签失败在解析阶段就出错、不打库，
 // 少一次无谓的点查；真 503（DB 抖动）原样往上抛，不能被当成「换个凭据再试」。

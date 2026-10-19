@@ -14,19 +14,23 @@ func TestWebLoginPasswordFlow(t *testing.T) {
 	meta := SessionMeta{IP: "203.0.113.20", UserAgent: "Mozilla/5.0 Chrome"}
 
 	// 未开 2FA → 一步到位
-	res, err := svc.WebLoginPassword("web-login@example.com", "secret123", meta)
+	res, err := svc.WebLoginPassword("web-login@example.com", "secret123", meta, "")
 	if err != nil {
 		t.Fatalf("密码登录: %v", err)
 	}
 	if res.Session == nil || res.Status != "" {
 		t.Fatalf("未开 2FA 应直接建成会话，得到 %+v", res)
 	}
+	// app 缺省 = web 流程：回的是会话 token，**不掺 JWT**
+	if res.JWT != "" || res.App != "" {
+		t.Errorf("web 流程不该出现 JWT/app，得到 JWT=%q app=%q", res.JWT, res.App)
+	}
 	wc, err := svc.ValidWebSession(res.Session.Token)
 	if err != nil || wc.UID == 0 || wc.App != "web" {
 		t.Errorf("签出的会话应可校验且 app=web: %+v err=%v", wc, err)
 	}
 	// 错密码照旧 401（与老端点同一句，不泄露账号状态）
-	_, err = svc.WebLoginPassword("web-login@example.com", "wrong-pass", meta)
+	_, err = svc.WebLoginPassword("web-login@example.com", "wrong-pass", meta, "")
 	if code, _ := httpMsg(err); code != 401 {
 		t.Errorf("错密码应 401，得到 %d %v", code, err)
 	}
@@ -43,7 +47,7 @@ func TestWebLoginPasswordFlow(t *testing.T) {
 		time.Now().UnixMilli(), c.UID); err != nil {
 		t.Fatalf("置 enabled: %v", err)
 	}
-	res2, err := svc.WebLoginPassword("web-login@example.com", "secret123", meta)
+	res2, err := svc.WebLoginPassword("web-login@example.com", "secret123", meta, "")
 	if err != nil {
 		t.Fatalf("带 2FA 的密码登录: %v", err)
 	}
@@ -52,6 +56,14 @@ func TestWebLoginPasswordFlow(t *testing.T) {
 	}
 	if len(res2.Methods) != 2 || res2.Methods[0] != "totp" || res2.Methods[1] != "recovery" {
 		t.Errorf("methods 应为 totp/recovery，得到 %+v", res2.Methods)
+	}
+	// 中间态要带着目标应用：web 流程存 'web'（列默认值），第二步据此决定发什么
+	var label string
+	if err := svc.pool.QueryRow("SELECT app FROM login_states WHERE user_id = ?", c.UID).Scan(&label); err != nil {
+		t.Fatalf("查中间态 app: %v", err)
+	}
+	if label != "web" {
+		t.Errorf("web 流程的 login_states.app 应为 web，得到 %q", label)
 	}
 	// 中间态明文不落库
 	var hashed string
@@ -83,7 +95,7 @@ func TestWebLoginSecondStep(t *testing.T) {
 
 	begin := func() *WebLoginResult {
 		t.Helper()
-		res, err := svc.WebLoginPassword("web-2fa@example.com", "secret123", meta)
+		res, err := svc.WebLoginPassword("web-2fa@example.com", "secret123", meta, "")
 		if err != nil || res.Status != "2fa_required" {
 			t.Fatalf("应进两步: %+v err=%v", res, err)
 		}
@@ -112,6 +124,9 @@ func TestWebLoginSecondStep(t *testing.T) {
 	}
 	if _, err := svc.ValidWebSession(ok.Session.Token); err != nil {
 		t.Errorf("第二步签的会话应可校验: %v", err)
+	}
+	if ok.JWT != "" {
+		t.Errorf("web 流程第二步也不该签 JWT，得到 %q", ok.JWT)
 	}
 	// 用后即焚：同一个中间态不能再换一次
 	if _, err := svc.WebLoginTOTP(res2.LoginToken, currentCode(t, setup.Secret), "", meta); err == nil {

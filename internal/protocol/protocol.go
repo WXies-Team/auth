@@ -196,8 +196,9 @@ type ProfileUpdateRequest struct {
 
 // WebLoginRequest 是 POST /web/login/password 的请求体。
 //
-// App 是可选的：日记 App 走这条路要带上自己的标识（便于审计与将来分流），
-// 网页端可以不传——web 会话不签 JWT，没有 aud 参与。
+// App 是可选的分流位（C 批）：缺省 = web 流程（cookie 会话，回执与既往逐字节一致）；
+// 给了且在白名单（calorie-diary / expense-diary）= App 流程（回业务 JWT、不下发
+// cookie），白名单外 400。2FA 中间态时 app 由服务端随 login_states 带到第二步。
 type WebLoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -252,6 +253,11 @@ type WebReauthRequest struct {
 type PasskeyFinishRequest struct {
 	CeremonyID int64           `json:"ceremonyId"`
 	Response   json.RawMessage `json:"response"`
+	// App 是**可选**字段（C 批）：只在 login/finish 上起作用——给了且在白名单
+	//（calorie-diary / expense-diary）就签 JWT 回 {token,email}，缺省 = web 流程照旧
+	// 发 cookie 会话，白名单外 400。register/finish 忽略它（应用声明来自已验签的 token）。
+	// 老客户端不传照常工作：多收一个不认识的字段是本服务的既定兼容口径。
+	App string `json:"app"`
 }
 
 // PasskeyRenameRequest 是 PATCH /api/passkeys/{id} 的请求体。
