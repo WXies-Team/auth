@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="same-origin">
+<title>{{.Title}} · Auth</title>
+<style>{{.Style}}</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主要内容</a>
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="/web">
+      <span class="brand-mark" aria-hidden="true">{{icon "shield-check"}}</span>
+      <span class="brand-name">Auth</span>
+    </a>
+    {{if not .Minimal}}
+    <nav class="nav" aria-label="主导航">
+      {{range .Nav}}<a class="nav-item{{if .Active}} on{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{.Label}}</span></a>{{end}}
+    </nav>
+    {{end}}
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  {{template "content" .}}
+</main>
+
+<footer class="foot wrap">
+  <span>Auth · 统一账号服务</span>
+  <span class="dim">会话为空闲 7 天 / 绝对 90 天过期</span>
+</footer>
+
+<!-- 重新验证：管理后台与安全操作的 401 会把它顶出来，验过再自动重试原请求 -->
+<dialog id="reauth" class="dlg" aria-labelledby="reauth-title">
+  <form method="dialog" id="reauth-form">
+    <h2 id="reauth-title">重新验证身份</h2>
+    <p class="dim">为保护账号，敏感操作需要再次确认是你本人。</p>
+    <label class="field">
+      <span>当前密码</span>
+      <input type="password" id="reauth-password" autocomplete="current-password">
+    </label>
+    <p class="or">或</p>
+    <label class="field">
+      <span>两步验证码（6 位）</span>
+      <input type="text" id="reauth-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+    </label>
+    <p class="err" id="reauth-error" role="alert" hidden></p>
+    <div class="row end">
+      <button type="button" class="btn" id="reauth-cancel">取消</button>
+      <button type="submit" class="btn primary" id="reauth-ok">验证</button>
+    </div>
+  </form>
+</dialog>
+
+<script>{{.Script}}</script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>两步验证</h1>
+  <span class="badge" id="totp-badge">读取中…</span>
+</div>
+
+<!-- 未开启 -->
+<section class="card" id="totp-off" hidden aria-labelledby="off-title">
+  <h2 id="off-title">开启两步验证</h2>
+  <p class="hint">密码之外再要一个 6 位动态码，账号被撞库也进不来。开启前需要先通过一次验证（当前密码）。</p>
+  <div class="row" style="margin-top:10px">
+    <button type="button" class="btn primary" id="start-setup">{{icon "shield-check"}} 开启两步验证</button>
+  </div>
+
+  <!-- 绑定：二维码 + 手输密钥 + 验一次码 -->
+  <div id="setup-panel" class="detail hidden">
+    <h3>扫描二维码</h3>
+    <div class="row" style="align-items:flex-start">
+      <img class="qr" id="qr-img" alt="两步验证二维码，可用验证器 App 扫描">
+      <div class="grow" style="min-width:200px">
+        <p class="hint">扫不了码？在验证器里手动添加，粘贴这段密钥：</p>
+        <p class="secret-line"><code id="setup-secret" class="mono"></code>
+          <button type="button" class="btn small" id="copy-secret">复制</button>
+        </p>
+        <label class="field"><span>输入验证器上的 6 位验证码</span>
+          <input type="text" id="setup-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+        </label>
+        <p class="err" id="setup-error" role="alert" hidden></p>
+        <div class="row">
+          <button type="button" class="btn primary" id="confirm-setup">确认开启</button>
+          <button type="button" class="btn ghost" id="cancel-setup">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 恢复码（只显示这一次） -->
+  <div id="codes-panel" class="detail hidden" aria-labelledby="codes-title">
+    <h3 id="codes-title">恢复码</h3>
+    <p class="hint">10 个一次性恢复码，验证器不在身边时靠它登录。<strong>关闭本页后无法再查看</strong>，请先保存。</p>
+    <div class="codes" id="codes-list"></div>
+    <div class="row" style="margin-top:10px">
+      <button type="button" class="btn" id="download-codes">{{icon "download"}} 下载为 txt</button>
+      <button type="button" class="btn" id="copy-codes">复制全部</button>
+      <button type="button" class="btn primary" id="saved-codes">我已保存</button>
+    </div>
+  </div>
+</section>
+
+<!-- 已开启 -->
+<section class="card" id="totp-on" hidden aria-labelledby="on-title">
+  <h2 id="on-title">两步验证已开启</h2>
+  <p class="hint" id="totp-since"></p>
+  <div class="row" style="margin-top:10px">
+    <button type="button" class="btn" id="regen-codes">重生成恢复码</button>
+    <button type="button" class="btn danger" id="disable-totp">{{icon "ban"}} 关闭两步验证</button>
+  </div>
+  <p class="hint" style="margin-top:8px">关闭与重生成都需要输入当前验证码或一个恢复码；关闭同时会让其它设备退出登录。</p>
+</section>
+
+<!-- 通用：要一个码 -->
+<dialog class="dlg" id="code-dialog" aria-labelledby="code-title">
+  <form method="dialog" id="code-form">
+    <h2 id="code-title">验证身份</h2>
+    <p class="dim" id="code-desc"></p>
+    <label class="field"><span>验证码（6 位）或恢复码</span>
+      <input type="text" id="code-input" autocomplete="one-time-code">
+    </label>
+    <p class="err" id="code-error" role="alert" hidden></p>
+    <div class="row end">
+      <button type="button" class="btn" id="code-cancel">取消</button>
+      <button type="submit" class="btn primary">确定</button>
+    </div>
+  </form>
+</dialog>
+{{end}}

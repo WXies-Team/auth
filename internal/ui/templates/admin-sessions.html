@@ -1,0 +1,34 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>会话总览</h1>
+  <span class="dim" id="sess-total"></span>
+</div>
+
+<form class="row" id="sess-filter-form">
+  <label class="field grow" style="margin:0"><span class="sr-only">按 uid 过滤</span>
+    <input type="text" id="sess-uid" placeholder="按 uid 过滤（留空看全部）" inputmode="numeric" autocomplete="off">
+  </label>
+  <button type="submit" class="btn">筛选</button>
+  <button type="button" class="btn ghost" id="sess-reset">看全部</button>
+</form>
+
+<p class="err" id="sess-error" role="alert" hidden></p>
+
+<div class="table-wrap">
+  <table>
+    <caption class="sr-only">全站活跃会话</caption>
+    <thead>
+      <tr><th>邮箱</th><th>uid</th><th>应用</th><th>设备</th><th>IP</th><th>最近活跃</th><th></th></tr>
+    </thead>
+    <tbody id="sess-body">
+      <tr><td colspan="7" class="empty">读取中…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="row" style="justify-content:flex-end;margin-top:10px">
+  <button type="button" class="btn small" id="sess-prev">上一页</button>
+  <span class="dim" id="sess-page">—</span>
+  <button type="button" class="btn small" id="sess-next">下一页</button>
+</div>
+{{end}}

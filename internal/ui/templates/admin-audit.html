@@ -1,0 +1,71 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>审计日志</h1>
+  <span class="dim" id="audit-total"></span>
+</div>
+
+<form class="row" id="audit-filter-form">
+  <label class="field" style="margin:0"><span>事件</span>
+    <select id="audit-action">
+      <option value="">全部</option>
+      <option value="register">register</option>
+      <option value="login.success">login.success</option>
+      <option value="login.fail">login.fail</option>
+      <option value="logout">logout</option>
+      <option value="password.change">password.change</option>
+      <option value="password.reset">password.reset</option>
+      <option value="email.change">email.change</option>
+      <option value="account.delete">account.delete</option>
+      <option value="session.kick">session.kick</option>
+      <option value="passkey.create">passkey.create</option>
+      <option value="passkey.rename">passkey.rename</option>
+      <option value="passkey.delete">passkey.delete</option>
+      <option value="totp.setup">totp.setup</option>
+      <option value="totp.enable">totp.enable</option>
+      <option value="totp.disable">totp.disable</option>
+      <option value="recovery.generate">recovery.generate</option>
+      <option value="recovery.consume">recovery.consume</option>
+      <option value="reauth">reauth</option>
+      <option value="admin.user.role_change">admin.user.role_change</option>
+      <option value="admin.user.session_revoke">admin.user.session_revoke</option>
+      <option value="admin.session.revoke">admin.session.revoke</option>
+      <option value="admin.config.set">admin.config.set</option>
+      <option value="admin.audit.view">admin.audit.view</option>
+    </select>
+  </label>
+  <label class="field" style="margin:0"><span>actor uid</span>
+    <input type="text" id="audit-actor" inputmode="numeric" autocomplete="off">
+  </label>
+  <label class="field" style="margin:0"><span>对象 uid</span>
+    <input type="text" id="audit-target" inputmode="numeric" autocomplete="off">
+  </label>
+  <label class="field" style="margin:0"><span>起始日期</span>
+    <input type="date" id="audit-from">
+  </label>
+  <label class="field" style="margin:0"><span>结束日期</span>
+    <input type="date" id="audit-to">
+  </label>
+  <button type="submit" class="btn">查询</button>
+  <button type="button" class="btn ghost" id="audit-reset">重置</button>
+</form>
+
+<p class="err" id="audit-error" role="alert" hidden></p>
+
+<div class="table-wrap">
+  <table>
+    <caption class="sr-only">审计事件</caption>
+    <thead>
+      <tr><th>时间</th><th>事件</th><th>结果</th><th>操作者</th><th>对象</th><th>IP</th><th>详情</th></tr>
+    </thead>
+    <tbody id="audit-body">
+      <tr><td colspan="7" class="empty">读取中…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="row" style="justify-content:flex-end;margin-top:10px">
+  <button type="button" class="btn small" id="audit-prev">上一页</button>
+  <span class="dim" id="audit-page">—</span>
+  <button type="button" class="btn small" id="audit-next">下一页</button>
+</div>
+{{end}}

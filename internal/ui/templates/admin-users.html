@@ -1,0 +1,42 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>用户</h1>
+  <span class="dim" id="users-total"></span>
+</div>
+
+<form class="row" id="user-search-form" role="search">
+  <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
+    <input type="text" id="user-query" placeholder="按邮箱片段或 uid 搜索" autocomplete="off">
+  </label>
+  <button type="submit" class="btn">{{icon "search"}} 搜索</button>
+</form>
+
+<p class="err" id="users-error" role="alert" hidden></p>
+
+<div class="table-wrap">
+  <table>
+    <caption class="sr-only">用户列表</caption>
+    <thead>
+      <tr><th>邮箱</th><th>uid</th><th>角色</th><th>两步验证</th><th>Passkey</th><th>注册时间</th><th></th></tr>
+    </thead>
+    <tbody id="users-body">
+      <tr><td colspan="7" class="empty">读取中…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="row" style="justify-content:flex-end;margin-top:10px">
+  <button type="button" class="btn small" id="users-prev">上一页</button>
+  <span class="dim" id="users-page">—</span>
+  <button type="button" class="btn small" id="users-next">下一页</button>
+</div>
+
+<!-- 详情面板：会话、凭证、角色与踢人 -->
+<section class="card detail hidden" id="user-detail" aria-labelledby="ud-title" aria-live="polite">
+  <div class="row between">
+    <h2 id="ud-title">用户详情</h2>
+    <button type="button" class="btn ghost" id="ud-close">关闭</button>
+  </div>
+  <div id="ud-body"></div>
+</section>
+{{end}}

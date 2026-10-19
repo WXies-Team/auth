@@ -1,0 +1,40 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>概览</h1>
+  <span class="badge" id="role-badge" hidden>管理员</span>
+</div>
+
+<section class="card" aria-labelledby="who-title">
+  <h2 id="who-title">账号</h2>
+  <p><span class="dim">邮箱</span> <strong id="me-email">读取中…</strong></p>
+  <p class="hint" id="me-meta">登录态为空闲 7 天 / 绝对 90 天过期，可在设备页随时踢出某台。</p>
+  <div class="row" style="margin-top:12px">
+    <a class="btn" href="/web/console/sessions">{{icon "monitor-smartphone"}} 管理已登录设备</a>
+    <button type="button" class="btn danger" id="logout">{{icon "log-out"}} 退出登录</button>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="sec-title">
+  <h2 id="sec-title">登录方式与安全</h2>
+  <div class="list" style="margin-top:8px">
+    <div class="item">
+      <span class="ico-wrap">{{icon "lock"}}</span>
+      <span class="grow"><span class="title">密码</span><br><span class="meta" id="stat-password">读取中…</span></span>
+      <a class="btn small" href="/web/console/account">管理</a>
+    </div>
+    <div class="item">
+      <span class="ico-wrap">{{icon "shield-check"}}</span>
+      <span class="grow"><span class="title">两步验证</span><br><span class="meta" id="stat-totp">读取中…</span></span>
+      <a class="btn small" href="/web/console/security">管理</a>
+    </div>
+    <div class="item">
+      <span class="ico-wrap">{{icon "key-round"}}</span>
+      <span class="grow"><span class="title">Passkey</span><br><span class="meta" id="stat-passkey">读取中…</span></span>
+      <a class="btn small" href="/web/console/passkeys">管理</a>
+    </div>
+  </div>
+  <p class="hint" style="margin-top:10px">至少保留一种登录方式：只有密码、两步验证或 Passkey 至少有其一，账号才进得来。</p>
+</section>
+
+<a class="btn primary hidden" id="enter-admin" href="/web/admin" style="width:100%">{{icon "users"}} 进入管理后台</a>
+{{end}}

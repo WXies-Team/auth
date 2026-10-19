@@ -1,0 +1,21 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>已登录设备</h1>
+  <button type="button" class="btn danger" id="revoke-others">退出其它设备</button>
+</div>
+
+<p class="hint">每台登录过的设备都在这里；被踢的设备会在下一次请求时退出登录。</p>
+
+<div class="list" id="session-list" aria-live="polite">
+  <div class="empty">读取中…</div>
+</div>
+
+<dialog class="dlg" id="kick-dialog" aria-labelledby="kick-title">
+  <h2 id="kick-title">踢出这台设备</h2>
+  <p id="kick-desc" class="dim"></p>
+  <form method="dialog" class="row end" style="margin-top:12px">
+    <button type="button" class="btn" id="kick-cancel">取消</button>
+    <button type="button" class="btn danger" id="kick-ok">踢出设备</button>
+  </form>
+</dialog>
+{{end}}
