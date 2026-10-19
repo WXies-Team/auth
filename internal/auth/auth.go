@@ -481,6 +481,15 @@ func (s *Service) Register(rawEmail, password, code, app string, meta SessionMet
 	if err := s.otps.verify(PurposeRegister, email, code); err != nil {
 		return nil, err
 	}
+	// 码已验过，此后任何失败（bcrypt/建库错）都撤销活跃代：verify 成功时已烧代
+	//（used=1，冷却查询只看 used=0 行），这里的 revoke 是**防御性幂等兜底**——
+	// 若 verify 语义将来改成不烧代，失败路径也不会给用户留 60 秒冷却白等
+	//（回归：TestRegisterFailureAfterVerifyAllowsImmediateResend）。
+	defer func() {
+		if err != nil {
+			s.otps.revoke(PurposeRegister, email)
+		}
+	}()
 	// bcrypt 放到所有校验之后：前几步失败时不必白烧一次百毫秒的 cost12
 	hashed, err := hash(password)
 	if err != nil {

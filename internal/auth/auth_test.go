@@ -688,6 +688,44 @@ func TestResetPasswordRevokesSessions(t *testing.T) {
 	}
 }
 
+// m12 回归：Register 在验证码验过**之后**失败（bcrypt/建库错那一档）不给用户
+// 留 60 秒冷却白等——失败后立刻重发注册码必须成功。
+//（现状核实：otpStore.verify 成功即烧掉整代，冷却查询只看 used=0 行，所以
+// 此路径本来就不欠冷却；本用例把该行为钉住，防止将来 verify 语义漂移。）
+func TestRegisterFailureAfterVerifyAllowsImmediateResend(t *testing.T) {
+	svc, mailer := newTestService(t)
+	const email = "reg-fail@example.com"
+	if err := svc.SendCode(email, PurposeRegister, "calorie-diary"); err != nil {
+		t.Fatalf("发注册码: %v", err)
+	}
+	code := codeIn(t, mailer)
+
+	// 把 sessions 表暂时改名，逼 createSessionOn 失败（建库错档）——
+	// verify 已过、用户行随事务回滚，Register 必报错
+	if _, err := svc.pool.Exec("RENAME TABLE sessions TO sessions_m12_bak"); err != nil {
+		t.Fatalf("改名 sessions: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = svc.pool.Exec("RENAME TABLE sessions_m12_bak TO sessions")
+	})
+	if _, err := svc.Register(email, "secret123", code, "calorie-diary", testMeta); err == nil {
+		t.Fatal("sessions 表不可用时注册应失败")
+	}
+	// 码已随 verify 烧掉：重发不该撞 60 秒冷却
+	if err := svc.SendCode(email, PurposeRegister, "calorie-diary"); err != nil {
+		t.Errorf("注册失败后应能立刻重发注册码（无冷却白等），得到: %v", err)
+	}
+	// 换新码重试注册（表已由 Cleanup 恢复，但 Cleanup 在测试末尾才跑——
+	// 这里显式恢复再试，保证用例自洽）
+	if _, err := svc.pool.Exec("RENAME TABLE sessions_m12_bak TO sessions"); err != nil {
+		t.Fatalf("恢复 sessions: %v", err)
+	}
+	code2 := codeIn(t, mailer)
+	if _, err := svc.Register(email, "secret123", code2, "calorie-diary", testMeta); err != nil {
+		t.Errorf("恢复后重试注册应成功: %v", err)
+	}
+}
+
 type failMailer struct{}
 
 func (failMailer) Send(context.Context, string, string, string, string) error {
