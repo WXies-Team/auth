@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -443,4 +444,170 @@ func keys(m map[string]*http.Cookie) string {
 		b.WriteString(" ")
 	}
 	return b.String()
+}
+
+// 后台授权矩阵（规格 A3 第 7 步）：没绑 MFA 的管理员 403、绑了但强认证过期 401、
+// 重新验证后放行、降级自己 400——四条各挡各的，缺一条后台就是敞开的。
+func TestAdminAuthzMatrix(t *testing.T) {
+	e := newRouteEnv(t)
+	boss := seedUser(t, e, "boss@example.com", "secret123", "admin")
+	worker := seedUser(t, e, "worker@example.com", "secret123", "user")
+
+	sess, csrf := loginCookie(t, e, "boss@example.com", "secret123")
+	cookies := func(r *http.Request) {
+		r.AddCookie(sess)
+		r.AddCookie(csrf)
+	}
+	withCSRF := func(r *http.Request) {
+		cookies(r)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+
+	// ① 管理员账号没绑任何 MFA → 403 且提示要先绑定
+	rec := e.do(t, "GET", "/admin/users", "", cookies)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "绑定") {
+		t.Errorf("未绑 MFA 的管理员应 403 并说明原因，得到 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// ② 绑上两步验证（直接落 enabled 行：本用例只看授权闸，不跑验码链路），
+	//    但把强认证时间清掉 → 401 + 固定文案（前端据此弹重新验证框）
+	enrollMFA(t, e, boss)
+	staleReauth(t, e)
+	rec = e.do(t, "GET", "/admin/users", "", cookies)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), auth.MsgReauthRequired) {
+		t.Errorf("强认证过期应 401 + 固定文案，得到 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// ③ 重新验证（密码路）→ 放行，回分页结构
+	rec = e.do(t, "POST", "/web/reauth", `{"password":"secret123"}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("密码重新验证应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	rec = e.do(t, "GET", "/admin/users?limit=5", "", cookies)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("授权齐备后应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if got := keysOf(t, rec.Body.Bytes()); got != "items,total" {
+		t.Errorf("后台列表回执应恰为 items,total，得到 %s", got)
+	}
+
+	// ④ 降级自己 → 400（服务端守卫；前端禁用只是提示）
+	rec = e.do(t, "PATCH", "/admin/users/"+strconv.FormatInt(boss, 10), `{"role":"user"}`, withCSRF)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("降级自己应 400，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	// 给同事升权 → 200，且审计里有 admin.user.role_change
+	rec = e.do(t, "PATCH", "/admin/users/"+strconv.FormatInt(worker, 10), `{"role":"admin"}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Errorf("给他人改角色应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	var roleChange int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE action = 'admin.user.role_change' AND result = 'ok'").
+		Scan(&roleChange); err != nil || roleChange == 0 {
+		t.Errorf("角色变更应进审计，得到 %d err=%v", roleChange, err)
+	}
+	// 审计查询本身也记一条（谁在看痕迹）
+	rec = e.do(t, "GET", "/admin/audit?limit=5", "", cookies)
+	if rec.Code != http.StatusOK {
+		t.Errorf("审计查询应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	var viewed int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE action = 'admin.audit.view'").Scan(&viewed); err != nil || viewed == 0 {
+		t.Errorf("查看审计应被记账，得到 %d err=%v", viewed, err)
+	}
+}
+
+// 配置中心的 secret 永远不回原文：库里放一个凭据键，响应里只有 configured + 末 4 位，
+// 写入审计也只记 key（白盒：原值不得出现在任何一处响应或审计里）。
+func TestAdminConfigNeverLeaksSecret(t *testing.T) {
+	e := newRouteEnv(t)
+	uid := seedUser(t, e, "cfg-admin@example.com", "secret123", "admin")
+	const secret = "leaky-secret-value-8f3a"
+	if _, err := e.pool.Exec("INSERT INTO app_config (`key`, `value`) VALUES (?, ?)",
+		"mail_client_secret", secret); err != nil {
+		t.Fatalf("种配置: %v", err)
+	}
+	sess, csrf := loginCookie(t, e, "cfg-admin@example.com", "secret123")
+	enrollMFA(t, e, uid)
+	cookies := func(r *http.Request) { r.AddCookie(sess); r.AddCookie(csrf) }
+	withCSRF := func(r *http.Request) {
+		cookies(r)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	// 强认证过期 → 先重验（本例主要看回执内容，闸在授权矩阵里已单独覆盖）
+	if rec := e.do(t, "POST", "/web/reauth", `{"password":"secret123"}`, withCSRF); rec.Code != http.StatusOK {
+		t.Fatalf("重新验证应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := e.do(t, "GET", "/admin/config", "", cookies)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列配置应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, secret) {
+		t.Errorf("配置响应泄露了 secret 原值: %s", body)
+	}
+	if !strings.Contains(body, `"hint":"8f3a"`) || !strings.Contains(body, `"configured":true`) {
+		t.Errorf("secret 应回 configured + 末 4 位 hint，得到 %s", body)
+	}
+
+	// 写入：审计只记 key 与旧值是否已配置，值本身不得出现
+	rec = e.do(t, "PUT", "/admin/config/mail_tenant_id", `{"value":"tenant-new"}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("写配置应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	var detail string
+	if err := e.pool.QueryRow(
+		"SELECT detail FROM audit_logs WHERE action = 'admin.config.set' ORDER BY id DESC LIMIT 1").
+		Scan(&detail); err != nil {
+		t.Fatalf("查配置审计: %v", err)
+	}
+	if strings.Contains(detail, "tenant-new") || strings.Contains(detail, secret) {
+		t.Errorf("配置审计泄露了值: %s", detail)
+	}
+	// 白名单外的键 404
+	rec = e.do(t, "PUT", "/admin/config/some_other_key", `{"value":"x"}`, withCSRF)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("白名单外的键应 404，得到 %d", rec.Code)
+	}
+}
+
+// loginCookie 走一遍密码登录，回两枚 cookie（会话 + CSRF）。
+func loginCookie(t *testing.T, e *routeEnv, email, password string) (*http.Cookie, *http.Cookie) {
+	t.Helper()
+	rec := e.do(t, "POST", "/web/login/password", `{"email":"`+email+`","password":"`+password+`"}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("登录 %s 应 200，得到 %d %s", email, rec.Code, rec.Body.String())
+	}
+	sess := cookieNamed(rec, auth.WebCookieName)
+	csrf := cookieNamed(rec, auth.WebCSRFCookieName)
+	if sess == nil || csrf == nil {
+		t.Fatalf("登录应签两枚 cookie")
+	}
+	return sess, csrf
+}
+
+// enrollMFA 给指定账号直接落一行启用中的 TOTP 因子（授权闸只看在不在，不验码）。
+func enrollMFA(t *testing.T, e *routeEnv, uid int64) {
+	t.Helper()
+	if uid == 0 {
+		if err := e.pool.QueryRow("SELECT id FROM users WHERE email = 'cfg-admin@example.com'").Scan(&uid); err != nil {
+			t.Fatalf("查管理员 uid: %v", err)
+		}
+	}
+	if _, err := e.pool.Exec(
+		"INSERT INTO totp_factors (user_id, secret_cipher, enabled, last_used_timestep, created_at) VALUES (?,?,1,0,?)",
+		uid, []byte("test-only-cipher-never-decrypted-in-this-case"), time.Now().UnixMilli()); err != nil {
+		t.Fatalf("落 TOTP 因子: %v", err)
+	}
+}
+
+// staleReauth 把该账号全部会话的强认证时间清空（模拟超过 15 分钟）。
+func staleReauth(t *testing.T, e *routeEnv) {
+	t.Helper()
+	if _, err := e.pool.Exec("UPDATE sessions SET reauth_at = NULL WHERE revoked_at IS NULL"); err != nil {
+		t.Fatalf("清强认证时间: %v", err)
+	}
 }
