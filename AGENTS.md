@@ -16,7 +16,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 
 | You want to change | Read |
 |---|---|
-| Any auth DTO / JSON tag | `internal/protocol/protocol.go` **and** calorie-diary's `server/internal/protocol/protocol.go` auth block — they must stay一字不差 (extra `app` field is ours) |
+| Any auth DTO / JSON tag | `internal/protocol/protocol.go` **and** calorie-diary's `shared/.../dto/AuthDtos.kt` — they must stay一字不差 (extra `app` field is ours); diary-side field snapshot pinned by `internal/protocol/protocol_test.go` |
 | Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from that family (calorie-diary's copy was deleted when accounts moved here, `34f7d0ab`); divergences are snowflake / aud / OTP-in-DB, all commented in place |
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
 | Sessions / device management | `internal/auth/session.go` + `sessions` comments in `internal/db/schema.sql` (kick = session layer only, `token_version` untouched) |
@@ -54,7 +54,9 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
    invalidate, cross-purpose recipient cap 15/day. Codes live in `otp_codes`; "burn" sets
    `used=1` (whole generation), **never deletes rows mid-day** — deletion loses the daily counts.
 5. **Rate limits** (in-process sliding window, single-instance assumption): unauthed 15/min/IP,
-   send-code 5/min/IP, authed 10/min/uid + 120/min/IP outer, verify 600/min/IP; the session
+   send-code 5/min/IP, authed 10/min/uid + 120/min/IP outer, verify 600/min **per app** (keyed
+   by the request body's `app`, not clientIP — both diary callers come from loopback
+   127.0.0.1, so an IP key would make them share one bucket); the session
    endpoints get their own uid scopes — list 30/min, kick and revoke-others 10/min each.
 6. **Copy tone**: error = what went wrong + next step, Chinese; email brand comes from
    `brandFor(app)` — 热量日记 / 开支日记, and **Auth** when app is blank; mail subjects
@@ -110,3 +112,7 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 - Don't mass-run `gofmt`: Go 1.27's gofmt wants a space after `//` before a full-width
   parenthesis while this repo's comments don't — a blanket run rewrites every doc comment
   and drowns the diff (CI only runs build/vet/test, never gofmt).
+- `otpStore.issue` holds a per-email `GET_LOCK` on a pinned conn (`issueLocked`): never call a
+  `s.pool` statement while that lock is held — with the 8-conn pool saturated by concurrent
+  issuers, the holder waits forever for a connection and never releases the lock (self-deadlock,
+  hit and caught by `TestOTPStoreConcurrency`); cleanups run after `issueLocked` returns.

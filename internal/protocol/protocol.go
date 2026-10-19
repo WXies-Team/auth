@@ -1,9 +1,10 @@
 // Package protocol 定义与客户端共享的 HTTP 协议。
 //
-// **auth 各请求/响应的字段名与 calorie-diary 服务端的 /auth/* 逐字一致**
+// **auth 各请求/响应的字段名与日记客户端的 AuthDtos.kt 逐字一致**
 //（JSON tag 一字不差）：两个日记 App 后续把客户端切到本端点时，改动只需
-//「加上 app 字段、换个 base URL」。改任何字段名前先对照
-// calorie-diary/server/internal/protocol/protocol.go 的 auth 块。
+//「加上 app 字段、换个 base URL」。对拍钉在 protocol_test.go 的
+// TestProtocolMatchesDiaryAuthDtos——日记仓是私有仓，CI 无权跨仓读真文件，
+// 只能把它 AuthDtos.kt 的字段快照内联钉住；日记侧改字段要同步更新那份快照。
 package protocol
 
 import "encoding/json"

@@ -855,6 +855,19 @@ func TestChangeEmailFlow(t *testing.T) {
 	}
 }
 
+// 日记侧 CodePurpose 的三值（AuthDtos.kt 快照，2026-10-19，对拍见
+// protocol.TestProtocolMatchesDiaryAuthDtos）必须与服务端发码白名单同值——
+// 漂了客户端发的 purpose 会直接吃 400。
+func TestDiaryCodePurposeMatchesServerWhitelist(t *testing.T) {
+	pinned := map[string]string{"REGISTER": "register", "RESET": "reset", "LOGIN": "login"}
+	got := map[string]string{"REGISTER": PurposeRegister, "RESET": PurposeReset, "LOGIN": PurposeLogin}
+	for k, want := range pinned {
+		if got[k] != want {
+			t.Errorf("CodePurpose.%s 应为 %q，得到 %q", k, want, got[k])
+		}
+	}
+}
+
 // 雪花 id：node 1 固定、单调递增、互不重复、超 2^53（客户端与 /internal/verify
 // 的调用方都要能无损传输这些 id）。
 func TestSnowflakeIDs(t *testing.T) {
