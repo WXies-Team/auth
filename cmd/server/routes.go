@@ -85,28 +85,28 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 		auditRoute(authSvc, auth.AuditLogout, &c, r, nil, err)
 		writeResult(w, map[string]bool{"ok": true}, err)
 	}))
-	mux.Handle("POST /auth/change-password", authedLimited("change-password", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /auth/change-password", authedLimited("change-password", 10, reauthThen(authSvc, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.ChangePasswordRequest
 		if !decodeOr400(w, r, &req) {
 			return
 		}
 		resp, err := authSvc.ChangePassword(c, req.OldPassword, req.NewPassword)
 		writeResult(w, resp, err)
-	}))
+	})))
 	// 改密码的验证码版：发码端点收件人由 **uid 查库**决定，客户端传不了收件人——
 	// 改密码码只能发进账号本人的绑定邮箱。限流按 uid（authedLimited），
 	// 码本身的冷却、日限额、5 次错即作废在 auth 包内。
 	mux.Handle("POST /auth/send-change-code", authedLimited("send-change-code", 10, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
 		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeCode(c))
 	}))
-	mux.Handle("POST /auth/change-password-code", authedLimited("change-password-code", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /auth/change-password-code", authedLimited("change-password-code", 10, reauthThen(authSvc, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.ChangePasswordCodeRequest
 		if !decodeOr400(w, r, &req) {
 			return
 		}
 		resp, err := authSvc.ChangePasswordByCode(c, req.Code, req.Password)
 		writeResult(w, resp, err)
-	}))
+	})))
 	// 改邮箱：发码与提交都按 uid 限流。码发到**新**邮箱（purpose=email_change，
 	// 与改密码的 change 码互不串用），提交时密码重验 + 验码双闸，查重在服务端；
 	// 成功回 {ok:true} 且**不 bump token_version**——改邮箱不是凭证变更，
@@ -118,13 +118,13 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 		}
 		writeResult(w, map[string]bool{"sent": true}, authSvc.SendChangeEmailCode(c, req.Email))
 	}))
-	mux.Handle("POST /auth/change-email", authedLimited("change-email", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /auth/change-email", authedLimited("change-email", 10, reauthThen(authSvc, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.ChangeEmailRequest
 		if !decodeOr400(w, r, &req) {
 			return
 		}
 		writeResult(w, map[string]bool{"ok": true}, authSvc.ChangeEmail(c, req.Password, req.Email, req.Code))
-	}))
+	})))
 	mux.Handle("POST /auth/delete", authedLimited("delete-account", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		var req protocol.DeleteAccountRequest
 		if !decodeOr400(w, r, &req) {

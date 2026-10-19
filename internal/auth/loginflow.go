@@ -84,6 +84,10 @@ func (s *Service) WebLoginPassword(rawEmail, password string, meta SessionMeta) 
 		if err != nil {
 			return nil, err
 		}
+		// 密码刚验过 = 强认证：给新会话记 reauth_at，接下来 15 分钟内的敏感
+		// 操作（改密改邮、绑解两步验证、进管理后台）不必再逼用户输一遍。
+		// 邮箱验证码登录**不记**——邮件通道不算强因子。
+		_ = s.MarkReauth(ws.SID)
 		return &WebLoginResult{UID: uid, Email: email, Session: ws}, nil
 	}
 	token, err := s.beginLoginState(uid)
@@ -173,6 +177,7 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 	if err != nil {
 		return nil, err
 	}
+	_ = s.MarkReauth(ws.SID) // 过了 TOTP/恢复码这一关就是强认证
 	return &WebLoginResult{UID: st.uid, Email: email, Session: ws, usedMethod: method}, nil
 }
 

@@ -172,6 +172,8 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return
 			}
 			svc.MarkPasskeyLogin(ws.SID, credID)
+			// discoverable 登录带 UV（设备锁/面容/指纹），按强认证记 reauth_at
+			_ = svc.MarkReauth(ws.SID)
 			svc.Audit(auth.AuditEvent{
 				Action: auth.AuditLogin, OK: true, ActorUID: &uid, ActorEmail: email,
 				Meta:   sessMeta(r),
@@ -393,6 +395,24 @@ func auditRoute(svc *auth.Service, action string, c *auth.Caller, r *http.Reques
 // withEmail 给匿名审计事件补一个已掩码的 actor 邮箱。
 func withEmail(email string) func(*auth.AuditEvent) {
 	return func(ev *auth.AuditEvent) { ev.ActorEmail = email }
+}
+
+// reauthThen 给**敏感写操作**补 15 分钟强认证窗，但只对凭 cookie 进来的会话生效。
+//
+// 为什么区别对待：规格 A1.2 要求改密码/改邮箱前近期认证过，而这几个端点同时
+// 也是老客户端在用的——已发布的日记 App 没有 /web/reauth、也不该被这道新闸
+// 挡死（老客户端零破坏是硬约束）。Bearer 侧照旧只靠「原密码 / 验证码」本身，
+// cookie 侧则必须 reauth ≤15 分钟，前端 401 后会自动弹框重试。
+func reauthThen(svc *auth.Service, h func(auth.Caller, http.ResponseWriter, *http.Request)) func(auth.Caller, http.ResponseWriter, *http.Request) {
+	return func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		if wc, ok := r.Context().Value(webCallerKey).(auth.WebCaller); ok && wc.ViaCookie {
+			if err := svc.RequireReauth(wc.SID); err != nil {
+				writeResult(w, nil, err)
+				return
+			}
+		}
+		h(c, w, r)
+	}
 }
 
 // pathInt64 解析路径里的雪花 id；非法回 400（这类 id 只有服务端发过）。
