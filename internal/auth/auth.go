@@ -234,6 +234,10 @@ func validateApp(app string) error {
 	return nil
 }
 
+// AppAllowed 导出白名单查询，给路由层校验调用方声明的应用标识用
+//（/internal/ai/* 三端点）：加新应用仍只改 allowedApps 一处。
+func AppAllowed(app string) bool { return allowedApps[app] }
+
 func hash(password string) (string, error) {
 	b, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {

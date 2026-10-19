@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/WXies-Team/auth/internal/ai"
 	"github.com/WXies-Team/auth/internal/auth"
 	"github.com/WXies-Team/auth/internal/config"
 	"github.com/WXies-Team/auth/internal/protocol"
@@ -199,6 +200,17 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	// 两个日记服务的历史用户并入本服务的唯一入口：Bearer hook_token 鉴权 +
 	// 单批 ≤100 条 + 整批一个事务。同样只该被同机脚本调到，不挂公网限流（见 loopbackOnly）。
 	mux.Handle("POST /internal/users/ensure", withLogging(loopbackOnly(internalEnsure(cfg.Require, authSvc))))
+
+	// ---- AI 限额三端点（日记服务 quota.go 改道后调用）----
+	// 统一记账口径（本批拍板）：速率与并发按 uid 全局（跨 App 合一），日额度按
+	// uid 与 global 两层、跨 App 相加——统一预算的意义所在。quotaSvc 的并发槽与
+	// 速率窗是进程内状态（单实例部署假设，与 auth 自己的限流同款）；本函数启动时
+	// 只被调一次，槽状态即全进程唯一一份（路由级测试各自 newRouteEnv 得到独立实例，
+	// 恰好是测试隔离所需）。
+	quotaSvc := ai.NewService(pool, limiter.allow)
+	mux.Handle("POST /internal/ai/check", withLogging(loopbackOnly(internalAICheck(cfg, quotaSvc))))
+	mux.Handle("POST /internal/ai/consume", withLogging(loopbackOnly(internalAIConsume(quotaSvc))))
+	mux.Handle("POST /internal/ai/release", withLogging(loopbackOnly(internalAIRelease(quotaSvc))))
 
 	// ---- Web 管理台（自助台 + 管理后台 + 页面）----
 	// 全部挂在 /web、/webauthn、/api/{totp,passkeys}、/admin 新路径下：

@@ -102,6 +102,34 @@ type VerifyResponse struct {
 	App   string `json:"app"`
 }
 
+// ---- AI 限额三端点（/internal/ai/{check,consume,release}）----
+//
+// **内部接口，不属于客户端契约**：调用方是日记服务的 AI 路由（quota.go 改道后），
+// uid 已由各自的 withUID 验过，这里不再验 token——暴露面与其他 /internal/* 同款
+// （loopbackOnly + nginx 整段 404 公网）。统一记账口径见 internal/ai 包注释。
+
+// AIQuotaRequest 是 /internal/ai/check 与 /internal/ai/release 的请求体。
+// UID 是 7 位随机整数，用 int64 字段接收（同 VerifyResponse 的告诫）。
+type AIQuotaRequest struct {
+	App string `json:"app"`
+	UID int64  `json:"uid"`
+}
+
+// AIConsumeRequest 是 /internal/ai/consume 的请求体。Weight 是本次请求折算的
+// 次数：文字 1、图片 2——由日记路由按请求体是否含图片判定，不采信客户端自报。
+type AIConsumeRequest struct {
+	App    string `json:"app"`
+	UID    int64  `json:"uid"`
+	Weight int    `json:"weight"`
+}
+
+// AIConsumeResponse 是 /internal/ai/consume 的回执：入账后的两层**当日**计数，
+// 与 AI 用量看板（/admin/ai-usage）同源同数——回执即看板数据。
+type AIConsumeResponse struct {
+	DailyUser   int `json:"dailyUser"`
+	DailyGlobal int `json:"dailyGlobal"`
+}
+
 // EnsureUserEntry 是 POST /internal/users/ensure 的单条存量用户（迁移脚本 → 本服务）。
 //
 // **内部接口，不属于客户端契约**：与上面那些和 calorie-diary 逐字对齐的 /auth/* DTO
