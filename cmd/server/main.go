@@ -86,7 +86,7 @@ func main() {
 			slog.Warn("邮件凭据未配置，注册与验证码邮件会失败", "key", key)
 		}
 	}
-	authSvc, err := auth.NewService(pool, secret, mailsvc.New(cfg.StringFunc))
+	authSvc, err := auth.NewService(pool, secret, mailsvc.New(cfg.StringFunc), auth.NewHooks(cfg.Require))
 	if err != nil {
 		slog.Error("初始化认证服务", "err", err)
 		os.Exit(1)

@@ -109,20 +109,22 @@ type VerifyResult struct {
 
 // Service 依赖一个 *sql.DB；nil 会让所有调用返回错误（未接库时的降级）。
 // mailer 为 nil 时只有 SendCode 降级（回 503），登录等既有功能不受影响。
+// hooks 为 nil 表示不接注销钩子（仅测试形态）；生产恒传入，见 [NewHooks]。
 type Service struct {
 	pool   *sql.DB
 	secret string
 	ids    *snowflake.Node
 	otps   *otpStore
 	mailer Mailer
+	hooks  *Hooks
 }
 
-func NewService(pool *sql.DB, jwtSecret string, mailer Mailer) (*Service, error) {
+func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks) (*Service, error) {
 	node, err := snowflake.NewNode(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("初始化雪花节点: %w", err)
 	}
-	return &Service{pool: pool, secret: jwtSecret, ids: node, otps: &otpStore{pool: pool}, mailer: mailer}, nil
+	return &Service{pool: pool, secret: jwtSecret, ids: node, otps: &otpStore{pool: pool}, mailer: mailer, hooks: hooks}, nil
 }
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
@@ -747,10 +749,13 @@ func (s *Service) notifyEmailChanged(oldEmail, newEmail string) {
 	}
 }
 
-// DeleteAccount 注销：删除账号本身与本服务持有的全部关联数据（验证码行）。
+// DeleteAccount 注销：先让两个日记服务清掉各自的业务数据，再删本服务持有的数据
+// （账号行 + 验证码行）。
 //
-// **只清本服务的数据**：两个日记 App 的业务表清理由各自的 /internal/delete-user
-// 钩子在 P2 接入（账号服务不连别的库，跨库删数据是权限与耦合的双重坏味道）。
+// **顺序不能反**：auth 侧的行删了，日记侧按 uid 关联的业务数据就成了查无账号的孤儿，
+// 而且没有任何东西会再去清它们。所以钩子全成功才开本服务的事务；任一钩子失败整个
+// 注销中止、auth 行一字不动（用户稍后重试即可）。钩子的配置与调用细节见 [Hooks]。
+// 账号服务仍然不连别的库——跨库删数据是权限与耦合的双重坏味道，清理由 HTTP 钩子完成。
 func (s *Service) DeleteAccount(userID int64, password string) error {
 	if len(password) > maxPasswordB {
 		return badRequest("密码不正确")
@@ -767,6 +772,14 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 	}
 	if !hashed.Valid || !verify(password, hashed.String) {
 		return badRequest("密码不正确")
+	}
+
+	// 钩子排在密码校验之后：密码写错时**一个钩子都不该打**——否则随手一次输错密码
+	// 就把用户在两个日记里的数据清了，而账号还在。
+	if s.hooks != nil {
+		if err := s.hooks.BeforeDelete(userID, email); err != nil {
+			return err
+		}
 	}
 
 	tx, err := s.pool.BeginTx(context.Background(), nil)

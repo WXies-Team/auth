@@ -58,7 +58,9 @@ func newTestService(t *testing.T) (*Service, *recordMailer) {
 		}
 	}
 	m := &recordMailer{}
-	svc, err := NewService(pool, testSecret, m)
+	// 钩子接上但三键全缺：真库注销用例正是「键不存在 → 跳过」的形态（见 Hooks），
+	// 这样跑的不是一条生产里不存在的 nil 分支
+	svc, err := NewService(pool, testSecret, m, NewHooks(func(string) (string, error) { return "", nil }))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
