@@ -70,7 +70,8 @@ func TestEnsureSchemaIdempotentWithWebColumns(t *testing.T) {
 			t.Errorf("列 %s.%s 应存在，得到 n=%d err=%v", c.table, c.column, n, err)
 		}
 	}
-	for _, table := range []string{"passkeys", "totp_factors", "recovery_codes", "webauthn_challenges", "login_states", "ai_usage"} {
+	for _, table := range []string{"passkeys", "totp_factors", "recovery_codes", "webauthn_challenges",
+		"login_states", "ai_usage", "audit_logs"} {
 		var n int
 		if err := pool.QueryRow(
 			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", table).

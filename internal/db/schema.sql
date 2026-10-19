@@ -75,6 +75,27 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- internal/db 的 ensureColumn 在启动时按 information_schema 探测后补：MySQL 的
 -- ADD COLUMN 没有 IF NOT EXISTS，写进本文件会撞「重复列」错误让二跑的启动失败。
 
+-- 审计日志（ASVS V16.2/V16.3）：认证成败、授权失败、配置改动都落这里。
+-- 只增不改不删（应用层不可篡改；物理篡改风险见规格 D8）；保留 90 天，过期行在
+-- 发码路径上顺手清（与 otp_codes 同款「挂高频路径」的清理模式）。
+-- actor_email 存掩码、detail 只放非密钥结构化信息——这张表本身不能成为泄密面。
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id          BIGINT       NOT NULL,
+    ts          BIGINT       NOT NULL,
+    actor_uid   BIGINT       NULL,
+    actor_email VARCHAR(255) NOT NULL DEFAULT '',
+    action      VARCHAR(64)  NOT NULL,
+    result      VARCHAR(8)   NOT NULL,
+    target_uid  BIGINT       NULL,
+    ip          VARCHAR(45)  NOT NULL DEFAULT '',
+    user_agent  VARCHAR(512) NOT NULL DEFAULT '',
+    detail      TEXT         NULL,
+    PRIMARY KEY (id),
+    KEY idx_audit_actor (actor_uid, ts),
+    KEY idx_audit_target (target_uid, ts),
+    KEY idx_audit_action (action, ts)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
 -- passkey 凭证。rp_id 必须自己存列——库只按它校验仪式，不替你按 RP 分区凭证。
 CREATE TABLE IF NOT EXISTS passkeys (
     id               BIGINT       NOT NULL,
