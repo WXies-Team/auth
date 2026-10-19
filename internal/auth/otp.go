@@ -111,6 +111,8 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 	// 审计行的 90 天保留期同样挂在发码路径上清（规格 A1.4：不引入后台 goroutine，
 	// 借高频且已有的清理点顺手做）
 	cleanAuditLogs(s.pool)
+	// AI 用量行的 90 天保留期同批清（n4）：看板只读近 30 天，过期行只剩对账价值
+	cleanAIUsage(s.pool)
 	return code, nil
 }
 
