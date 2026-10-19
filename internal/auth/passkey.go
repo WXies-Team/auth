@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/go-sql-driver/mysql"
 )
 
 // Passkey（WebAuthn）的口径，逐条对齐规格 A1.1：
@@ -506,8 +507,11 @@ func (s *Service) insertCredential(uid int64, name string, cred *webauthn.Creden
 		int64(cred.Authenticator.SignCount), strings.Join(transports, ","), aaguid,
 		boolInt(cred.Flags.BackupEligible), boolInt(cred.Flags.BackupState), time.Now().UnixMilli())
 	if err != nil {
-		// 1062 = Duplicate entry（uq_passkeys_cred）
-		if strings.Contains(err.Error(), "Duplicate entry") {
+		// 1062 = Duplicate entry（uq_passkeys_cred）。errors.As 拿结构化错误码，
+		// 与 uid.go / ChangeEmail 同一口径——按错误串子串匹配会被驱动文案变化
+		// 或翻译版本悄悄改坏
+		var me *mysql.MySQLError
+		if errors.As(err, &me) && me.Number == 1062 {
 			return 0, &HTTPError{409, "这把 Passkey 已经绑定过了，无需重复添加"}
 		}
 		return 0, fmt.Errorf("落 passkey: %w", err)
