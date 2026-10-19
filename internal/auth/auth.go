@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1205,6 +1206,14 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 			"DELETE FROM "+table+" WHERE user_id = ?", userID); err != nil {
 			return fmt.Errorf("清空 %s: %w", table, err)
 		}
+	}
+	// m14：个人 AI 用量行同批清（scope='user' AND subject=uid）——隐私残留 +
+	// 防日后 uid 复用时把前任的用量算到新人头上。global 行与迁移映射表行**保留**：
+	// 它们不指向任何个人（global 是全站日计数，映射表是合并对账的守卫键）。
+	// subject 存的是 7 位随机 uid 的十进制串（ai_usage 口径，见 internal/ai 包注释）。
+	if _, err := tx.ExecContext(context.Background(),
+		"DELETE FROM ai_usage WHERE scope = 'user' AND subject = ?", strconv.FormatInt(userID, 10)); err != nil {
+		return fmt.Errorf("清空 AI 用量: %w", err)
 	}
 	// 审计行**留着但匿名化**：删掉它等于给「注销自己账号就能抹掉操作痕迹」开后门，
 	// 事件本身要继续对得起 ASVS V16；邮箱清空后行里只剩 uid，账号已不存在。

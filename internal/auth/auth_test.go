@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -581,6 +582,13 @@ func TestDeleteAccountClearsWebData(t *testing.T) {
 	if _, err := svc.otps.issue(PurposeLogin, "del-web@example.com"); err != nil {
 		t.Fatalf("落验证码: %v", err)
 	}
+	// m14 的前置数据：该 uid 的个人用量行 + global 行（注销只许清前者）
+	if _, err := svc.pool.Exec(
+		"INSERT INTO ai_usage (scope, subject, day, count) VALUES ('user', ?, ?, 3), ('global', '', ?, 7)",
+		strconv.FormatInt(c.UID, 10), time.Now().Format("2006-01-02"),
+		time.Now().Format("2006-01-02")); err != nil {
+		t.Fatalf("落用量行: %v", err)
+	}
 	// 注册与登录都已各记一条审计（actor_email 现在非空）
 	var beforeEmails int
 	if err := svc.pool.QueryRow(
@@ -597,6 +605,18 @@ func TestDeleteAccountClearsWebData(t *testing.T) {
 		if err := svc.pool.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE user_id = ?", c.UID).Scan(&n); err != nil || n != 0 {
 			t.Errorf("注销后 %s 不该剩行，得到 n=%d err=%v", table, n, err)
 		}
+	}
+	// m14：ai_usage 里 subject=uid 的个人行同批清（隐私残留 + 防日后 uid 复用
+	// 时把前任的用量算到新人头上）；global 行与迁移映射表行保留
+	var usage int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM ai_usage WHERE scope = 'user' AND subject = ?", strconv.FormatInt(c.UID, 10)).
+		Scan(&usage); err != nil || usage != 0 {
+		t.Errorf("注销后不该剩个人 AI 用量行，得到 %d (err=%v)", usage, err)
+	}
+	var globals int
+	if err := svc.pool.QueryRow("SELECT COUNT(*) FROM ai_usage WHERE scope = 'global'").Scan(&globals); err != nil || globals != 1 {
+		t.Errorf("global 用量行不该被注销清掉，得到 %d (err=%v)", globals, err)
 	}
 	// 审计行仍在，但邮箱已清空
 	var kept, leaked int
