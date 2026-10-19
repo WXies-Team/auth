@@ -2,6 +2,8 @@ package auth
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,6 +233,42 @@ func TestDisableTOTPWithRecoveryCode(t *testing.T) {
 	// 已关闭就别再关（幂等性提示，不是静默成功）
 	if err := svc.DisableTOTP(c, codes[0]); err == nil {
 		t.Error("已关闭时再关应回 400")
+	}
+}
+
+// m1 回归：TOTP 重放闸是**原子**的——并发提交同一个当前码，只允许一个通过。
+// 旧实现「SELECT 看 last_used → UPDATE 覆盖写」两步之间有窗口，并发同码可双双放行。
+func TestVerifyTOTPConcurrentSameCodeSingleUse(t *testing.T) {
+	svc, mailer := newTestService(t)
+	c := newTOTPUser(t, svc, mailer, "totp-race@example.com")
+	setup, err := svc.SetupTOTP(c)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := svc.EnableTOTP(c, currentCode(t, setup.Secret)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	// 用下一个步进的码（enable 已把当步进记进重放账）
+	code := codeAt(t, setup.Secret, 30*time.Second)
+
+	const n = 8
+	var wg sync.WaitGroup
+	var oks atomic.Int64
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if ok, err := svc.VerifyTOTPCode(c.UID, code); ok && err == nil {
+				oks.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if oks.Load() != 1 {
+		t.Errorf("并发同码应只放行 1 次，得到 %d 次", oks.Load())
 	}
 }
 

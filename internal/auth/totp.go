@@ -440,6 +440,11 @@ func (s *Service) RegenerateRecoveryCodes(c Caller, code string) (codes []string
 
 // VerifyTOTPCode 登录侧验码：验过即记 timestep（同 timestep 重放拒）。
 // 没绑定 / 未启用一律 false——调用方（登录编排）据此分流，不回原因给端点外。
+//
+// 重放闸是**一条原子 UPDATE**：`WHERE last_used_timestep < step` 按 RowsAffected
+// 判定归属——并发提交同一个码时 InnoDB 行锁让两个事务串行，后者 WHERE 不再命中
+//（0 行）自然落败。旧实现「SELECT 看账再 UPDATE 覆盖写」两步之间有窗口，
+// 并发同码可双双放行（ASVS 6.5.1「一次一用」失守）。
 func (s *Service) VerifyTOTPCode(uid int64, code string) (bool, error) {
 	if strings.TrimSpace(code) == "" {
 		return false, nil
@@ -451,15 +456,23 @@ func (s *Service) VerifyTOTPCode(uid int64, code string) (bool, error) {
 	if f == nil || !f.Enabled {
 		return false, nil
 	}
+	// 先按当前账面拒掉重放（快路径，省一次写）；真正的归属判定在下面的原子 UPDATE
 	step, ok := s.verifyTOTPAt(f.Secret, code, f.LastUsedStep)
 	if !ok {
 		return false, nil
 	}
-	if _, err := s.pool.ExecContext(context.Background(),
-		"UPDATE totp_factors SET last_used_timestep = ? WHERE user_id = ?", step, uid); err != nil {
+	res, err := s.pool.ExecContext(context.Background(),
+		"UPDATE totp_factors SET last_used_timestep = ? WHERE user_id = ? AND last_used_timestep < ?",
+		step, uid, step)
+	if err != nil {
 		return false, fmt.Errorf("记录 TOTP timestep: %w", err)
 	}
-	return true, nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("读 TOTP 重放闸结果: %w", err)
+	}
+	// 0 行 = 同步进已被并发对手抢先记账：重放，拒
+	return n == 1, nil
 }
 
 // verifyTOTPAt 校验码并回**命中的步进序号**（0 = 没通过），附带两条闸：±1 步进
