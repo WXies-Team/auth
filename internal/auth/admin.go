@@ -112,10 +112,12 @@ func (s *Service) AdminSearchUsers(query string, limit, offset int) ([]AdminUser
 		cond string
 	)
 	if q := strings.TrimSpace(query); q != "" {
-		// 纯数字按 uid 精确匹配（uid 是对外可见的标识），其余按邮箱片段 LIKE。
+		// 纯数字（**全串校验**）按 uid 精确匹配（uid 是对外可见的标识），其余按
+		// 邮箱片段 LIKE。fmt.Sscan 会把 "123abc" 按前缀解成 123——带字母的片段
+		// 因此错走 uid 精确路、查无此行；strconv.ParseInt 全串不合格即回落 LIKE。
 		// 片段里统配符转义交给 MySQL 的默认行为——查询来自管理员自己的输入，
 		// 不构成注入面（参数全部占位符）。
-		if _, err := fmt.Sscan(q, new(int64)); err == nil {
+		if _, err := strconv.ParseInt(q, 10, 64); err == nil {
 			cond = " WHERE id = ?"
 			args = append(args, q)
 		} else {

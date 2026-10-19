@@ -73,6 +73,22 @@ func TestAdminSearchUsers(t *testing.T) {
 	if err != nil || len(exact) != 1 || exact[0].UID != a.UID {
 		t.Errorf("按 uid 应精确命中 a，得到 %+v err=%v", exact, err)
 	}
+	// n2：带尾巴的串（uid+"x"）不是纯数字，应走邮箱片段 LIKE 而不是被 Sscan
+	// 按前缀解成 uid 精确匹配——否则搜 "123abc" 会错命中 uid=123 的行
+	mixed, _, err := svc.AdminSearchUsers(strconv.FormatInt(a.UID, 10)+"x", 20, 0)
+	if err != nil {
+		t.Fatalf("混合串查询不该报错: %v", err)
+	}
+	for _, u := range mixed {
+		if u.UID == a.UID {
+			t.Error("uid+字母的混合串不该按 uid 精确命中（应走邮箱片段）")
+		}
+	}
+	// 邮箱片段里带数字仍按 LIKE 命中
+	digitHit, _, err := svc.AdminSearchUsers("search-a", 20, 0)
+	if err != nil || len(digitHit) != 1 || digitHit[0].UID != a.UID {
+		t.Errorf("邮箱片段应照常命中，得到 %+v err=%v", digitHit, err)
+	}
 	// 分页：limit 收敛到合法区间
 	page, _, err := svc.AdminSearchUsers("", 1, 1)
 	if err != nil || len(page) > 1 {
