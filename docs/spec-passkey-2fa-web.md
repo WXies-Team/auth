@@ -235,9 +235,9 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 | Method/Path | 鉴权 | 请求 | 响应 |
 |---|---|---|---|
 | `POST /webauthn/register/options` | 已登录 | `{}` | `{publicKey: <CredentialCreation.publicKey>, ceremonyId}` |
-| `POST /webauthn/register/finish` | 已登录 + reauth≤15min | `{ceremonyId, response}`（浏览器 Credential JSON 透传） | `{id, name, createdAt}`；删 ceremony 行；审计 |
+| `POST /webauthn/register/finish` | 已登录 + reauth≤15min | `{ceremonyId, response}`（浏览器 Credential JSON 透传；日记 App 发的 JSON **字符串**形态由路由层解一层，两形态都交库校验） | `{id, name, createdAt}`；删 ceremony 行；审计 |
 | `POST /webauthn/login/options` | 无 | `{}` | `{publicKey: <CredentialAssertion.publicKey>, ceremonyId}`（discoverable：空 allowCredentials+UV required） |
-| `POST /webauthn/login/finish` | 无 | `{ceremonyId, response}` | 建 session(app='web')+双 cookie+`{token,email}`（**与 AuthResponse 同形**，C 批零新解析）；2FA 不影响（passkey 单独成立）；审计 login.success method=passkey |
+| `POST /webauthn/login/finish` | 无 | `{ceremonyId, response, app}`（`app` 可选） | `app` 空：建 session(app='web')+双 cookie+`{token,email}`（**与 AuthResponse 同形**，C 批零新解析）；`app` 在白名单（calorie-diary/expense-diary）：建 session(app=`<app>`)、签**既有格式 JWT**（/auth/login 同一签发助手：同 aud 白名单/ver/sid/90 天）回 `{token,email}`、**不下发 cookie**，白名单外 400；2FA 不影响（passkey 单独成立）；审计 login.success method=passkey（detail 可带 app） |
 | `GET /api/passkeys` | 已登录 | — | `[{id,name,createdAt,lastUsedAt,current}]`（current 按 credential_id） |
 | `PATCH /api/passkeys/{id}` | 已登录 | `{name}`（≤64 trim） | `{ok:true}` |
 | `DELETE /api/passkeys/{id}` | 已登录 + reauth | — | `{ok:true}`；最后一道登录方式守卫 400；审计 |
@@ -256,8 +256,8 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 
 | Method/Path | 请求 | 响应 |
 |---|---|---|
-| `POST /web/login/password` | `{email,password,app}` | 无 2FA：`{token,email}`；有 2FA：`{status:"2fa_required", loginToken, methods:["totp","recovery"]}` |
-| `POST /web/login/totp` | `{loginToken, code}` 或 `{loginToken, recoveryCode}` | `{token,email}`；恢复码消费记审计 |
+| `POST /web/login/password` | `{email,password,app}` | 无 2FA：`{token,email}`；有 2FA：`{status:"2fa_required", loginToken, methods:["totp","recovery"]}`。**app 分流（C 批）**：缺省 = web 流程，token 是 web 会话 token + 双 cookie（逐字节不变）；在白名单 = App 流程，token 是业务 JWT、**不下发 cookie**（外值 400）。有 2FA 时 app 随 `login_states.app`（`VARCHAR(32) NOT NULL DEFAULT 'web'`，ensureColumn 幂等补列）带到第二步 |
+| `POST /web/login/totp` | `{loginToken, code}` 或 `{loginToken, recoveryCode}` | `{token,email}`；恢复码消费记审计。**请求里没有 app**：按 `login_states.app` 决定发 web 会话 + 双 cookie（'web'）还是业务 JWT 无 cookie（白名单应用）；audit detail 可带 app |
 | `POST /web/session`（登录态） | — | `{uid,email,role,csrfToken,totpEnabled,passkeyCount}` |
 | `POST /web/reauth` | cookie + `{password}` 或 `{totpCode}` | `{ok:true}`（刷 reauth_at） |
 | `POST /web/logout` | cookie + CSRF | `{ok:true}`；吊销本行 + `Clear-Site-Data` |
@@ -346,8 +346,8 @@ ALTER TABLE sessions ADD COLUMN reauth_at      BIGINT   NULL;   -- 最近强认�
 ## C1 Kotlin 侧 API 契约
 
 - **Passkey 注册**（已登录设置页）：`POST {authBase}/webauthn/register/options`（Bearer）→ `{publicKey, ceremonyId}`；**publicKey 整体序列化为 JSON string** 进 `CreatePublicKeyCredentialRequest(requestJson=…)` → `CredentialManager.createCredential` → 类型判别 `PublicKeyCredential.TYPE_PUBLIC_KEY_CREDENTIAL` → `registrationResponseJson` → `POST /webauthn/register/finish {ceremonyId, response:<该JSON>}`。（1.6.0 起 `isAutoSelectAllowed` 适合登录成功后顺手引导绑定。）
-- **Passkey 登录**：`POST /webauthn/login/options {}` → `GetCredentialRequest(listOf(GetPublicKeyCredentialOption(requestJson=…)))` → `authenticationResponseJson` → `POST /webauthn/login/finish {ceremonyId, response}` → **响应即 `{token,email}`（AuthResponse 同形），登录态落地零新写**。
-- **TOTP 二步**：`POST /web/login/password {email,password,app}` → `{status:"2fa_required", loginToken}` → TOTP 输入页 → `POST /web/login/totp {loginToken, code}` → `{token,email}`。2FA 管理页复用 `/api/totp*`（Bearer）。
+- **Passkey 登录**：`POST /webauthn/login/options {}` → `GetCredentialRequest(listOf(GetPublicKeyCredentialOption(requestJson=…)))` → `authenticationResponseJson`（**JSON 字符串**）→ `POST /webauthn/login/finish {ceremonyId, response:<该JSON>, app}` → **响应即 `{token,email}`（AuthResponse 同形），登录态落地零新写**；带 `app`（白名单）时该 token 是业务 JWT、服务端不下发 cookie，缺省 app = web 会话 token + 双 cookie（旧网页流程原样）。
+- **TOTP 二步**：`POST /web/login/password {email,password,app}` → `{status:"2fa_required", loginToken}` → TOTP 输入页 → `POST /web/login/totp {loginToken, code}` → `{token,email}`（第二步不传 app，服务端随 `login_states` 带下来决定发 JWT 还是 web 会话）。2FA 管理页复用 `/api/totp*`（Bearer）。
 - base URL 已是 auth.horatio.cn，本批只加端点。
 
 ## C2 Credential Manager 集成要点

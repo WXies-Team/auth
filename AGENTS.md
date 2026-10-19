@@ -109,10 +109,12 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 - `__Host-` cookies require `Secure`, so a real browser drops them on plain http. Smoke-test
   pages with curl (`-b` jar works) or behind TLS; the route tests attach cookies by hand for
   the same reason.
-- The `token` returned by `/web/login/*` and `/webauthn/login/finish` is a **web session
-  token, not a JWT**: it authenticates the dual-credential routes only. `/internal/verify`
-  and the diary APIs still require a JWT from `/auth/login` — never treat the web token as a
-  drop-in replacement in an app client.
+- The `token` returned by `/web/login/*` and `/webauthn/login/finish` depends on the request's
+  `app`: **blank = a web session token** (authenticates the dual-credential routes, delivered with
+  the two cookies), **a whitelisted `app` = a business JWT** issued by the same `createToken` helper
+  as `/auth/login` (same aud whitelist / ver / sid / 90 days, no cookie). `/internal/verify` and the
+  diary APIs accept only the JWT — never hand a web token to an app client. The 2FA second step
+  reads its `app` back from `login_states.app`, not from the request.
 - An invalid `webauthn_opaque_origins` value logs an Error and **degrades to web-only
   origins** instead of refusing to start (login availability beats an optional feature);
   after touching that key, read the startup log for the downgrade line.
