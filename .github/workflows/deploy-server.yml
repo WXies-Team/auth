@@ -1,0 +1,55 @@
+name: deploy-server
+
+# 仅在服务端有变更时重新部署。质量门禁：ci/build-server.sh 内先 go test，
+# 不过即中止，绝不带病上线。
+# 产物：Go 单二进制（ci/build-server.sh 打包成 server/bin/server 的 tar）。
+# 部署：上传 tar → 原子切换 current symlink → Supervisord 重启 → /health 检查，
+#       失败自动回滚到上一个 release（见 ci/deploy-server.sh）。
+on:
+  push:
+    branches: [main]
+    paths:
+      # Go 模块在仓库根目录：源码、依赖清单、打包/部署脚本、本 workflow 自身
+      - 'cmd/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'ci/build-server.sh'
+      - 'ci/deploy-server.sh'
+      - '.github/workflows/deploy-server.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v7
+
+      # 同 build.yml：runner 执行 step 的进程没有 HOME，go 会炸——逐 step 设。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+        env:
+          HOME: ${{ github.workspace }}/../go-home
+
+      # 门禁 + 打包在同一条命令里：「测试没过」与「打了个坏包」一起被拦住
+      - name: Test & Package
+        env:
+          HOME: ${{ github.workspace }}/../go-home
+        run: ci/build-server.sh
+
+      - name: Deploy
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+          BASE_DIR: ${{ secrets.SERVER_BASE_DIR }}
+          APP_PORT: '8868'
+          SUPERVISORCTL: ${{ vars.SUPERVISORCTL || 'supervisorctl' }}
+          PROGRAM: auth
+        run: ci/deploy-server.sh dist/server.tar

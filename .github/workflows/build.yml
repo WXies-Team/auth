@@ -1,0 +1,45 @@
+name: build
+
+# Go 服务的编译 + 测试门禁。纯文档与 workflow 自身的改动不触发（跑不出字节差异，
+# 只占 runner）；文档类改动请用 `docs:` 前缀提交。
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - '.github/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v7
+
+      # 版本从 go.mod 读（单一来源，不会与本地开发版本飘掉）。真库测试需要
+      # TEST_MYSQL_DSN，CI 上没有 MySQL 会自动 Skip——但其余测试照跑。
+      # **必须显式给 HOME**：本仓库的 self-hosted runner 里，真正执行 step 的那个进程
+      # 没有 HOME（坑与热量日记服务同款），go 会以「GOCACHE is not defined」失败。
+      # HOME 指到工作区旁持久目录：GOMODCACHE/GOCACHE 跨 run 留存，go mod 不再每 run
+      # 重下；本地即缓存 → setup-go 远端 actions/cache 关闭。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+        env:
+          HOME: ${{ github.workspace }}/../go-home
+
+      - name: Build & Test
+        env:
+          HOME: ${{ github.workspace }}/../go-home
+        run: |
+          go build ./...
+          go test ./...
