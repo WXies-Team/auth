@@ -44,6 +44,7 @@ func TestSchemaFileEmbedded(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS login_states",
 		"CREATE TABLE IF NOT EXISTS ai_usage",
 		"CREATE TABLE IF NOT EXISTS audit_logs",
+		"CREATE TABLE IF NOT EXISTS user_profile",
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("schema.sql 缺少 %q", want)

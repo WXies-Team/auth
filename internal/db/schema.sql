@@ -72,6 +72,24 @@ CREATE TABLE IF NOT EXISTS sessions (
     KEY idx_sessions_user (user_id, revoked_at)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
+-- 用户档案三件套（昵称 / 头像色 / 头像图）：OIDC UserInfo 同款思路——**档案归身份
+-- 提供方**，两个日记 App 各自的 profiles 资料列由 scripts/migrate-profile-to-auth.sh
+-- 一次性并入这里，之后经 GET/PUT /api/profile 读写（见 internal/auth/profile.go）。
+--   nickname     空串 = 未设置（VARCHAR(64) 按字符计，与日记库同宽）
+--   avatar_color 颜板索引，0 = 默认色
+--   avatar_image **base64 原文**（无 data: 前缀、无换行——与日记库 profiles.avatar_image
+--                同形态），NULL = 无头像；MEDIUMTEXT 与日记同款，装得下 700KB 解码上限
+--                对应的 ~955,736 个 base64 字符
+--   updated_at   毫秒；PUT 全量替换时由服务端置 now（日记侧的 LWW updated_at 口径）
+CREATE TABLE IF NOT EXISTS user_profile (
+    user_id      BIGINT       NOT NULL,
+    nickname     VARCHAR(64)  NOT NULL DEFAULT '',
+    avatar_color INT          NOT NULL DEFAULT 0,
+    avatar_image MEDIUMTEXT   NULL,
+    updated_at   BIGINT       NOT NULL,
+    PRIMARY KEY (user_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
 -- Web 管理台的三张列变更（role / web_token_hash / web_csrf_hash / reauth_at）由
 -- internal/db 的 ensureColumn 在启动时按 information_schema 探测后补：MySQL 的
 -- ADD COLUMN 没有 IF NOT EXISTS，写进本文件会撞「重复列」错误让二跑的启动失败。
