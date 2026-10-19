@@ -119,7 +119,7 @@ func httpMsg(err error) (int, string) {
 }
 
 // tokenClaimUID 直接读 JWT payload 里的 uid（json.Number，无损），用于断言
-//「claims 里的雪花 id 与库里的 id 一字不差」。
+//「claims 里的 uid 与库里的 id 一字不差」。
 func tokenClaimUID(t *testing.T, token string) int64 {
 	t.Helper()
 	parts := strings.Split(token, ".")
@@ -154,11 +154,11 @@ func TestRegisterLoginLogout(t *testing.T) {
 	if reg.Token == "" {
 		t.Fatal("注册应直接返回可用 token（注册即登录）")
 	}
-	// 雪花 id 契约：claims.uid == 会话 uid == 库里的 users.id，且是超过 2^53 的
-	// 大整数（float64 装不下——谁把 claims 解成 float64 谁就会拿到花位的 uid）
+	// uid 契约：claims.uid == 会话 uid == 库里的 users.id，且是 1000000~9999999
+	// 的 7 位随机整数（见 newUserID，上下界都是硬口径）
 	claimUID := tokenClaimUID(t, reg.Token)
-	if claimUID <= 1<<53 {
-		t.Errorf("雪花 id 应超过 2^53，得到 %d——node/epoch 配置漂了", claimUID)
+	if claimUID < uidMin || claimUID > uidMax {
+		t.Errorf("uid 应落在 %d~%d，得到 %d——取号口径漂了", uidMin, uidMax, claimUID)
 	}
 	uid, err := svc.ValidUserID("Bearer " + reg.Token)
 	if err != nil {
@@ -868,8 +868,9 @@ func TestDiaryCodePurposeMatchesServerWhitelist(t *testing.T) {
 	}
 }
 
-// 雪花 id：node 1 固定、单调递增、互不重复、超 2^53（客户端与 /internal/verify
-// 的调用方都要能无损传输这些 id）。
+// 内部 id 仍是雪花：node 1 固定、单调递增、互不重复、超 2^53——sessions /
+// audit_logs / passkeys / webauthn_challenges 的行 id 都靠这条性质（users.id 的
+// 7 位随机 uid 另有 TestRandUserIDRange / TestNewUserIDRetriesOnTakenRow 钉）。
 func TestSnowflakeIDs(t *testing.T) {
 	node, err := snowflake.NewNode(nodeID)
 	if err != nil {

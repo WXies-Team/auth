@@ -61,7 +61,7 @@ func TestHooksSuccessCallsEveryApp(t *testing.T) {
 		"hook_calorie_diary": cal.URL + "/internal/delete-user",
 		"hook_expense_diary": exp.URL + "/internal/delete-user",
 	}))
-	const uid = int64(123456789012345678)
+	const uid = int64(1234567)
 	if err := h.BeforeDelete(uid, "u@example.com"); err != nil {
 		t.Fatalf("两个钩子都成功应放行，得到 %v", err)
 	}
@@ -76,8 +76,9 @@ func TestHooksSuccessCallsEveryApp(t *testing.T) {
 		if bearer != "Bearer shared-secret" {
 			t.Errorf("%s Bearer 错误: %q", name, bearer)
 		}
-		// uid 是 63 位雪花整数：进 body 必须还是整数文本，过一遍 float64 就花位了
-		if body != `{"uid":123456789012345678}` {
+		// 钩子体的 uid 必须是整数文本：带引号或走 float64 格式化（科学计数法）都会
+		// 让对端 json decode 成 string / float 而不是 int64
+		if body != `{"uid":1234567}` {
 			t.Errorf("%s body 错误: %s", name, body)
 		}
 	}

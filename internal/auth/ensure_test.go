@@ -10,7 +10,7 @@ import (
 func strPtr(s string) *string { return &s }
 
 // 存量并入的主链路：已有邮箱只回 uid 且**一行不改**；新邮箱按入参建行
-// （雪花 id、原样 hash、入参 created_at）；响应顺序与入参一致；整批可重跑。
+// （7 位随机 uid、原样 hash、入参 created_at）；响应顺序与入参一致；整批可重跑。
 func TestEnsureUsersMigratesExistingAndNew(t *testing.T) {
 	svc, mailer := newTestService(t)
 	reg := registerViaCode(t, svc, mailer, "old@example.com", "secret123")
@@ -46,9 +46,9 @@ func TestEnsureUsersMigratesExistingAndNew(t *testing.T) {
 		if r.Email != wantEmails[i] {
 			t.Errorf("第 %d 条邮箱应为 %q，得到 %q", i, wantEmails[i], r.Email)
 		}
-		// 雪花 id 一定超过 2^53（int64 直出，float64 装不下）
-		if r.UID <= 1<<53 {
-			t.Errorf("第 %d 条 uid 应超过 2^53，得到 %d", i, r.UID)
+		// 新号必在 7 位号段内（见 newUserID）
+		if r.UID < uidMin || r.UID > uidMax {
+			t.Errorf("第 %d 条 uid 应落在 %d~%d，得到 %d", i, uidMin, uidMax, r.UID)
 		}
 	}
 	if res[0].UID != claimUID {

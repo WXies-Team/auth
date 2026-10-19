@@ -39,7 +39,7 @@ func (f *fakeVerifier) Verify(bearer, expectApp string) (*auth.VerifyResult, err
 }
 
 func TestInternalVerifySuccess(t *testing.T) {
-	f := &fakeVerifier{res: &auth.VerifyResult{UID: 123456789012345, Email: "a@b.com", App: "calorie-diary"}}
+	f := &fakeVerifier{res: &auth.VerifyResult{UID: 1234567, Email: "a@b.com", App: "calorie-diary"}}
 	h := internalVerify(f)
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/verify", strings.NewReader(`{"app":"calorie-diary"}`))
@@ -62,8 +62,8 @@ func TestInternalVerifySuccess(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("响应不是合法 JSON: %v", err)
 	}
-	// uid 是 63 位雪花整数：JSON 数字进、int64 字段出必须无损
-	if out.UID != 123456789012345 || out.Email != "a@b.com" || out.App != "calorie-diary" {
+	// uid 是 7 位随机整数：JSON 数字进、int64 字段出必须无损
+	if out.UID != 1234567 || out.Email != "a@b.com" || out.App != "calorie-diary" {
 		t.Errorf("回执字段错误: %+v", out)
 	}
 	var raw struct {
@@ -72,7 +72,7 @@ func TestInternalVerifySuccess(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("响应解析: %v", err)
 	}
-	// 精度守卫：整数超 2^53 后 decode 成 float64 会花位——uid 必须仍是纯整数文本
+	// 精度守卫：uid 必须仍是纯整数文本（序列化成浮点/科学计数法，对端 int64 解析就炸）
 	if strings.ContainsAny(string(raw.UID), ".eE") {
 		t.Errorf("uid 被序列化成了浮点: %s", rec.Body.String())
 	}
@@ -300,7 +300,7 @@ func TestInternalEnsureAuthAndPassthrough(t *testing.T) {
 	}
 
 	// 鉴权通过：字段原样透传，uid 以整数回出
-	f = &fakeEnsurer{res: []protocol.EnsureUserResult{{Email: "a@b.com", UID: 1234567890123456789}}}
+	f = &fakeEnsurer{res: []protocol.EnsureUserResult{{Email: "a@b.com", UID: 1234567}}}
 	h := internalEnsure(lookup, f)
 	req = httptest.NewRequest(http.MethodPost, "/internal/users/ensure", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -315,7 +315,7 @@ func TestInternalEnsureAuthAndPassthrough(t *testing.T) {
 	if f.got[0].Email != " a@b.com " || f.got[0].PasswordHash != nil || f.got[0].CreatedAt != 1600000000123 {
 		t.Errorf("字段应原样透传（归一化在业务层做），得到 %+v", f.got[0])
 	}
-	// 精度守卫：uid 过一遍 float64 就花位，回执里必须是纯整数文本
+	// 精度守卫：回执里的 uid 必须是纯整数文本（带引号/浮点格式对端都解不成 int64）
 	var raw []struct {
 		UID json.Number `json:"uid"`
 	}

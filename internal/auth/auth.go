@@ -1,8 +1,10 @@
 // Package auth 实现注册/登录/改密/注销与 JWT 会话。
 //
 // 业务逻辑照抄热量日记服务的同名包（久经生产考验），差异只在三处：
-//   - **uid 用雪花**（bwmarrin/snowflake，node id=1）：统一账号被多个下游服务引用，
-//     自增 id 会暴露注册顺序，雪花 63 位整数直接存 users.id（不自增）；
+//   - **users.id 是 7 位随机整数**（1,000,000~9,999,999，crypto/rand + 主键撞号重试，
+//     见 newUserID）：不暴露注册顺序、可口播可手输。雪花（bwmarrin/snowflake，
+//     node id=1）退居**内部 id**——sessions/audit_logs/passkeys/webauthn_challenges
+//     的行 id 仍用它，`s.ids` 不动；
 //   - **JWT aud = 登录请求声明的应用**（白名单 calorie-diary / expense-diary）：
 //     本服务是所有应用的统一签发方，aud 是下游服务划界的依据；
 //   - **验证码落库**（原实现存进程内存，重启即失效）：语义逐条对齐，见 otp.go。
@@ -46,8 +48,8 @@ const (
 	// 与旧版 BCrypt.withDefaults().hashToString(12, ...) 一致
 	bcryptCost = 12
 
-	// nodeID 是雪花节点号固定值。整个账号体系只有这一个签发点，1 即可；
-	// 改它会让新注册的 id 与旧 id 撞号段，**永远不要动**。
+	// nodeID 是雪花节点号固定值。内部 id（会话/审计/凭证/仪式行）只有这一个签发点，
+	// 1 即可；改它会让新 id 与存量 id 撞号段，**永远不要动**。
 	nodeID = 1
 )
 
@@ -247,7 +249,7 @@ func verify(password, hashed string) bool {
 // createToken 签发 JWT。
 //
 // **uid 与 sid 都以 JSON 数字（int64）进 claims**：序列化无损；解析侧必须配
-// jwt.WithJSONNumber（见 parseToken），否则 63 位雪花 id 过一遍 float64 就花位。
+// jwt.WithJSONNumber（见 parseToken），否则 sid 这个 63 位雪花 id 过一遍 float64 就花位。
 // sid 指向本次登录建的会话行——校验时要对上（见 sessionAlive），没有 sid 的 token
 // 一律不认（切换到会话表之前的存量 token，客户端重登即消）。
 //
@@ -273,8 +275,9 @@ func (s *Service) createToken(userID int64, email, app string, version int, sid 
 // parseToken 验签并抽出 claims（**不含** aud 校验：登录端点查白名单、/internal/verify
 // 查精确匹配，两处期望不同）。
 //
-// jwt.WithJSONNumber 是硬要求：uid 是 63 位雪花整数，默认解析走 float64
-//（53 位尾数）丢精度，错位的 uid 会让 token_version 比对查到别的账号上。
+// jwt.WithJSONNumber 是硬要求：**sid 是 63 位雪花整数**，默认解析走 float64
+//（53 位尾数）丢精度，错位的 sid 会让会话校验查到别的会话上。uid 自 2026-10 起
+// 只是 7 位随机数（float64 装得下），但同一份 claims 解析不按 uid 宽度分叉，一律读整数。
 func (s *Service) parseToken(token string) (jwt.MapClaims, error) {
 	claims := jwt.MapClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (any, error) {
@@ -470,8 +473,6 @@ func (s *Service) Register(rawEmail, password, code, app string, meta SessionMet
 		return nil, err
 	}
 
-	// 雪花 id 由服务生成，不走 LastInsertId——users.id 不是自增列
-	uid = s.ids.Generate().Int64()
 	// 用户行与会话行同批提交：会话插入单走一次、失败了却把账号留下，用户重试
 	// 只会撞「该邮箱已注册」，而他手里既没有 token 也没有会话。
 	ctx := context.Background()
@@ -481,11 +482,18 @@ func (s *Service) Register(rawEmail, password, code, app string, meta SessionMet
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err = tx.ExecContext(ctx,
-		"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
-		uid, email, hashed, time.Now().UnixMilli()); err != nil {
+	// uid 由服务生成（7 位随机，撞号由 newUserID 换号重试），不走 LastInsertId——
+	// users.id 不是自增列
+	uid, err = newUserID(randUserID, func(id int64) error {
+		_, e := tx.ExecContext(ctx,
+			"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
+			id, email, hashed, time.Now().UnixMilli())
+		return e
+	})
+	if err != nil {
 		// 并发下同邮箱先被占：uq_users_email 挡住，翻译成人话（与 ChangeEmail 同口径；
-		// 顺带把含邮箱的 MySQL 错误串挡在日志外）
+		// 顺带把含邮箱的 MySQL 错误串挡在日志外）。撞号的 1062 到不了这里——
+		// newUserID 已经换号重试，原样上抛的只有邮箱键与真故障。
 		var me *mysql.MySQLError
 		if errors.As(err, &me) && me.Number == 1062 {
 			return nil, badRequest("该邮箱已注册，请直接登录")
@@ -513,9 +521,9 @@ const maxEnsureBatch = 100
 
 // EnsureUsers 把两个日记服务的存量用户批量并入本服务——**这是存量迁移的唯一入口**。
 //
-// 雪花 id 一律由本服务单点生成（与 Register 同一个 s.ids.Generate），业务侧禁止各自造号：
-// 两个 App 的旧自增 id 一旦也进 users.id，就会与雪花号段撞号，下游按 uid 关联的数据
-// 再也分不清是哪个来源签的。
+// uid 一律由本服务单点生成（与 Register 同一个 newUserID：7 位随机 + 撞号重试），
+// 业务侧禁止各自造号：账号 id 只有一个签发点，两个 App 各造各的号，
+// 同一账号在 auth 与业务库就会长出两套对不上的 uid。
 //
 // 已存在的邮箱只回它的 uid，**不动已有行的任何字段**——迁移脚本因此可以整批重跑
 // （幂等），重复执行不会覆盖用户后来改过的密码或注册时间。
@@ -548,15 +556,18 @@ func (s *Service) EnsureUsers(entries []protocol.EnsureUserEntry) ([]protocol.En
 			"SELECT id FROM users WHERE email = ?", email).Scan(&uid)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			uid = s.ids.Generate().Int64()
 			// nil 指针走 NULL（纯验证码账号），非 nil 原样落库
 			var hash any
 			if e.PasswordHash != nil {
 				hash = *e.PasswordHash
 			}
-			if _, err := tx.ExecContext(context.Background(),
-				"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
-				uid, email, hash, e.CreatedAt); err != nil {
+			uid, err = newUserID(randUserID, func(id int64) error {
+				_, insErr := tx.ExecContext(context.Background(),
+					"INSERT INTO users (id, email, password_hash, created_at, token_version) VALUES (?, ?, ?, ?, 1)",
+					id, email, hash, e.CreatedAt)
+				return insErr
+			})
+			if err != nil {
 				return nil, fmt.Errorf("并入用户（下标 %d）: %w", i, err)
 			}
 		case err != nil:
@@ -1150,7 +1161,7 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 		}
 	}
 	// 审计行**留着但匿名化**：删掉它等于给「注销自己账号就能抹掉操作痕迹」开后门，
-	// 事件本身要继续对得起 ASVS V16；邮箱清空后行里只剩雪花 uid，账号已不存在。
+	// 事件本身要继续对得起 ASVS V16；邮箱清空后行里只剩 uid，账号已不存在。
 	if _, err := tx.ExecContext(context.Background(),
 		"UPDATE audit_logs SET actor_email = '' WHERE actor_uid = ?", userID); err != nil {
 		return fmt.Errorf("匿名化审计: %w", err)

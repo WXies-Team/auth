@@ -89,9 +89,10 @@ func TestPasskeyCeremonyOwnedByCaller(t *testing.T) {
 }
 
 // userHandle ↔ uid：8 字节大端往返无损，长度不对 / 最高位为 1 的垃圾一律报错
-//（discoverable 登录靠它反查账号，错位就是把 passkey 认给别人）。
+//（discoverable 登录靠它反查账号，错位就是把 passkey 认给别人）。首项是现行的
+// 7 位随机 uid，其余是编码边界（历史上出现过的雪花 uid 与人为溢出值）。
 func TestUserHandleRoundTrip(t *testing.T) {
-	for _, uid := range []int64{1, 1<<53 + 7, 2112093138515398659, 1<<63 - 1} {
+	for _, uid := range []int64{1234567, 1, 1<<53 + 7, 2112093138515398659, 1<<63 - 1} {
 		got, err := uidFromWebAuthnID(webAuthnID(uid))
 		if err != nil || got != uid {
 			t.Errorf("uid %d 往返失败: got=%d err=%v", uid, got, err)
@@ -100,7 +101,7 @@ func TestUserHandleRoundTrip(t *testing.T) {
 	if _, err := uidFromWebAuthnID([]byte{1, 2, 3}); err == nil {
 		t.Error("长度不对的 userHandle 应报错")
 	}
-	// 最高位为 1：解出来会是负数（不是合法雪花 uid），必须拦
+	// 最高位为 1：解出来会是负数（不是合法 uid），必须拦
 	neg := []byte{0xff, 0, 0, 0, 0, 0, 0, 1}
 	if _, err := uidFromWebAuthnID(neg); err == nil {
 		t.Error("负数 uid 形态应报错")
