@@ -21,6 +21,9 @@
 | `POST /auth/send-change-email-code` | 新邮箱发改绑验证码 |
 | `POST /auth/change-email` | 改绑邮箱 |
 | `POST /auth/delete` | 注销账号：先逐个调日记服务的注销钩子清业务数据，全成功才删本服务数据（钩子失败回 503 中止） |
+| `GET /api/sessions` | 自己的已登录设备列表（按最近活跃倒序，`current` 标本机） |
+| `DELETE /api/sessions/{id}` | 踢单台设备（只能踢自己的，别人的与不存在同回 404，幂等） |
+| `POST /api/sessions/revoke-others` | 退出除本机外的全部设备（只动会话层，本机 token 照用） |
 | `POST /internal/verify` | 内部接口：日记服务的 withUID 中间件验 token + aud，回 `{uid,email,app}` |
 | `POST /internal/users/ensure` | 内部接口：存量用户批量并入（`Bearer hook_token`，单批 ≤100 条，整批一个事务） |
 | `GET /health` | 健康检查（碰数据库）；`mailConfigured` / `jwtConfigured` 自查位 |
@@ -28,6 +31,10 @@
 登录 / 注册 / 验证码登录的请求体带 `app`（`calorie-diary` / `expense-diary` 白名单），
 作为 JWT 的 aud——下游服务只接受为自己应用签发的 token。`send-code` 的 `app` 可选、
 只决定这封验证码邮件的品牌（不进 token）：不传即中性品牌 Auth，传了必须在白名单。
+
+三条登录路与改密换发都会建一条登录会话，token 的 `sid` 指向它；`/internal/verify` 与
+`/auth/*` 都要求会话健在（被踢的设备当场 401）。**无 `sid` 的旧 token 已全部作废**，
+切换到会话表后客户端需重新登录一次。
 
 `/internal/*` 只放行环回与受信内网来源（其余 403），不经 nginx 暴露。
 

@@ -19,6 +19,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | Any auth DTO / JSON tag | `internal/protocol/protocol.go` **and** calorie-diary's `server/internal/protocol/protocol.go` auth block — they must stay一字不差 (extra `app` field is ours) |
 | Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from that family (calorie-diary's copy was deleted when accounts moved here, `34f7d0ab`); divergences are snowflake / aud / OTP-in-DB, all commented in place |
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
+| Sessions / device management | `internal/auth/session.go` + `sessions` comments in `internal/db/schema.sql` (kick = session layer only, `token_version` untouched) |
 | User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
 
 ## Commands
@@ -52,7 +53,8 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
    invalidate, cross-purpose recipient cap 15/day. Codes live in `otp_codes`; "burn" sets
    `used=1` (whole generation), **never deletes rows mid-day** — deletion loses the daily counts.
 5. **Rate limits** (in-process sliding window, single-instance assumption): unauthed 15/min/IP,
-   send-code 5/min/IP, authed 10/min/uid + 120/min/IP outer, verify 600/min/IP.
+   send-code 5/min/IP, authed 10/min/uid + 120/min/IP outer, verify 600/min/IP; the session
+   endpoints get their own uid scopes — list 30/min, kick and revoke-others 10/min each.
 6. **Copy tone**: error = what went wrong + next step, Chinese; email brand comes from
    `brandFor(app)` — 热量日记 / 开支日记, and **Auth** when app is blank; mail subjects
    `<prefix><场景>验证码` (e.g. `【Auth】注册验证码`).
