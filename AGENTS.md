@@ -17,9 +17,9 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | You want to change | Read |
 |---|---|
 | Any auth DTO / JSON tag | `internal/protocol/protocol.go` **and** calorie-diary's `server/internal/protocol/protocol.go` auth block — they must stay一字不差 (extra `app` field is ours) |
-| Business logic reference | calorie-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from them; divergences are snowflake / aud / OTP-in-DB, all commented in place |
+| Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from that family (calorie-diary's copy was deleted when accounts moved here, `34f7d0ab`); divergences are snowflake / aud / OTP-in-DB, all commented in place |
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
-| User-visible email copy | `internal/auth/email.go` (brand is always 「Horatio 账号」, never a specific app) |
+| User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
 
 ## Commands
 
@@ -53,8 +53,9 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
    `used=1` (whole generation), **never deletes rows mid-day** — deletion loses the daily counts.
 5. **Rate limits** (in-process sliding window, single-instance assumption): unauthed 15/min/IP,
    send-code 5/min/IP, authed 10/min/uid + 120/min/IP outer, verify 600/min/IP.
-6. **Copy tone**: error = what went wrong + next step, Chinese; email brand 「Horatio 账号」;
-   mail subjects `【Horatio 账号】<场景>验证码`.
+6. **Copy tone**: error = what went wrong + next step, Chinese; email brand comes from
+   `brandFor(app)` — 热量日记 / 开支日记, and **Auth** when app is blank; mail subjects
+   `<prefix><场景>验证码` (e.g. `【Auth】注册验证码`).
 7. Commit format per `~/.config/opencode/COMMITTING.md`: `<type>(<scope>): 中文描述`.
 
 ## Known pitfalls
@@ -70,7 +71,9 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
   `gh workflow run` (concurrency group cancels queued runs on rerun of old commits).
 - A Laravel leftover `vendor/` dir once made `go build` fail with "inconsistent vendoring" —
   Go auto-enables -mod=vendor when a `vendor/` exists. Never reintroduce one (no vendoring here).
-- Email templates carry brand strings; tests pin them (`【Horatio 账号】…`) — rebrand = update both.
+- Email brand strings live in one registry (`internal/auth/email.go`), pinned by
+  `TestBrandEmailStrings`; a new brand = registry row + that test table, and its key must stay
+  in sync with the `allowedApps` aud whitelist (`TestBrandForSelection` fails on drift).
 - The three delete-hook keys (`hook_token` / `hook_calorie_diary` / `hook_expense_diary` in
   `app_config`) **must all be set in production**: a missing key is the legitimate "skip this
   App" state (real-DB tests rely on it to avoid any network call), so don't "fix" it; lose one

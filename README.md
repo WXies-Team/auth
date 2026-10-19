@@ -10,7 +10,7 @@
 | 端点 | 说明 |
 |---|---|
 | `POST /auth/register` | 注册（验证码必填，注册即登录） |
-| `POST /auth/send-code` | 发注册 / 找回密码 / 登录验证码 |
+| `POST /auth/send-code` | 发注册 / 找回密码 / 登录验证码（可选 `app` 决定邮件品牌，缺省 = Auth） |
 | `POST /auth/reset-password` | 验证码找回密码 |
 | `POST /auth/login` | 密码登录 |
 | `POST /auth/login-code` | 邮箱验证码登录 |
@@ -26,7 +26,8 @@
 | `GET /health` | 健康检查（碰数据库）；`mailConfigured` / `jwtConfigured` 自查位 |
 
 登录 / 注册 / 验证码登录的请求体带 `app`（`calorie-diary` / `expense-diary` 白名单），
-作为 JWT 的 aud——下游服务只接受为自己应用签发的 token。
+作为 JWT 的 aud——下游服务只接受为自己应用签发的 token。`send-code` 的 `app` 可选、
+只决定这封验证码邮件的品牌（不进 token）：不传即中性品牌 Auth，传了必须在白名单。
 
 `/internal/*` 只放行环回与受信内网来源（其余 403），不经 nginx 暴露。
 
