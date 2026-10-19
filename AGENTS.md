@@ -21,6 +21,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
 | Sessions / device management | `internal/auth/session.go` + `sessions` comments in `internal/db/schema.sql` (kick = session layer only, `token_version` untouched) |
 | User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
+| Web console (login, passkey, TOTP, admin) | `docs/spec-passkey-2fa-web.md` first — it is the authoritative spec (session mechanism, endpoint tables, page list); then `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go` for logic and `cmd/server/{web,admin,ui}.go` + `internal/ui/` for HTTP/pages |
 
 ## Commands
 
@@ -59,6 +60,18 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
    `brandFor(app)` — 热量日记 / 开支日记, and **Auth** when app is blank; mail subjects
    `<prefix><场景>验证码` (e.g. `【Auth】注册验证码`).
 7. Commit format per `~/.config/opencode/COMMITTING.md`: `<type>(<scope>): 中文描述`.
+8. **Web console session = cookie, apps = Bearer, same `sessions` row.** `__Host-auth_web`
+   (HttpOnly+Secure+SameSite=Strict) stores only sha256 in `sessions.web_token_hash`; every
+   non-GET request that carries that cookie must send `X-CSRF-Token` (value of the readable
+   `__Host-auth_web_csrf` cookie) — **this applies to the legacy `/auth/*`, `/api/sessions*`
+   routes too**, because accepting the cookie there is what makes the web pages work. Bearer
+   callers never send it and are unaffected. `/admin/*` accepts **cookies only**, re-checks
+   `users.role` per request, and requires MFA bound + `reauth_at` within 15 min
+   (`POST /web/reauth` refreshes it; the UI retries automatically on the fixed 401 message
+   `需要重新验证身份，请输入密码或验证码`).
+9. Admin bootstrap & gates: `users.role` defaults to `user`; first admin is one manual
+   `UPDATE users SET role='admin'`. Never re-introduce an email allow-list in `app_config`
+   (spec A1.3 rejected it: email change bypasses it, no index, 10s cache revocation gap).
 
 ## Known pitfalls
 
@@ -80,3 +93,20 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
   `app_config`) **must all be set in production**: a missing key is the legitimate "skip this
   App" state (real-DB tests rely on it to avoid any network call), so don't "fix" it; lose one
   App key in prod and that App's business rows turn into orphans silently on every delete.
+- `TOTP_ENC_KEY` is a **second refuse-to-start secret** (≥32 bytes, same gate as
+  `JWT_SECRET`): local runs and real-DB tests must provide it (`newTestService` sets it via
+  `t.Setenv`). Losing it in prod invalidates every enrolled TOTP — only recovery codes remain,
+  so it belongs in the ops backup next to `JWT_SECRET`.
+- `__Host-` cookies require `Secure`, so a real browser drops them on plain http. Smoke-test
+  pages with curl (`-b` jar works) or behind TLS; the route tests attach cookies by hand for
+  the same reason.
+- The `token` returned by `/web/login/*` and `/webauthn/login/finish` is a **web session
+  token, not a JWT**: it authenticates the dual-credential routes only. `/internal/verify`
+  and the diary APIs still require a JWT from `/auth/login` — never treat the web token as a
+  drop-in replacement in an app client.
+- An invalid `webauthn_opaque_origins` value logs an Error and **degrades to web-only
+  origins** instead of refusing to start (login availability beats an optional feature);
+  after touching that key, read the startup log for the downgrade line.
+- Don't mass-run `gofmt`: Go 1.27's gofmt wants a space after `//` before a full-width
+  parenthesis while this repo's comments don't — a blanket run rewrites every doc comment
+  and drowns the diff (CI only runs build/vet/test, never gofmt).
