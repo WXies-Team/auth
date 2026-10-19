@@ -30,7 +30,9 @@ func newTestSender(base string) *Sender {
 }
 
 // message.from 按信带发件人显示名：地址恒为 sender，Name 由调用方（邮件品牌）现传。
-// 字段名或层级写错只有这条断言抓得住——Graph 对缺字段照样回 202，静默通过。
+// **from 必须是 recipient 包层 {"emailAddress":{...}}**——写平成 {"address","name"}
+// 会被 Graph 拒成 400 RequestBodyRead（2026-10-19 线上实测，全站验证码信 503），
+// 所以除了解码断言，还在原始串上钉住 emailAddress 键，防结构被改回平铺。
 func TestSendCarriesBrandDisplayName(t *testing.T) {
 	var gotRaw string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,8 +55,10 @@ func TestSendCarriesBrandDisplayName(t *testing.T) {
 	var payload struct {
 		Message struct {
 			From struct {
-				Address string `json:"address"`
-				Name    string `json:"name"`
+				EmailAddress struct {
+					Address string `json:"address"`
+					Name    string `json:"name"`
+				} `json:"emailAddress"`
 			} `json:"from"`
 			Subject      string `json:"subject"`
 			ToRecipients []struct {
@@ -66,10 +70,28 @@ func TestSendCarriesBrandDisplayName(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotRaw), &payload); err != nil {
 		t.Fatalf("请求体不是合法 JSON: %v\n%s", err, gotRaw)
 	}
-	if payload.Message.From.Address != sender || payload.Message.From.Name != "热量日记" {
-		t.Errorf("from 应为 %s / 热量日记，得到 %q / %q",
-			sender, payload.Message.From.Address, payload.Message.From.Name)
+	from := payload.Message.From.EmailAddress
+	if from.Address != sender || from.Name != "热量日记" {
+		t.Errorf("from.emailAddress 应为 %s / 热量日记，得到 %q / %q", sender, from.Address, from.Name)
 	}
+
+	// 负例：解码成功不代表结构对——平铺的 {"address","name"} 解进上面的嵌套结构
+	// 只会得到零值，所以要在原始 JSON 上单独钉住包层键
+	var probe struct {
+		Message struct {
+			From map[string]json.RawMessage `json:"from"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(gotRaw), &probe); err != nil {
+		t.Fatalf("请求体不是合法 JSON: %v\n%s", err, gotRaw)
+	}
+	if _, wrapped := probe.Message.From["emailAddress"]; !wrapped {
+		t.Errorf("from 必须包一层 emailAddress（Graph recipient），得到 %s", gotRaw)
+	}
+	if _, flat := probe.Message.From["address"]; flat {
+		t.Errorf("from 不该平铺 address——Graph 会回 400 RequestBodyRead: %s", gotRaw)
+	}
+
 	if payload.Message.Subject != "【热量日记】注册验证码" {
 		t.Errorf("subject 丢了: %q", payload.Message.Subject)
 	}

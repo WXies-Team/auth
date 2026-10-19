@@ -78,23 +78,22 @@ func New(cfg ConfigFunc) *Sender {
 	}
 }
 
+// emailAddress 是 Graph recipient 的内层对象。**Graph 的 recipient 一律是
+// {"emailAddress": {...}} 包一层**——message.from 也是 recipient 型：写成平铺的
+// {"address","name"} 会被 sendMail 拒成 400 RequestBodyRead（2026-10-19 线上实测，
+// 当天全部验证码信 503）。Name 只给 from 用，omitempty 让收件人 payload 保持原样。
 type emailAddress struct {
 	Address string `json:"address"`
+	Name    string `json:"name,omitempty"`
 }
 
+// recipient 既作收件人也作 message.from——复用同型，包层结构就不会只改对一头。
 type recipient struct {
 	EmailAddress emailAddress `json:"emailAddress"`
 }
 
-// fromAddress 是 message.from：地址恒为常量 sender，Name 是这封信的品牌名
-// （品牌注册表在 auth 包，这里只按入参落字段）。
-type fromAddress struct {
-	Address string `json:"address"`
-	Name    string `json:"name"`
-}
-
 type message struct {
-	From         fromAddress `json:"from"`
+	From         recipient   `json:"from"`
 	Subject      string      `json:"subject"`
 	Body         body        `json:"body"`
 	ToRecipients []recipient `json:"toRecipients"`
@@ -110,8 +109,8 @@ type sendMailRequest struct {
 	SaveToSentItems bool    `json:"saveToSentItems"`
 }
 
-// Send 发一封 HTML 邮件。fromName 是发件人显示名（品牌名），落到 message.from.name；
-// 成功 = Graph 回 202（已接受；投递仍受 Exchange 限流约束，
+// Send 发一封 HTML 邮件。fromName 是发件人显示名（品牌名），落到
+// message.from.emailAddress.name；成功 = Graph 回 202（已接受；投递仍受 Exchange 限流约束，
 // 微软官方口径：sendMail 成功返回 202 Accepted、响应体为空）。
 // 失败返回带状态码与响应体片段的错误——只进服务端日志，客户端只看到白话。
 //
@@ -151,7 +150,7 @@ func (s *Sender) Send(ctx context.Context, fromName, to, subject, html string) e
 		return fmt.Errorf("取 Graph 访问令牌: %w", err)
 	}
 	m := message{
-		From:         fromAddress{Address: sender, Name: fromName},
+		From:         recipient{EmailAddress: emailAddress{Address: sender, Name: fromName}},
 		Subject:      subject,
 		Body:         body{ContentType: "HTML", Content: html},
 		ToRecipients: []recipient{{EmailAddress: emailAddress{Address: to}}},
