@@ -109,7 +109,7 @@ func (s *Service) AdminSearchUsers(query string, limit, offset int) ([]AdminUser
 		cond string
 	)
 	if q := strings.TrimSpace(query); q != "" {
-		// 纯数字按 uid 精确匹配（雪花 id 是对外可见的标识），其余按邮箱片段 LIKE。
+		// 纯数字按 uid 精确匹配（uid 是对外可见的标识），其余按邮箱片段 LIKE。
 		// 片段里统配符转义交给 MySQL 的默认行为——查询来自管理员自己的输入，
 		// 不构成注入面（参数全部占位符）。
 		if _, err := fmt.Sscan(q, new(int64)); err == nil {

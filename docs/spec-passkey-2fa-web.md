@@ -62,7 +62,7 @@ webauthn.Config{
 
 **改名/删除**：改名只 UPDATE name；删除=删行即刻对后续仪式不可见。删除守卫：**若该用户只剩这一个 passkey 且无密码、无 TOTP → 400**，保住「至少一种登录方式」（OWASP MFA CS：恢复不得弱于常规登录）。
 
-**discoverable 登录 API**（v0.18.2 实名核实）：`BeginDiscoverableLogin(opts...) (*protocol.CredentialAssertion, *SessionData, error)`；`FinishPasskeyLogin(handler DiscoverableUserHandler, session SessionData, response *http.Request)`，handler 签名 `(rawID, userHandle []byte) (User, error)`——用 userHandle（=`WebAuthnID()`）反查用户。`WebAuthnID()` = **雪花 uid 的 8 字节大端**（≤64 字节、稳定、可逆）；不用邮箱（可改，userHandle 必须稳定）。注册侧 `BeginRegistration/FinishRegistration`；已登录二因子场景用 `BeginMediatedLogin`（identity 已知），与 discoverable 分开。
+**discoverable 登录 API**（v0.18.2 实名核实）：`BeginDiscoverableLogin(opts...) (*protocol.CredentialAssertion, *SessionData, error)`；`FinishPasskeyLogin(handler DiscoverableUserHandler, session SessionData, response *http.Request)`，handler 签名 `(rawID, userHandle []byte) (User, error)`——用 userHandle（=`WebAuthnID()`）反查用户。`WebAuthnID()` = **uid 的 8 字节大端**（≤64 字节、稳定、可逆；uid 自 2026-10 起为 **7 位随机整数** 1,000,000~9,999,999，本文旧版口径「雪花 uid」已随之作废，但编码仍是 8 字节定长，新旧 uid 同一套编解码）；不用邮箱（可改，userHandle 必须稳定）。注册侧 `BeginRegistration/FinishRegistration`；已登录二因子场景用 `BeginMediatedLogin`（identity 已知），与 discoverable 分开。
 
 ### A1.2 TOTP：参数、绑定流程、恢复码
 

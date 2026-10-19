@@ -89,7 +89,7 @@ func (h *Hooks) BeforeDelete(uid int64, email string) error {
 	return nil
 }
 
-// post 往一个钩子端点发 {"uid":<雪花 id>}，200 即成功——端点幂等（删 0 行也算成功），
+// post 往一个钩子端点发 {"uid":<users.id>}，200 即成功——端点幂等（删 0 行也算成功），
 // 所以不解析响应体，对端回了什么都不影响判定。
 func (h *Hooks) post(url, token string, uid int64) (int, error) {
 	body, err := json.Marshal(struct {

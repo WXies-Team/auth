@@ -415,7 +415,8 @@ func reauthThen(svc *auth.Service, h func(auth.Caller, http.ResponseWriter, *htt
 	}
 }
 
-// pathInt64 解析路径里的雪花 id；非法回 400（这类 id 只有服务端发过）。
+// pathInt64 解析路径里的数字 id（uid 与会话/凭证等内部行 id 都走它）；
+// 非法回 400（这类 id 只有服务端发过）。
 func pathInt64(w http.ResponseWriter, raw string) (int64, bool) {
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || id <= 0 {

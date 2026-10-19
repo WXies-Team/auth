@@ -93,8 +93,9 @@ type VerifyRequest struct {
 }
 
 // VerifyResponse 是 /internal/verify 的成功回执。
-// UID 是 63 位雪花整数：调用方务必用整型字段接收（encoding/json 对 int64 字段
-// 直接按数字解析，无损；decode 成 float64 会丢精度）。
+// UID 是 7 位随机整数（2026-10 起，此前为 63 位雪花 uid）：调用方务必用整型字段
+// 接收（encoding/json 对 int64 字段直接按数字解析，无损；decode 成 float64 的写法
+// 一旦挪去接 sid / 内部 id 这类 63 位值就会丢低位）。
 type VerifyResponse struct {
 	UID   int64  `json:"uid"`
 	Email string `json:"email"`
@@ -115,7 +116,8 @@ type EnsureUserEntry struct {
 }
 
 // EnsureUserResult 是并入回执：Email 是**归一化后**的邮箱（小写去空格，与落库值一致），
-// UID 是 63 位雪花整数，调用方用 int64 接收（decode 成 float64 会丢低位）。
+// UID 是 7 位随机整数（此前为 63 位雪花），调用方仍用 int64 接收——同一段代码
+// 别按 float64 解 JSON 数字，挪去接 63 位的 sid/内部 id 就丢低位。
 type EnsureUserResult struct {
 	Email string `json:"email"`
 	UID   int64  `json:"uid"`

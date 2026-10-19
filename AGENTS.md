@@ -8,7 +8,10 @@
 Go + MySQL email account service for 热量日记 / 记账, package root `github.com/WXies-Team/auth`
 (module at **repo root**, no server/ subdir). Its `/auth/*` endpoints mirror calorie-diary's
 one-to-one with **identical JSON fields** — clients switch by changing base URL + adding `app`.
-UIDs are **snowflake 63-bit ints** (node id 1, never change). Repo `WXies-Team/auth`, push
+UIDs are **7-digit random ints** (1,000,000–9,999,999, `crypto/rand` + primary-key
+collision retry, see `internal/auth/uid.go`); the snowflake node (id 1, never change)
+now issues internal row ids only — `sessions` / `audit_logs` / `passkeys` /
+`webauthn_challenges`. Repo `WXies-Team/auth`, push
 straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1:8868`
 (BASE_DIR `/www/wwwroot/auth.horatio.cn/server`), nginx terminates TLS.
 
@@ -17,7 +20,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | You want to change | Read |
 |---|---|
 | Any auth DTO / JSON tag | `internal/protocol/protocol.go` **and** calorie-diary's `shared/.../dto/AuthDtos.kt` — they must stay一字不差 (extra `app` field is ours); diary-side field snapshot pinned by `internal/protocol/protocol_test.go` |
-| Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from that family (calorie-diary's copy was deleted when accounts moved here, `34f7d0ab`); divergences are snowflake / aud / OTP-in-DB, all commented in place |
+| Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` — this repo was照抄 from that family (calorie-diary's copy was deleted when accounts moved here, `34f7d0ab`); divergences are the 7-digit random uid / aud / OTP-in-DB, all commented in place |
 | OTP semantics | `internal/auth/otp.go` + `otp_codes` comments in `internal/db/schema.sql` |
 | Sessions / device management | `internal/auth/session.go` + `sessions` comments in `internal/db/schema.sql` (kick = session layer only, `token_version` untouched) |
 | User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
@@ -45,9 +48,11 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 1. **JWT**: HS256, `iss="auth"`, `aud`=the `app` the login request declared (whitelist
    `calorie-diary` / `expense-diary`), TTL 90 days, claims `uid/email/ver`. Signature and
    validation both happen here, so aud is only a downstream boundary — single secret is enough.
-2. **`uid` precision**: claims are parsed with `jwt.WithJSONNumber()` — a snowflake id through
-   float64 loses low bits and makes `token_version` lookups hit the wrong row. Same for
-   `/internal/verify` consumers: decode `uid` into an int64 field, never float64.
+2. **`uid` precision**: claims are parsed with `jwt.WithJSONNumber()` — mandatory for
+   `sid`, a snowflake id that through float64 loses low bits and makes the session lookup
+   hit the wrong row (uid itself is only 7 digits now, but the parser never forks per
+   claim). Same for `/internal/verify` consumers: decode `uid` into an int64 field, never
+   float64.
 3. **Revocation**: `token_version` in `users`, compared on **every** token validation; logout /
    password-change do +1. It is **never cached** (config's 10s app_config cache must not spread here).
 4. **OTP**: 6-digit, 5-min expiry, 60s cooldown, 10/day per (email,purpose), 5 wrong tries

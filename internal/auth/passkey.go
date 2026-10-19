@@ -81,9 +81,10 @@ func NewWebAuthn(opaqueOrigins []string) (*webauthn.WebAuthn, error) {
 
 // passkeyUser 把本仓的 users 行适配成库的 User 接口。
 //
-// WebAuthnID 取**雪花 uid 的 8 字节大端**：稳定（邮箱可改）、可逆（discoverable
-// 登录靠 userHandle 反查账号）、≤64 字节上限。不用邮箱——改绑邮箱会让
-// userHandle 与账号错位，passkey 归属就断了。
+// WebAuthnID 取 **uid 的 8 字节大端**：稳定（邮箱可改）、可逆（discoverable
+// 登录靠 userHandle 反查账号）、≤64 字节上限。uid 现为 7 位随机数，编码仍固定
+// 8 字节定长——旧雪花 uid 与新 uid 同一套编码，不动已发出去的 userHandle 语义。
+// 不用邮箱——改绑邮箱会让 userHandle 与账号错位，passkey 归属就断了。
 type passkeyUser struct {
 	svc   *Service
 	uid   int64
