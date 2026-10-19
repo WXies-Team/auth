@@ -1,30 +1,14 @@
-*.log
-.DS_Store
+# 构建产物
+/dist/
+
+# 本地环境与密钥（.env.example 只放占位符，真实值绝不入库）
 .env
-.env.backup
-.env.production
-.phpactor.json
-.phpunit.result.cache
-/.codex
-/.cursor/
-/.idea
-/.nova
-/.phpunit.cache
-/.vscode
-/.zed
-/auth.json
-/node_modules
-/public/build
-/public/fonts-manifest.dev.json
-/public/hot
-/public/storage
-/storage/*.key
-/storage/pail
-/vendor
-_ide_helper.php
-Homestead.json
-Homestead.yaml
-Thumbs.db
+.env.*
+!.env.example
+
+# 旧 Laravel 遗留物（未跟踪的构建缓存，留在磁盘但不入库）
+/vendor/
+/node_modules/
 
 # Agent 工具配置（不入库）
 /.agents/
@@ -32,4 +16,10 @@ Thumbs.db
 /.mcp.json
 /opencode.json
 /boost.json
-/n
+
+# 杂项
+*.log
+.DS_Store
+/.idea/
+/.vscode/
+/.zed/
