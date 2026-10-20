@@ -212,7 +212,7 @@ func encodePNG(spec iconSpec) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// faviconSVG 生成 favicon.svg：**透明底 + #3482FF 的 fingerprint 描边本体**
+// faviconSVG 生成 favicon.svg：**透明底 + #3482FF 的 hexagon 描边本体**
 //（2026-10-20 作者拍板，去掉蓝渐变 squircle 底）。stroke-width=2 与页面内
 // lucide .ico 图标同款语义，缩放交给 transform；矢量直接用 lucide 原始 path data。
 func faviconSVG(size float64, paths []string) (string, error) {

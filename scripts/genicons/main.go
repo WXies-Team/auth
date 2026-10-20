@@ -15,7 +15,8 @@ package main
 //	go run ./scripts/genicons -check   # 只校验磁盘与本程序输出一致（CI/测试用）
 //
 // 字形取自 lucide-static v0.462.0（ISC）：热量日记 = flame、开支日记 = receipt、
-// Auth = fingerprint——与 internal/ui/icons.go 同一版，图标与页面内联 SVG 同源。
+// Auth 品牌 = hexagon（2026-10-20 作者拍板：fingerprint 与 passkey 功能图标撞脸，
+// 品牌位换 hexagon；passkey 功能位另用 internal/ui/icons.go 的 key-round，两不相干）。
 
 import (
 	"bytes"
@@ -26,8 +27,8 @@ import (
 	"strings"
 )
 
-// flame / receipt 取自 lucide-static v0.462.0（ISC 许可，图标沿用仓库
-// 「零 CDN、矢量内联」口径）；fingerprint 与 internal/ui/icons.go 逐字一致。
+// flame / receipt / hexagon 取自 lucide-static v0.462.0（ISC 许可，图标沿用仓库
+// 「零 CDN、矢量内联」口径），path data 与 lucide 官方源逐字一致。
 var (
 	flamePaths = []string{
 		"M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z",
@@ -37,16 +38,8 @@ var (
 		"M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8",
 		"M12 17.5v-11",
 	}
-	fingerprintPaths = []string{
-		"M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4",
-		"M14 13.12c0 2.38 0 6.38-1 8.88",
-		"M17.29 21.02c.12-.6.43-2.3.5-3.02",
-		"M2 12a10 10 0 0 1 18-6",
-		"M2 16h.01",
-		"M21.8 16c.2-2 .131-5.354 0-6",
-		"M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2",
-		"M8.65 22c.21-.66.45-1.32.57-2",
-		"M9 6.8a6 6 0 0 1 9 5.2v2",
+	hexagonPaths = []string{
+		"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z",
 	}
 )
 
@@ -64,7 +57,7 @@ func generate() ([]fileOut, error) {
 	mailIcons := map[string][]string{
 		"calorie-diary": flamePaths,
 		"expense-diary": receiptPaths,
-		"auth":          fingerprintPaths,
+		"auth":          hexagonPaths,
 	}
 	for _, name := range []string{"calorie-diary", "expense-diary", "auth"} {
 		png, err := encodePNG(iconSpec{size: 192, cutCorners: true, boxFrac: 0.6, paths: mailIcons[name]})
@@ -77,19 +70,19 @@ func generate() ([]fileOut, error) {
 	// apple-touch-icon：与 favicon 同款**透明底 + #3482FF 蓝 glyph**（2026-10-20 作者
 	// 拍板）。满幅不切角——iOS 主屏自己套超椭圆蒙版；**iOS 会给透明图标垫黑底**
 	//（平台行为），嫌黑再议。
-	apple, err := encodePNG(iconSpec{size: 180, boxFrac: 0.6, paths: fingerprintPaths, transparentBlue: true})
+	apple, err := encodePNG(iconSpec{size: 180, boxFrac: 0.6, paths: hexagonPaths, transparentBlue: true})
 	if err != nil {
 		return nil, fmt.Errorf("画 apple-touch-icon: %w", err)
 	}
 	out = append(out, fileOut{"internal/ui/static/apple-touch-icon.png", apple})
 
-	ico, err := encodeICO([]int{16, 32, 48}, 0.6, fingerprintPaths)
+	ico, err := encodeICO([]int{16, 32, 48}, 0.6, hexagonPaths)
 	if err != nil {
 		return nil, fmt.Errorf("画 favicon.ico: %w", err)
 	}
 	out = append(out, fileOut{"internal/ui/static/favicon.ico", ico})
 
-	svg, err := faviconSVG(96, fingerprintPaths)
+	svg, err := faviconSVG(96, hexagonPaths)
 	if err != nil {
 		return nil, fmt.Errorf("画 favicon.svg: %w", err)
 	}
