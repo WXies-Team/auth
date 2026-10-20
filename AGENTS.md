@@ -26,7 +26,7 @@ straight to main; deploy = self-hosted CI → supervisord `auth:*` on `127.0.0.1
 | User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` in `cmd/server/routes.go`; one-off merge of the two diaries' `profiles` columns = 迁移已完成，脚本已移除；映射表由主 agent 清库 |
 | AI rate limits / usage accounting (per-uid across both apps) | `internal/ai/quota.go` (three gates + unified accounting, 口径 pinned in its package comment) + `cmd/server/ai.go` (the `/internal/ai/*` handlers, diary-side 429 copy); one-off merge of both diaries' `ai_usage` = 迁移已完成，脚本已移除；映射表由主 agent 清库 |
 | User-visible email copy | `internal/auth/email.go` — brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**); one shared shell, only the brand strings swap |
-| Web console (login, passkey, TOTP, admin) | `docs/spec-passkey-2fa-web.md` first — it is the authoritative spec (session mechanism, endpoint tables, page list); then `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go` for logic and `cmd/server/{web,admin,ui}.go` + `internal/ui/` for HTTP/pages |
+| Web console (login, passkey, TOTP, admin) | `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go` for logic and `cmd/server/{web,admin,ui}.go` + `internal/ui/` for HTTP/pages |
 
 ## Commands
 

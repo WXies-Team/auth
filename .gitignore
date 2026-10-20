@@ -6,16 +6,11 @@
 .env.*
 !.env.example
 
-# 旧 Laravel 遗留物（未跟踪的构建缓存，留在磁盘但不入库）
-/vendor/
-/node_modules/
-
 # Agent 工具配置（不入库）
 /.agents/
 /.claude/
 /.mcp.json
 /opencode.json
-/boost.json
 
 # 杂项
 *.log
