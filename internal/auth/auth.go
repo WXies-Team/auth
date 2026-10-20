@@ -129,7 +129,7 @@ type Service struct {
 	otps   *otpStore
 	mailer Mailer
 	hooks  *Hooks
-	// totpKey 是 TOTP secret 的 AES-256-GCM 密钥（TOTP_ENC_KEY，≥32 字节拒启）；
+	// totpKey 是 TOTP secret 的 AES-256-GCM 密钥（TOTP_ENC_KEY：32 字节裸值或 64 位 hex，规范化后非 32 字节拒启）；
 	// recoveryPepper 是恢复码 HMAC 的密钥，由 JWT_SECRET 域分隔派生——同一根密钥
 	// 派两把子密钥，一把出事不牵连另一把。
 	totpKey        []byte

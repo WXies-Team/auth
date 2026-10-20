@@ -317,3 +317,37 @@ func TestSecretCipherRoundTrip(t *testing.T) {
 		t.Error("密钥不同必须解不开")
 	}
 }
+
+// TestRequireTOTPEncKeyFormats 密钥装载三形态：64 位 hex 解码成 32 字节（生产
+// supervisord 即此形态，曾因裸转致 setup 恒 500）、32 字节裸值原样、其余拒启。
+func TestRequireTOTPEncKeyFormats(t *testing.T) {
+	hex64 := strings.Repeat("ab", 32) // 64 位合法 hex → 32 字节 0xab
+	t.Run("hex64 解码", func(t *testing.T) {
+		t.Setenv("TOTP_ENC_KEY", hex64)
+		k, err := requireTOTPEncKey()
+		if err != nil || len(k) != 32 || k[0] != 0xab || k[31] != 0xab {
+			t.Fatalf("hex64 应解码为 32 字节 0xab，得到 len=%d err=%v", len(k), err)
+		}
+	})
+	t.Run("raw32 原样", func(t *testing.T) {
+		raw := strings.Repeat("k", 32)
+		t.Setenv("TOTP_ENC_KEY", raw)
+		k, err := requireTOTPEncKey()
+		if err != nil || string(k) != raw {
+			t.Fatalf("raw32 应原样，得到 %q err=%v", k, err)
+		}
+	})
+	for name, bad := range map[string]string{
+		"64位非hex": strings.Repeat("z", 64),
+		"40字节":    strings.Repeat("k", 40),
+		"空":        "",
+		"63位hex":   strings.Repeat("a", 63),
+	} {
+		t.Run(name+" 拒启", func(t *testing.T) {
+			t.Setenv("TOTP_ENC_KEY", bad)
+			if _, err := requireTOTPEncKey(); err == nil {
+				t.Fatal("应拒启并报错")
+			}
+		})
+	}
+}

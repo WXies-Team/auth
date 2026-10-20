@@ -612,13 +612,31 @@ func deriveRecoveryPepper(jwtSecret string) []byte {
 	return sum[:]
 }
 
-// requireTOTPEncKey 读并校验 TOTP 加密密钥：缺失或短于 32 字节直接报错拒启
-//（与 JWT_SECRET 同口径——短密钥等于没加密，而 TOTP secret 只能存原值）。
+// requireTOTPEncKey 读并规范化 TOTP 加密密钥：接受 32 字节裸值，或 supervisord
+// 环境里惯用的 64 位 hex 表示（=32 字节，可读且无 ini 转义风险——生产即此形态，
+// 曾因直接裸转致 aes 报 invalid key size 64、2FA 开启恒 500）。其余形态一律拒启
+//（与 JWT_SECRET 同口径——坏密钥等于没加密，而 TOTP secret 只能存原值）。
 // 丢失该密钥 = 已绑用户的 TOTP 全部作废（只剩恢复码），运维要单独备份它。
 func requireTOTPEncKey() ([]byte, error) {
 	key := os.Getenv("TOTP_ENC_KEY")
-	if len(key) < 32 {
-		return nil, errors.New("TOTP_ENC_KEY 不可用：缺失或短于 32 字节，检查 supervisord 的 environment")
+	if len(key) == 64 && isHexStr(key) {
+		b, err := hex.DecodeString(key)
+		if err != nil || len(b) != 32 {
+			return nil, errors.New("TOTP_ENC_KEY 为 64 位但非合法 hex，检查 supervisord 的 environment")
+		}
+		return b, nil
 	}
-	return []byte(key), nil
+	if len(key) == 32 {
+		return []byte(key), nil
+	}
+	return nil, errors.New("TOTP_ENC_KEY 必须是 32 字节裸值或 64 位 hex（=32 字节），检查 supervisord 的 environment")
+}
+
+func isHexStr(s string) bool {
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
