@@ -78,9 +78,13 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
    `users.role` per request, and requires MFA bound + `reauth_at` within 15 min
    (`POST /web/reauth` refreshes it; the UI retries automatically on the fixed 401 message
    `需要重新验证身份，请输入密码或验证码`).
-9. Admin bootstrap & gates: `users.role` defaults to `user`; first admin is one manual
-   `UPDATE users SET role='admin'`. Never re-introduce an email allow-list in `app_config`
-   (spec A1.3 rejected it: email change bypasses it, no index, 10s cache revocation gap).
+9. Admin bootstrap & gates: `users.role` value domain is `user | admin | super` (W2 分级授权);
+   first platform admin is one manual `UPDATE users SET role='super'`. `admin` alone grants
+   nothing — an effective app-admin additionally needs ≥1 `admin_scopes` row (granted only by
+   super via `POST /admin/roles/{uid}/scope`; revoke-to-zero demotes role back to `user`);
+   `super` bypasses scopes and owns users/roles/config endpoints. Never re-introduce an email
+   allow-list in `app_config` (spec A1.3 rejected it: email change bypasses it, no index, 10s
+   cache revocation gap).
 
 ## Known pitfalls
 
