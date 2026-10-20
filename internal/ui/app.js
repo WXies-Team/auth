@@ -185,7 +185,7 @@ async function api(path, opts) {
       }
       const e0 = new Error('已取消重新验证'); e0.status = 401; e0.cancelled = true; throw e0;
     }
-    if (res.status === 401 && msg.indexOf('重新验证') < 0) {
+    if (res.status === 401 && msg.indexOf('重新验证') < 0 && !location.pathname.startsWith('/web/login')) {
       location.href = '/web/login';
     }
     const err = new Error(msg);
