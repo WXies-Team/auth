@@ -32,6 +32,9 @@ type NavItem struct {
 // Email/Initial/IsAdmin 是**顶栏账号胶囊与管理入口**的渲染依据：由路由层从
 // 现查过的会话身份（users.role）带进来，模板层据此决定「管理后台」按钮出不出现——
 // 非管理员的 HTML 里就没有这个按钮，而不是前端 display:none 藏一下。
+//
+// IsSuper/Apps/CurrentApp 是 W2 项目切换器的渲染依据（同样来自现查的
+// role/admin_scopes）：super 见「全部」+ 两 app，app-admin 只见自己授权的 app。
 type Data struct {
 	Title   string
 	Nav     []NavItem
@@ -39,8 +42,14 @@ type Data struct {
 	Email   string
 	Initial string // 账号胶囊头像占位首字母（无档案头像时的兜底）
 	IsAdmin bool
-	Style   template.CSS
-	Script  template.JS
+	IsSuper bool
+	Apps    []AppChoice // 非空 = 顶栏渲染项目切换器
+	// CurrentApp 是 ?app= 的当前取值（切换器高亮 + 数据页过滤器），空 = 全部/默认
+	CurrentApp string
+	// DeniedApp 是 403 页上点名的越权应用（denied 模板用，其余页面忽略）
+	DeniedApp string
+	Style     template.CSS
+	Script    template.JS
 }
 
 var (
@@ -114,10 +123,56 @@ func Has(name string) bool {
 }
 
 // IsAdminRole 判定「顶栏要不要渲染管理后台入口」。口径与 cmd/server 后台闸
-// （role == "admin"，每请求现查 users 行）同源：模板层放行的按钮，数据层一定
-// 挡得住——本服务的角色只有 user/admin 两档，不引入第二种「看起来像管理员」的名字。
-func IsAdminRole(role string) bool {
-	return role == "admin"
+// （role ∈ {admin, super}，每请求现查 users 行）同源：模板层放行的按钮，数据层
+// 一定挡得住——auth.IsAdminRole 与本函数是同一值域的两份最小实现（ui 不 import
+// auth 保叶子包，两侧各自被测试钉住：TestIsAdminRole 与 auth 侧的角色用例）。
+func IsAdminRole(role string) bool { return role == "admin" || role == "super" }
+
+// IsSuperRole 判定平台管理员（super 专属页与「全部」切换项的渲染依据）。
+func IsSuperRole(role string) bool { return role == "super" }
+
+// AppChoice 是项目切换器的一项：Key 是 ?app= 的取值（空串 = 全部），
+// Label 是展示名，Active 是当前选中。
+type AppChoice struct {
+	Key    string
+	Label  string
+	Active bool
+}
+
+// knownApps 是项目切换器的展示名（与 auth.allowedApps 同源的两 app；新应用
+// 加这里 + allowedApps 两处）。定序即展示序。
+var knownApps = []struct{ key, label string }{
+	{"calorie-diary", "热量日记"},
+	{"expense-diary", "开支日记"},
+}
+
+// SwitchApps 生成项目切换器的选项：
+//
+//	super     「全部」+ 两 app（currentApp 空 = 「全部」高亮）；
+//	app-admin 只回自己授权的 app（无「全部」项——scope 是硬边界，「全部」对它
+//	          没有语义）；currentApp 不在其内时不高亮任何项（页面层已把越权
+//	          ?app= 挡成 403，走到这里只剩空串的默认态）。
+func SwitchApps(super bool, scopes []string, currentApp string) []AppChoice {
+	if super {
+		out := make([]AppChoice, 0, len(knownApps)+1)
+		out = append(out, AppChoice{Key: "", Label: "全部", Active: currentApp == ""})
+		for _, a := range knownApps {
+			out = append(out, AppChoice{Key: a.key, Label: a.label, Active: currentApp == a.key})
+		}
+		return out
+	}
+	out := make([]AppChoice, 0, len(scopes))
+	for _, s := range scopes {
+		label := s
+		for _, a := range knownApps {
+			if a.key == s {
+				label = a.label
+				break
+			}
+		}
+		out = append(out, AppChoice{Key: s, Label: label, Active: currentApp == s})
+	}
+	return out
 }
 
 // initialOf 取邮箱首字符做账号胶囊的头像占位字（无档案头像时的兜底）；
@@ -189,13 +244,25 @@ func ConsoleNav(active string) []NavItem {
 	}
 }
 
-// AdminNav 是后台五个入口（key 与页面名对应）。
-func AdminNav(active string) []NavItem {
+// AdminNav 是后台入口（key 与页面名对应），按角色分叉（W2）：
+//
+//	super     用户 / 角色管理 / 会话总览 / 审计日志 / 配置中心 / AI 用量 六项；
+//	app-admin 只有会话总览 / 审计日志 / AI 用量 三项（已按 scope 过滤的数据页）——
+//	          用户目录、角色、配置是平台级功能，入口在它的 HTML 里根本不出现。
+func AdminNav(active string, isSuper bool) []NavItem {
+	if isSuper {
+		return []NavItem{
+			{Href: "/web/admin", Label: "用户", Icon: "users", Active: active == "admin-users"},
+			{Href: "/web/admin/roles", Label: "角色", Icon: "shield-check", Active: active == "admin-roles"},
+			{Href: "/web/admin/sessions", Label: "会话总览", Icon: "monitor", Active: active == "admin-sessions"},
+			{Href: "/web/admin/audit", Label: "审计日志", Icon: "scroll-text", Active: active == "admin-audit"},
+			{Href: "/web/admin/config", Label: "配置中心", Icon: "sliders-horizontal", Active: active == "admin-config"},
+			{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai-usage"},
+		}
+	}
 	return []NavItem{
-		{Href: "/web/admin", Label: "用户", Icon: "users", Active: active == "admin-users"},
 		{Href: "/web/admin/sessions", Label: "会话总览", Icon: "monitor", Active: active == "admin-sessions"},
 		{Href: "/web/admin/audit", Label: "审计日志", Icon: "scroll-text", Active: active == "admin-audit"},
-		{Href: "/web/admin/config", Label: "配置中心", Icon: "sliders-horizontal", Active: active == "admin-config"},
 		{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai-usage"},
 	}
 }

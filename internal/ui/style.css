@@ -125,6 +125,25 @@ code { font-family: var(--mono); }
 }
 .acct-email { font-size: 13px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 项目切换器（W2）：后台数据页的 app 过滤器，写 ?app= 进 URL 刷新保持。
+   视觉沿用既有令牌（--card 底 / --radius-ctl 圆角），动效只用 transition
+   （--dur-1 + --ease），不新增 keyframe——不给动效门禁添新扫描面。
+   分段控件形态：选中项 primary-soft 底 + aria-current，未选中 hover 抬到 card 底。 */
+.app-switch {
+  display: inline-flex; align-items: center; gap: 2px; flex: none;
+  padding: 3px; border-radius: var(--radius-ctl);
+  background: var(--card); border: 1px solid var(--line);
+  max-width: 100%; overflow-x: auto;
+}
+.app-chip {
+  display: inline-flex; align-items: center; flex: none;
+  min-height: 28px; padding: 0 10px; border-radius: calc(var(--radius-ctl) - 4px);
+  font-size: 13px; color: var(--dim); text-decoration: none; white-space: nowrap;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.app-chip:hover { color: var(--ink); }
+.app-chip.on { background: var(--primary-soft); color: var(--primary); font-weight: 500; }
+
 /* ---- 壳：≥900px 左侧分区导航 + 右侧内容（容器 880 居中）；窄屏导航变横向滚动 tab 行 ---- */
 .shell {
   display: flex; align-items: flex-start; gap: 24px;

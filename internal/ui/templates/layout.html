@@ -26,7 +26,8 @@
       <span class="brand-name">Auth</span>
     </a>
     <div class="topnav">
-      {{if .IsAdmin}}<a class="btn small admin-entry" href="/web/admin" id="admin-entry">{{icon "shield-check"}} 管理后台</a>{{end}}
+      {{if .IsAdmin}}<a class="btn small admin-entry" href="{{if .IsSuper}}/web/admin{{else}}/web/admin/sessions{{end}}" id="admin-entry">{{icon "shield-check"}} 管理后台</a>{{end}}
+      {{if .Apps}}<span class="app-switch" id="app-switch" role="group" aria-label="项目切换">{{range .Apps}}<a class="app-chip{{if .Active}} on{{end}}" href="{{if .Key}}?app={{.Key}}{{else}}{{end}}" data-app="{{.Key}}"{{if .Active}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</span>{{end}}
       <span class="acct">
         <span class="avatar" id="me-avatar" aria-hidden="true">{{.Initial}}</span>
         <span class="acct-email" id="topbar-email">{{.Email}}</span>

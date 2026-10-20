@@ -200,14 +200,49 @@ const APP_LABEL = { web: '网页', 'calorie-diary': '热量日记', 'expense-dia
 const appLabel = v => APP_LABEL[v] || v;
 
 /* 管理页守卫：先确认自己真的是管理员，再让各页发起数据请求；
-   角色不符直接回概览（数据层的 requireAdmin 还会逐请求再挡一次）。 */
+   角色不符直接回概览（数据层的 requireAdmin 还会逐请求再挡一次）。
+   W2：admin 与 super 都放行（与 ui.IsAdminRole 同口径），super 标记供角色页等
+   专属 UI 判定。 */
 async function initAdminGuard() {
   if (location.pathname.indexOf('/web/admin') !== 0) return;
   try {
     const me = await api('/web/session', { method: 'POST', body: {} });
     window.__meUid = me.uid;
-    if (me.role !== 'admin') location.href = '/web/console';
+    if (me.role !== 'admin' && me.role !== 'super') location.href = '/web/console';
   } catch (_) { /* 401 时 api() 已经跳登录页 */ }
+}
+
+/* 当前数据页的 app 过滤器：?app= 空 = 全部（super）/ 全部授权（app-admin）。
+   服务端已把越权 ?app= 挡成 403 页，这里只管把合法取值带上 API。 */
+function appFilter() {
+  const v = new URLSearchParams(location.search).get('app');
+  return v ? '&app=' + encodeURIComponent(v) : '';
+}
+
+/* 项目切换器：选中写入 ?app=（刷新保持），切换时用 W1 的 popIn 徽标动效 +
+   swapIn 数据区（不整页刷新——数据页本就走 fetch，重取数据比重新加载壳轻）。
+   未选中项是同页链接，点击即走这里；无 JS 时退化为 ?app= 链接跳转，同样成立。 */
+function initAppSwitch() {
+  const wrap = $('#app-switch');
+  if (!wrap) return;
+  $$('.app-chip', wrap).forEach(chip => chip.addEventListener('click', e => {
+    e.preventDefault();
+    const app = chip.dataset.app || '';
+    const url = new URL(location.href);
+    if (app) url.searchParams.set('app', app); else url.searchParams.delete('app');
+    history.replaceState(null, '', url);
+    $$('.app-chip', wrap).forEach(c => {
+      const on = c === chip;
+      c.classList.toggle('on', on);
+      if (on) { c.setAttribute('aria-current', 'true'); popIn(c); }
+      else c.removeAttribute('aria-current');
+    });
+    // 通知当前数据页重取：监听方（sessions/audit/ai 三页）preventDefault 即
+    // 「我处理了，别整页刷新」；没人监听的页面（用户/角色/配置——切换器只改
+    // URL 状态）就 reload 一次，让 ?app= 与服务端渲染态保持一致
+    const ev = new CustomEvent('appscopechange', { cancelable: true });
+    if (document.dispatchEvent(ev)) location.reload();
+  }));
 }
 
 /* ---------- 登录页 ---------- */
@@ -895,7 +930,7 @@ function initAdminUsers() {
           <tr>
             <td class="wrap-cell">${esc(u.email)}</td>
             <td class="mono">${esc(u.uid)}</td>
-            <td>${u.role === 'admin' ? '<span class="badge on">admin</span>' : '<span class="badge">user</span>'}</td>
+            <td>${u.role === 'user' ? '<span class="badge">user</span>' : `<span class="badge on">${esc(u.role)}</span>`}</td>
             <td>${u.totpEnabled ? '已开启' : '未开启'}</td>
             <td>${u.passkeyCount}</td>
             <td>${esc(fmtTime(u.createdAt))}</td>
@@ -928,6 +963,17 @@ function initAdminUsers() {
         </div>`).join('') || '<div class="empty">暂无活跃会话</div>';
       const passkeys = (d.passkeys || []).map(p =>
         `<li>${esc(p.name)} · ${esc(fmtTime(p.createdAt))}</li>`).join('') || '<li>未添加</li>';
+      // super 目标不给角色下拉：PATCH /admin/users/{uid} 只认 user/admin 两值，
+      // 平台角色调整走角色管理页的 /admin/roles/{uid}/role（带最后一个 super 守卫）
+      const roleCtl = d.role === 'super'
+        ? '<span class="badge on">super</span> <span class="hint">平台角色请在角色管理页调整</span>'
+        : `<label class="row" style="gap:8px"><span class="dim">角色</span>
+            <select id="ud-role" ${d.uid === window.__meUid ? 'disabled title="不能修改自己的角色"' : ''}>
+              <option value="user"${d.role === 'user' ? ' selected' : ''}>user</option>
+              <option value="admin"${d.role === 'admin' ? ' selected' : ''}>admin</option>
+            </select>
+          </label>
+          <button type="button" class="btn small primary" id="ud-save-role" ${d.uid === window.__meUid ? 'disabled' : ''}>保存角色</button>`;
       $('#ud-body').innerHTML = `
         <div class="grid2">
           <div><span class="dim">uid</span><br><span class="mono">${esc(d.uid)}</span></div>
@@ -938,13 +984,7 @@ function initAdminUsers() {
         <h3>Passkey</h3><ul>${passkeys}</ul>
         <h3>活跃会话</h3><div class="list">${sessions}</div>
         <div class="detail row">
-          <label class="row" style="gap:8px"><span class="dim">角色</span>
-            <select id="ud-role" ${d.uid === window.__meUid ? 'disabled title="不能修改自己的角色"' : ''}>
-              <option value="user"${d.role === 'user' ? ' selected' : ''}>user</option>
-              <option value="admin"${d.role === 'admin' ? ' selected' : ''}>admin</option>
-            </select>
-          </label>
-          <button type="button" class="btn small primary" id="ud-save-role" ${d.uid === window.__meUid ? 'disabled' : ''}>保存角色</button>
+          ${roleCtl}
           <button type="button" class="btn small danger" id="ud-kick-all">退出该用户全部会话</button>
         </div>`;
       $$('#ud-body [data-kick]').forEach(btn => btn.addEventListener('click', async () => {
@@ -954,7 +994,8 @@ function initAdminUsers() {
           openDetail(uid, email);
         } catch (err) { toast(err.message, true); }
       }));
-      $('#ud-save-role').addEventListener('click', async () => {
+      const saveRole = $('#ud-save-role');
+      if (saveRole) saveRole.addEventListener('click', async () => {
         try {
           await api('/admin/users/' + uid, { method: 'PATCH', body: { role: $('#ud-role').value } });
           toast('角色已更新');
@@ -995,7 +1036,7 @@ function initAdminSessions() {
   async function load() {
     showErr('#sess-error', '');
     try {
-      const res = await api(`/admin/sessions?uid=${encodeURIComponent(state.uid)}&limit=${state.limit}&offset=${state.offset}`);
+      const res = await api(`/admin/sessions?uid=${encodeURIComponent(state.uid)}${appFilter()}&limit=${state.limit}&offset=${state.offset}`);
       state.total = res.total;
       $('#sess-total').textContent = `共 ${res.total} 条活跃会话`;
       $('#sess-page').textContent = `${state.offset + 1}–${state.offset + res.items.length} / ${res.total}`;
@@ -1041,6 +1082,12 @@ function initAdminSessions() {
   $('#sess-reset').addEventListener('click', () => { $('#sess-uid').value = ''; state.uid = ''; state.offset = 0; load(); });
   $('#sess-prev').addEventListener('click', () => { state.offset = Math.max(0, state.offset - state.limit); load(); });
   $('#sess-next').addEventListener('click', () => { state.offset += state.limit; load(); });
+  // 项目切换：重取当前页数据（换 app 过滤器不整页刷新），内容区换用 swapIn
+  document.addEventListener('appscopechange', e => {
+    e.preventDefault();
+    state.offset = 0;
+    load().then(() => swapIn($('.table-wrap')));
+  });
   load();
 }
 
@@ -1062,6 +1109,9 @@ function initAdminAudit() {
     if (from) p.set('from', String(new Date(from + 'T00:00:00').getTime()));
     const to = $('#audit-to').value;
     if (to) p.set('to', String(new Date(to + 'T23:59:59').getTime()));
+    // 项目切换器的 app 过滤器（?app=，空 = 全部/全部授权）
+    const app = new URLSearchParams(location.search).get('app');
+    if (app) p.set('app', app);
     p.set('limit', String(state.limit));
     p.set('offset', String(state.offset));
     return p.toString();
@@ -1109,6 +1159,11 @@ function initAdminAudit() {
   });
   $('#audit-prev').addEventListener('click', () => { state.offset = Math.max(0, state.offset - state.limit); load(); });
   $('#audit-next').addEventListener('click', () => { state.offset += state.limit; load(); });
+  document.addEventListener('appscopechange', e => {
+    e.preventDefault();
+    state.offset = 0;
+    load().then(() => swapIn($('.table-wrap')));
+  });
   load();
 }
 
@@ -1216,7 +1271,7 @@ function initAdminAI() {
     showErr('#ai-error', '');
     const days = $('#ai-days').value;
     try {
-      const rep = await api('/admin/ai-usage?days=' + encodeURIComponent(days));
+      const rep = await api('/admin/ai-usage?days=' + encodeURIComponent(days) + appFilter());
       const q = rep.quota;
       $('#q-rate').textContent = q.perMinute + ' 次';
       $('#q-conc').textContent = q.concurrency + ' 路';
@@ -1251,6 +1306,161 @@ function initAdminAI() {
   }
 
   $('#ai-days').addEventListener('change', load);
+  document.addEventListener('appscopechange', e => {
+    e.preventDefault();
+    load().then(() => swapIn($('.card:last-of-type')));
+  });
+  load();
+}
+
+/* ---------- 后台：角色管理（super only） ---------- */
+function initAdminRoles() {
+  const body = $('#roles-body');
+  if (!body) return;
+  const state = { query: '', offset: 0, limit: 20, total: 0 };
+  const APPS = ['calorie-diary', 'expense-diary'];
+
+  // 确认弹窗：一次挂一个待执行动作，确认后走 reauth 闸（api() 401 自动弹重验）
+  let pending = null;
+  function confirmAction(title, desc, fn) {
+    pending = fn;
+    $('#role-dlg-title').textContent = title;
+    $('#role-dlg-desc').textContent = desc;
+    showErr('#role-dlg-error', '');
+    openDialog($('#role-dialog'));
+  }
+  $('#role-dlg-cancel').addEventListener('click', () => { pending = null; closeDialog($('#role-dialog')); });
+  $('#role-dlg-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const fn = pending;
+    pending = null;
+    closeDialog($('#role-dialog'));
+    if (!fn) return;
+    try {
+      await fn();
+      toast('已生效');
+      await load();
+      openDetail(lastDetail.uid, lastDetail.email);
+    } catch (err) { toast(err.message, true); }
+  });
+
+  let lastDetail = { uid: 0, email: '' };
+
+  async function load() {
+    showErr('#roles-error', '');
+    try {
+      const res = await api(`/admin/roles?query=${encodeURIComponent(state.query)}&limit=${state.limit}&offset=${state.offset}`);
+      state.total = res.total;
+      $('#roles-total').textContent = `共 ${res.total} 个账号`;
+      $('#roles-page').textContent = `${state.offset + 1}–${state.offset + res.items.length} / ${res.total}`;
+      $('#roles-prev').disabled = state.offset <= 0;
+      $('#roles-next').disabled = state.offset + res.items.length >= res.total;
+      body.innerHTML = '';
+      if (!res.items.length) {
+        body.innerHTML = '<tr><td colspan="5" class="empty">暂无记录</td></tr>';
+        return;
+      }
+      res.items.forEach(u => {
+        const roleBadge = u.role === 'super'
+          ? '<span class="badge on">super</span>'
+          : (u.role === 'admin' ? '<span class="badge on">admin</span>' : '<span class="badge">user</span>');
+        const scopeBadges = (u.scopes || []).map(s => `<span class="badge">${esc(appLabel(s))}</span>`).join('') ||
+          (u.role === 'user' ? '' : '<span class="badge warn">无应用授权</span>');
+        const tr = node(`
+          <tr>
+            <td class="wrap-cell">${esc(u.email)}</td>
+            <td class="mono">${esc(u.uid)}</td>
+            <td>${roleBadge}</td>
+            <td>${scopeBadges}</td>
+            <td><button type="button" class="btn small">管理</button></td>
+          </tr>`);
+        tr.querySelector('button').addEventListener('click', () => openDetail(u.uid, u.email));
+        body.appendChild(tr);
+      });
+    } catch (err) {
+      showErr('#roles-error', err.message);
+      body.innerHTML = '<tr><td colspan="5" class="empty">读取失败</td></tr>';
+    }
+  }
+
+  async function openDetail(uid, email) {
+    lastDetail = { uid, email };
+    const panel = $('#role-detail');
+    const wasHidden = panel.classList.contains('hidden');
+    panel.classList.remove('hidden');
+    if (wasHidden) swapIn(panel);
+    $('#rd-title').textContent = email;
+    $('#rd-body').innerHTML = '<div class="empty">读取中…</div>';
+    panel.scrollIntoView({ block: 'nearest' });
+    try {
+      const res = await api(`/admin/roles?query=${encodeURIComponent(String(uid))}&limit=5`);
+      const me = (res.items || []).find(x => x.uid === uid);
+      if (!me) { $('#rd-body').innerHTML = '<div class="empty">该用户不存在</div>'; return; }
+      renderDetail(me);
+    } catch (err) {
+      $('#rd-body').innerHTML = `<p class="err">${esc(err.message)}</p>`;
+    }
+  }
+
+  function renderDetail(me) {
+    const isSuper = me.role === 'super';
+    const chips = APPS.map(app => {
+      const granted = (me.scopes || []).indexOf(app) >= 0;
+      return `<span class="item">
+        <span class="grow"><span class="title">${esc(appLabel(app))}</span><br>
+        <span class="meta">${granted ? '已授权' : '未授权'}</span></span>
+        <button type="button" class="btn small ${granted ? 'danger' : 'primary'}" data-app="${esc(app)}" data-op="${granted ? 'revoke' : 'grant'}">
+          ${granted ? '回收' : '授予'}
+        </button>
+      </span>`;
+    }).join('');
+    const roleRow = isSuper
+      ? `<p class="hint">平台管理员管全部应用与全局配置${me.uid === window.__meUid ? '；你是最后一个平台管理员，不能降级自己' : ''}。</p>`
+      : `<div class="row" style="gap:8px;flex-wrap:wrap">
+          <span class="dim">平台角色</span>
+          <button type="button" class="btn small" id="rd-promote" ${me.uid === window.__meUid ? 'disabled' : ''}>升为 super</button>
+          <span class="hint">app-admin 无任何授予权；授予应用会自动把普通用户提为 admin。</span>
+        </div>`;
+    $('#rd-body').innerHTML = `
+      <h3>应用授权</h3>
+      <div class="list">${isSuper ? '<div class="empty">平台管理员无需按应用授权</div>' : chips}</div>
+      <h3 style="margin-top:14px">平台角色</h3>
+      ${roleRow}`;
+    if (!isSuper) {
+      $$('#rd-body [data-app]').forEach(btn => btn.addEventListener('click', () => {
+        const app = btn.dataset.app;
+        const op = btn.dataset.op;
+        confirmAction(
+          op === 'grant' ? '授予应用管理员' : '回收应用管理员',
+          op === 'grant'
+            ? `将「${appLabel(app)}」的管理权授予该用户（自动提为 admin）。`
+            : `回收「${appLabel(app)}」的管理权；全部应用都回收后，该用户的 admin 角色会降回 user。`,
+          () => api(`/admin/roles/${me.uid}/scope`, { method: 'POST', body: { app, op } }));
+      }));
+      const promote = $('#rd-promote');
+      if (promote) promote.addEventListener('click', () => {
+        confirmAction('升为平台管理员', 'super 可管理全部应用、用户目录、角色与全局配置。', () =>
+          api(`/admin/roles/${me.uid}/role`, { method: 'POST', body: { role: 'super' } }));
+      });
+    } else if (me.uid !== window.__meUid) {
+      const demote = node('<div class="row" style="gap:8px;margin-top:8px"><button type="button" class="btn small danger" id="rd-demote">降为 admin</button></div>');
+      $('#rd-body').appendChild(demote);
+      $('#rd-demote').addEventListener('click', () => {
+        confirmAction('降为 app-admin', '降级后该用户只剩已授予应用的管理权（super 不带应用授权，降级后为零权限 admin）。', () =>
+          api(`/admin/roles/${me.uid}/role`, { method: 'POST', body: { role: 'admin' } }));
+      });
+    }
+  }
+
+  $('#rd-close').addEventListener('click', () => $('#role-detail').classList.add('hidden'));
+  $('#roles-search-form').addEventListener('submit', e => {
+    e.preventDefault();
+    state.query = $('#roles-query').value.trim();
+    state.offset = 0;
+    load();
+  });
+  $('#roles-prev').addEventListener('click', () => { state.offset = Math.max(0, state.offset - state.limit); load(); });
+  $('#roles-next').addEventListener('click', () => { state.offset += state.limit; load(); });
   load();
 }
 
@@ -1305,6 +1515,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireReauth();
   wireTabs();
   initAdminGuard();
+  initAppSwitch();
   initLogin();
   initConsole();
   initSessions();
@@ -1312,6 +1523,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSecurity();
   initAccount();
   initAdminUsers();
+  initAdminRoles();
   initAdminSessions();
   initAdminAudit();
   initAdminConfig();
