@@ -159,11 +159,26 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 		writeResult(w, map[string]bool{"ok": true}, revErr)
 	}))
 	// 退出其它设备：只动会话层（不 bump token_version），当前 token 照用。
-	mux.Handle("POST /api/sessions/revoke-others", authedLimited("session-revoke-others", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+	// 网页（cookie）调用再要一道 15 分钟强认证窗（reauthThen，ASVS V7.5.1）——
+	// 这是批量踢人的高危动作；Bearer 老客户端不受影响（reauthThen 只对 ViaCookie 生效）。
+	mux.Handle("POST /api/sessions/revoke-others", authedLimited("session-revoke-others", 10, reauthThen(authSvc, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		// 审计带上本次实际踢掉的台数（先数后踢）：批量动作的取证要看「踢了几台」。
+		count := 0
+		if list, lerr := authSvc.ListSessions(c.UID, c.SID); lerr == nil {
+			for _, it := range list {
+				if !it.Current {
+					count++
+				}
+			}
+		}
 		revErr := authSvc.RevokeOtherSessions(c.UID, c.SID)
-		auditRoute(authSvc, auth.AuditSessionKick, &c, r, map[string]string{"scope": "others"}, revErr)
+		auditRoute(authSvc, auth.AuditSessionKick, &c, r, map[string]string{
+			"scope": "others",
+			"count": strconv.Itoa(count),
+		}, revErr)
+		// 回执形状保持 {ok:true} 一字不变（老端点契约）；踢掉的台数只进审计
 		writeResult(w, map[string]bool{"ok": true}, revErr)
-	}))
+	})))
 
 	// ---- 用户档案（昵称 / 头像色 / 头像图）----
 	// 三件套收归本服务统一存取（OIDC UserInfo 同款思路：档案归身份提供方），

@@ -41,6 +41,7 @@ function relTime(ms) {
   const hour = Math.floor(min / 60);
   if (hour < 24) return `${hour} 小时前`;
   const day = Math.floor(hour / 24);
+  if (day === 1) return '昨天';
   if (day < 30) return `${day} 天前`;
   return fmtTime(ms);
 }
@@ -359,7 +360,6 @@ async function initConsole() {
     $('#me-email').textContent = me.email;
     if (me.role === 'admin') {
       $('#role-badge').hidden = false;
-      $('#enter-admin').classList.remove('hidden');
     }
     $('#stat-password').textContent = me.passwordSet ? '已设置' : '未设置（该账号靠验证码或 Passkey 登录）';
 
@@ -378,12 +378,37 @@ async function initConsole() {
   });
 }
 
-/* ---------- 已登录设备 ---------- */
+/* ---------- 登录会话 ---------- */
+/* 设备类型图标（lucide 同款路径，内联进 app.js 是因为列表行由 JS 拼）：
+   按服务端 UA 解析出的设备标签映射——移动系统出 smartphone、桌面系统出 laptop、
+   认不出的（脚本/残缺 UA）退回通用设备图标，不猜。 */
+const DEVICE_ICONS = {
+  smartphone: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect width="14" height="20" x="5" y="2" rx="2" ry="2" /><path d="M12 18h.01" /></svg>',
+  laptop: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16" /></svg>',
+  monitor: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></svg>',
+  device: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8" /><path d="M10 19v-3.96 3.15" /><path d="M7 19h5" /><rect width="6" height="10" x="16" y="12" rx="2" /></svg>',
+};
+
+function deviceIcon(device) {
+  const d = String(device || '');
+  if (/Android|iPhone|iPad|iOS|Mobile/i.test(d)) return DEVICE_ICONS.smartphone;
+  if (/Windows|macOS|Mac OS X|Linux|ChromeOS|Ubuntu/i.test(d)) return DEVICE_ICONS.laptop;
+  return DEVICE_ICONS.device;
+}
+
 function initSessions() {
   const list = $('#session-list');
   if (!list) return;
   let rows = [];
-  let pending = { mode: 'one', id: 0, label: '' };
+  let pending = { mode: 'one', id: 0, label: '', count: 0 };
+
+  /* 本设备置顶（不可踢），其余按最近活跃倒序 */
+  function ordered() {
+    const me = rows.filter(r => r.current);
+    const rest = rows.filter(r => !r.current)
+      .sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
+    return me.concat(rest);
+  }
 
   async function load() {
     try {
@@ -393,25 +418,28 @@ function initSessions() {
       return;
     }
     if (!rows.length) {
-      list.innerHTML = '<div class="empty">暂无记录</div>';
+      list.innerHTML = '<div class="empty">只有当前设备处于登录状态。</div>';
       return;
     }
     list.innerHTML = '';
-    rows.forEach(it => {
+    ordered().forEach(it => {
       const el = node(`
-        <div class="item">
+        <div class="item${it.current ? ' current' : ''}" data-id="${esc(it.id)}">
+          <span class="ico-wrap">${deviceIcon(it.device)}</span>
           <span class="grow">
             <span class="title">${esc(it.device || '未知设备')}</span>
-            ${it.current ? '<span class="badge on">本机</span>' : ''}
+            ${it.current ? '<span class="badge on">本设备</span>' : ''}
             <br><span class="meta">${esc(appLabel(it.app))} · ${esc(it.ip)} · 最近活跃 ${esc(relTime(it.lastSeenAt))}</span>
           </span>
-          ${it.current ? '' : '<button type="button" class="btn small danger">踢出</button>'}
+          ${it.current ? '' : '<button type="button" class="btn small danger">退出它</button>'}
         </div>`);
       const kick = el.querySelector('button');
       if (kick) {
         kick.addEventListener('click', () => {
-          pending = { mode: 'one', id: it.id, label: it.device };
-          $('#kick-desc').textContent = `将「${it.device}」移出已登录设备，它下次请求时会退出登录。`;
+          pending = { mode: 'one', id: it.id, label: it.device, count: 1 };
+          $('#kick-title').textContent = '退出这台设备';
+          $('#kick-desc').textContent = `将「${it.device}」移出登录会话，它下次请求时会退出登录。`;
+          $('#kick-ok').textContent = '退出设备';
           openDialog($('#kick-dialog'));
         });
       }
@@ -420,32 +448,41 @@ function initSessions() {
   }
 
   $('#revoke-others').addEventListener('click', () => {
-    pending = { mode: 'others', id: 0, label: '' };
     const others = rows.filter(r => !r.current).length;
+    pending = { mode: 'others', id: 0, label: '', count: others };
+    $('#kick-title').textContent = '退出其它所有设备';
     $('#kick-desc').textContent = others
-      ? `将退出除本机外的 ${others} 台设备，本机保持登录。`
+      ? `将退出除「本设备」外的 ${others} 台设备（会话数，同一台设备可能占多条），本机保持登录。`
       : '没有其它设备需要退出。';
+    $('#kick-ok').textContent = others ? '全部退出' : '知道了';
     openDialog($('#kick-dialog'));
   });
   $('#kick-cancel').addEventListener('click', () => closeDialog($('#kick-dialog')));
   $('#kick-ok').addEventListener('click', async () => {
     const dlg = $('#kick-dialog');
+    if (pending.mode === 'others' && !pending.count) { closeDialog(dlg); return; }
+    const okBtn = $('#kick-ok');
+    setBusy(okBtn, true);
     try {
       if (pending.mode === 'one') {
         await api('/api/sessions/' + pending.id, { method: 'DELETE' });
-        const kickedSelf = rows.some(r => r.id === pending.id && r.current);
         closeDialog(dlg);
-        if (kickedSelf) { location.href = '/web/login'; return; }
-        toast('已踢出该设备');
+        // 行淡出（opacity 过渡）后整表重刷，视觉上是「这台走了」而不是突然消失
+        const row = list.querySelector(`.item[data-id="${pending.id}"]`);
+        if (row) row.classList.add('leaving');
+        toast('已退出该设备');
       } else {
+        // 服务端强制 reauth（15 分钟强认证窗），401 会自动弹「重新验证」框再重试
         await api('/api/sessions/revoke-others', { method: 'POST', body: {} });
         closeDialog(dlg);
-        toast('已退出其它设备');
+        toast(`已退出其它 ${pending.count} 台设备`);
       }
       await load();
     } catch (err) {
       closeDialog(dlg);
       toast(err.message, true);
+    } finally {
+      setBusy(okBtn, false);
     }
   });
 
