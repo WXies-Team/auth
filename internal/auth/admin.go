@@ -434,8 +434,8 @@ const adminMaxConfigKeyLen = 64
 // 的脏键（现有键 mail_*/hook_*/llm_*/fcm*/ai_* 全部合规）。
 var configKeyCharset = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
-// aiUsageMergedAtKey 是合并标记键：由 scripts/migrate-ai-usage-to-auth.sh 写入，
-// **是防全站 AI 计数翻倍的唯一护栏**（见仓 AGENTS）。配置中心对它只读。
+// aiUsageMergedAtKey 是合并标记键：由一次性 AI 用量合并迁移写入（迁移已完成，
+// 脚本已移除），**是防全站 AI 计数翻倍的唯一护栏**（见仓 AGENTS）。配置中心对它只读。
 const aiUsageMergedAtKey = "ai_usage_merged_at"
 
 // AdminSetConfig 写一个白名单键：空串 = 删键（「清空提交=不改、单独清除按钮」

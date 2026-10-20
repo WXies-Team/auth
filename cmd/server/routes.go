@@ -167,7 +167,7 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 
 	// ---- 用户档案（昵称 / 头像色 / 头像图）----
 	// 三件套收归本服务统一存取（OIDC UserInfo 同款思路：档案归身份提供方），
-	// 两个日记 App 的 profiles 资料列由 scripts/migrate-profile-to-auth.sh 并入后，
+	// 两个日记 App 的 profiles 资料列已由一次性迁移并入（迁移已完成，脚本已移除），
 	// 客户端改走这里读写。Bearer 与 cookie 会话都走 authed：cookie 的非 GET 还吃
 	// withUID 里的 CSRF 闸，Bearer 不受影响（与既有老端点同款）。
 	// 读写各占一个按 uid 的限流键（authedLimited 内按 scope:uid 计数），互不挤兑；

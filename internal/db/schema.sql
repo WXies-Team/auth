@@ -7,7 +7,8 @@
 
 -- 账号表。id 是 **7 位随机整数**（1,000,000~9,999,999，注册时由服务生成，
 -- **不自增**，见 internal/auth/uid.go 的 newUserID）——随机取号同样不暴露注册顺序，
--- 且可口播可手输；2026-10 前为 63 位雪花 id，存量行由 scripts/migrate-uid-7digit.sh 一次性改写。
+-- 且可口播可手输；2026-10 前为 63 位雪花 id，存量行已由一次性迁移改写
+-- （迁移已完成，脚本已移除；映射表由主 agent 清库）。
 -- password_hash 允许 NULL：预留给纯验证码登录的账号形态（P0 的注册路径恒写入）。
 CREATE TABLE IF NOT EXISTS users (
     id            BIGINT       NOT NULL,
@@ -73,8 +74,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
 -- 用户档案三件套（昵称 / 头像色 / 头像图）：OIDC UserInfo 同款思路——**档案归身份
--- 提供方**，两个日记 App 各自的 profiles 资料列由 scripts/migrate-profile-to-auth.sh
--- 一次性并入这里，之后经 GET/PUT /api/profile 读写（见 internal/auth/profile.go）。
+-- 提供方**，两个日记 App 各自的 profiles 资料列已由一次性迁移并入这里
+-- （迁移已完成，脚本已移除；映射表由主 agent 清库），
+-- 之后经 GET/PUT /api/profile 读写（见 internal/auth/profile.go）。
 --   nickname     空串 = 未设置（VARCHAR(64) 按字符计，与日记库同宽）
 --   avatar_color 颜板索引，0 = 默认色
 --   avatar_image **base64 原文**（无 data: 前缀、无换行——与日记库 profiles.avatar_image

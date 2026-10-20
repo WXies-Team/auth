@@ -9,8 +9,8 @@
 //     每分钟 ai_rate_per_minute 次与 ai_concurrency 个在途槽——统一预算的意义就是
 //     换个 App 不能多打。
 //  2. 日额度 **按 uid 与 global 两层、跨 App 相加**：user 层按 (uid, day) 汇总两 App
-//     的消耗，global 层按 (day) 全站汇总。合并历史用量由
-//     scripts/migrate-ai-usage-to-auth.sh 完成，合并后两层都从「统一预算」起算。
+//     的消耗，global 层按 (day) 全站汇总。合并历史用量已由一次性迁移完成
+//     （迁移已完成，脚本已移除；映射表由主 agent 清库），合并后两层都从「统一预算」起算。
 //  3. day 口径与 calorie 逐字一致：time.Now().Format("2006-01-02")，服务器本地时区，
 //     不做时区换算——auth 与两个日记服务同机部署，同一次「今天」。
 //  4. weight 语义照现状：日记路由按请求体是否含图片判 1 或 2（图片折算 2 次），

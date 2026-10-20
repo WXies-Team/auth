@@ -16,8 +16,9 @@ import (
 )
 
 // 档案三件套（昵称 / 头像色 / 头像图）收归本服务统一存取——OIDC UserInfo 同款思路：
-// 档案是身份的一部分，归身份提供方；两个日记 App 的 profiles 资料列由
-// scripts/migrate-profile-to-auth.sh 并入 user_profile，之后一律走本文件的读写。
+// 档案是身份的一部分，归身份提供方；两个日记 App 的 profiles 资料列已由一次性迁移
+// 并入 user_profile（迁移已完成，脚本已移除；映射表由主 agent 清库），
+// 之后一律走本文件的读写。
 
 const (
 	// maxNicknameRunes 是昵称上限（按**字符**计），与日记库 profiles.nickname 的
