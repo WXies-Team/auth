@@ -129,6 +129,13 @@ ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 - An invalid `webauthn_opaque_origins` value logs an Error and **degrades to web-only
   origins** instead of refusing to start (login availability beats an optional feature);
   after touching that key, read the startup log for the downgrade line.
+- **App origins are matched as exact strings — list every encoding variant of each cert
+  hash**: Android's `clientDataJSON` origin uses base64**url** (`-`/`_`), while hashes
+  computed from hex are usually standard base64 (`+`/`/`), and padding practice varies by
+  Play-services build — the key must hold std/url-safe × padded/unpadded (4 per cert).
+  A missing variant surfaces only at `register/login/finish` as `Error validating origin`
+  (the ceremony itself completes on-device first, so the failure looks app-side).
+  Key is startup-loaded: update `app_config`, then restart the `auth` program.
 - Don't mass-run `gofmt`: Go 1.27's gofmt wants a space after `//` before a full-width
   parenthesis while this repo's comments don't — a blanket run rewrites every doc comment
   and drowns the diff (CI only runs build/vet/test, never gofmt).
