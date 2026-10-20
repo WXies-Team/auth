@@ -248,7 +248,8 @@ type WebReauthRequest struct {
 	TOTPCode string `json:"totpCode"`
 }
 
-// PasskeyFinishRequest 是 /webauthn/*/finish 的请求体：ceremonyId 是我们发的，
+// PasskeyFinishRequest 是 /webauthn/*/finish 的请求体：ceremonyId 是我们发的
+//（53 位 JS 安全随机——63 位雪花经浏览器 JSON.parse 会被抹圆，见 passkey.go ceremonyID），
 // response 是浏览器原样回的 PublicKeyCredential JSON（透传给库解析）。
 type PasskeyFinishRequest struct {
 	CeremonyID int64           `json:"ceremonyId"`

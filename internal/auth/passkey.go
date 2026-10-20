@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
@@ -142,21 +143,52 @@ func (s *Service) passkeyUserFor(uid int64) (*passkeyUser, error) {
 
 // ---- 仪式中间态 ----
 
+// ceremonyID 生成 ≤2^53 的随机仪式 id：ceremonyId 要经浏览器 JSON.parse 往返，
+// 而 JS number 只有 53 位精度——63 位雪花会被抹圆（实测 …734016 → …734000），
+// finish 查无此行恒 404「验证请求已过期」（网页 Passkey 自 B 批起从未真正通过，
+// Kotlin Long 无损故 App 端不受影响）。行只活 challengeTTL，53 位空间 9e15，
+// 撞 UNIQUE 重摇即可（复用 isDuplicateUID 的 1062 判别）。
+func ceremonyID() (int64, error) {
+	var b [8]byte
+	for attempt := 0; attempt < 10; attempt++ {
+		if _, err := rand.Read(b[:]); err != nil {
+			return 0, fmt.Errorf("生成仪式 id: %w", err)
+		}
+		v := int64(binary.BigEndian.Uint64(b[:]) & ((1 << 53) - 1))
+		if v > 0 {
+			return v, nil
+		}
+	}
+	return 0, errors.New("生成仪式 id：连续 10 次未取到非零值")
+}
+
 // saveChallenge 把 SessionData 整体 JSON 落库（库规定唯一持久化形态），回 ceremonyId。
 // JSON 而非手拼字段：SessionData.Extensions 的序列化形态随库版本漂移，pin 死版本 +
-// 整体存取，升级时旧行一起清（见风险清单第 4 条）。
+// 整体存取，升级时旧行一起清（见风险清单第 4 条）。id 用 JS 安全随机（见 ceremonyID）。
 func (s *Service) saveChallenge(kind string, userID *int64, sd *webauthn.SessionData) (int64, error) {
 	raw, err := json.Marshal(sd)
 	if err != nil {
 		return 0, fmt.Errorf("序列化仪式数据: %w", err)
 	}
 	now := time.Now()
-	id := s.ids.Generate().Int64()
-	if _, err := s.pool.ExecContext(context.Background(),
-		`INSERT INTO webauthn_challenges (id, kind, user_id, session_data, expires_at, created_at)
-		 VALUES (?,?,?,?,?,?)`,
-		id, kind, userID, string(raw), now.Add(challengeTTL).UnixMilli(), now.UnixMilli()); err != nil {
-		return 0, fmt.Errorf("落仪式中间态: %w", err)
+	id, err := ceremonyID()
+	if err != nil {
+		return 0, err
+	}
+	for attempt := 0; ; attempt++ {
+		_, err := s.pool.ExecContext(context.Background(),
+			`INSERT INTO webauthn_challenges (id, kind, user_id, session_data, expires_at, created_at)
+			 VALUES (?,?,?,?,?,?)`,
+			id, kind, userID, string(raw), now.Add(challengeTTL).UnixMilli(), now.UnixMilli())
+		if err == nil {
+			break
+		}
+		if attempt >= 5 || !isDuplicateUID(err, id) {
+			return 0, fmt.Errorf("落仪式中间态: %w", err)
+		}
+		if id, err = ceremonyID(); err != nil {
+			return 0, err
+		}
 	}
 	// 顺手清过期行（表常年只有个位数行，全表删可忽略）
 	_, _ = s.pool.ExecContext(context.Background(),

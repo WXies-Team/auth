@@ -327,3 +327,23 @@ func TestDeletePasskeyConcurrentKeepsOneLoginMethod(t *testing.T) {
 		t.Errorf("最后应恰好剩一把，得到 %d (err=%v)", remain, err)
 	}
 }
+
+// TestCeremonyIDJSSafe 仪式 id 必须过 JS 的 53 位精度关：ceremonyId 经浏览器
+// JSON.parse 往返，63 位雪花会被抹圆（…734016→…734000）致 finish 恒 404。
+func TestCeremonyIDJSSafe(t *testing.T) {
+	const maxSafe = int64(1)<<53 - 1
+	seen := map[int64]bool{}
+	for i := 0; i < 200; i++ {
+		id, err := ceremonyID()
+		if err != nil {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+		if id <= 0 || id > maxSafe {
+			t.Fatalf("id %d 超出 JS 安全区 (0, 2^53)", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) < 190 {
+		t.Fatalf("200 次里碰撞过多: %d", len(seen))
+	}
+}
