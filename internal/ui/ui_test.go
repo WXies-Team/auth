@@ -191,6 +191,151 @@ func TestNoExternalResources(t *testing.T) {
 		}
 	}
 }
+
+// 动效系统（miuix「丝滑统一」）：全站唯一 easing + 时长梯度令牌、入场/弹入/转圈关键帧、
+// reduced-motion 一刀切（动画与过渡都关，且清零 animation-delay）。
+func TestMotionSystem(t *testing.T) {
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	css := string(cssBytes)
+
+	// 1. 统一 easing 与时长令牌在 :root 里
+	rule, ok := cssRule(css, ":root")
+	if !ok {
+		t.Fatal("style.css 缺 :root 规则")
+	}
+	for _, frag := range []string{"--ease: cubic-bezier(.2, 0, 0, 1)", "--dur-1", "--dur-2", "--dur-3"} {
+		if !strings.Contains(rule, frag) {
+			t.Errorf(":root 缺动效令牌 %q（全站唯一 easing/时长梯度）", frag)
+		}
+	}
+
+	// 2. 关键帧齐备：入场（12px/4px 两档）、淡入、对话框弹入、转圈、徽标浮现
+	for _, kf := range []string{
+		"@keyframes rise-in", "@keyframes rise-in-sm", "@keyframes fade-in",
+		"@keyframes dlg-in", "@keyframes spin", "@keyframes pop-in",
+	} {
+		if !strings.Contains(css, kf) {
+			t.Errorf("style.css 缺 %s", kf)
+		}
+	}
+
+	// 3. 只动 transform/opacity：关键帧体内不得出现 width/height/margin/top/left 这类 layout 属性
+	for _, banned := range []string{
+		"height:", "width:", "margin-", "top:", "left:", "padding:",
+	} {
+		for _, block := range keyframeBodies(css) {
+			if strings.Contains(block, banned) {
+				t.Errorf("关键帧里出现 layout 属性 %q（只许 transform/opacity，防抖动）：%s", banned, block)
+				break
+			}
+		}
+	}
+
+	// 4. 入场错峰与浮层豁免
+	for _, want := range []string{
+		".content > *:nth-child(3) { animation-delay: 210ms; }",
+		".content > #toast, .content > dialog { animation: none; }",
+		"tbody tr:nth-child(-n+10)",
+		".item.leaving",
+		".dlg[open]",
+		".btn[aria-busy=true]::after",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("style.css 缺动效结构 %q", want)
+		}
+	}
+
+	// 5. reduced-motion 一刀切：动画与过渡都关，且 delay 归零（否则错峰会让内容迟到）
+	rms := reducedMotionBlock(css)
+	if rms == "" {
+		t.Fatal("style.css 缺 prefers-reduced-motion 媒体查询")
+	}
+	for _, frag := range []string{
+		"transition-duration: 0.001ms !important",
+		"animation-duration: 0.001ms !important",
+		"animation-delay: 0ms !important",
+		".btn:active, .tab:active { transform: none; }",
+	} {
+		if !strings.Contains(rms, frag) {
+			t.Errorf("reduced-motion 块缺 %q", frag)
+		}
+	}
+
+	// 6. JS 侧同一套 easing，且动画入口都尊重用户设置
+	jsBytes, err := files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	js := string(jsBytes)
+	for _, want := range []string{
+		"cubic-bezier(.2, 0, 0, 1)",
+		"(prefers-reduced-motion: reduce)",
+		"function swapIn(el)",
+		"function popIn(el)",
+		"function fadeOutRow(el, done)",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js 缺动效设施 %q", want)
+		}
+	}
+}
+
+// keyframeBodies 抽出每个 @keyframes 的规则体（粗粒度：只要大括号内的文本）。
+func keyframeBodies(css string) []string {
+	var out []string
+	for i := 0; ; {
+		j := strings.Index(css[i:], "@keyframes")
+		if j < 0 {
+			return out
+		}
+		start := i + j
+		open := strings.Index(css[start:], "{")
+		if open < 0 {
+			return out
+		}
+		depth, k := 0, start+open
+		for ; k < len(css); k++ {
+			if css[k] == '{' {
+				depth++
+			} else if css[k] == '}' {
+				depth--
+				if depth == 0 {
+					break
+				}
+			}
+		}
+		out = append(out, css[start:k])
+		i = k
+	}
+}
+
+// reducedMotionBlock 取 prefers-reduced-motion 那个媒体查询块的全文。
+func reducedMotionBlock(css string) string {
+	i := strings.Index(css, "@media (prefers-reduced-motion: reduce)")
+	if i < 0 {
+		return ""
+	}
+	open := strings.Index(css[i:], "{")
+	if open < 0 {
+		return ""
+	}
+	depth, k := 0, i+open
+	for ; k < len(css); k++ {
+		if css[k] == '{' {
+			depth++
+		} else if css[k] == '}' {
+			depth--
+			if depth == 0 {
+				return css[i : k+1]
+			}
+		}
+	}
+	return css[i:]
+}
+
 // 品牌区两处（顶栏 `.brand` 与登录页 `.brand-lg`）**同源同款 = favicon.svg 的裸蓝
 // 矢量**；全站不得残留任何带底的 logo 图；图标与文字的垂直居中要有双保险
 //（flex 的 align-items:center 是主保险，inline 盒子的 vertical-align:middle 是兜底）。
