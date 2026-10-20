@@ -5,7 +5,8 @@
      深色整套（prefers-color-scheme）：#000 / #242424 / #E6FFFFFF / #393939 / #434343 / #2B3B54。
    字阶照 miuix：页面标题 20~24px **Normal 字重**（层次靠字号与颜色，不靠加粗）、
    正文 16、说明 13~14；按钮圆角 16、高 ≥40（触控设备 44+）。
-   动效只用 opacity/transform，150ms 内；reduced-motion 下全部关停。 */
+   动效见文件末「动效系统」段：统一 easing cubic-bezier(.2,0,0,1)、单段 150~250ms、
+   只动 transform/opacity（绝不碰 layout 属性）；reduced-motion 一刀切全关。 */
 :root {
   --primary: #3482FF;
   --primary-ink: #ffffff;
@@ -25,6 +26,13 @@
   --focus: #3482FF;
   --radius-card: 24px;
   --radius-ctl: 16px;
+  /* 动效令牌：全站唯一 easing 与时长梯度（见文件末「动效系统」段） */
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  --dur-1: 150ms;   /* 微交互：按压、颜色、焦点环 */
+  --dur-2: 180ms;   /* 区块切换、行退场 */
+  --dur-3: 200ms;   /* 入场、对话框 */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .04), 0 4px 14px rgba(0, 0, 0, .06);
+  --shadow-2: 0 2px 6px rgba(0, 0, 0, .06), 0 10px 28px rgba(0, 0, 0, .08);
   --tap: 40px;            /* 控件下限：40px；触控设备由 @media (pointer:coarse) 抬到 44px */
   --gap: 16px;
   --pad-x: max(16px, env(safe-area-inset-left));
@@ -144,7 +152,8 @@ code { font-family: var(--mono); }
   display: inline-flex; align-items: center; gap: 6px;
   min-height: var(--tap); padding: 0 12px; border-radius: var(--radius-ctl);
   color: var(--dim); text-decoration: none; font-size: 15px;
-  transition: background-color 150ms ease, color 150ms ease;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
 }
 .nav-item:hover { background: var(--card); color: var(--ink); }
 .nav-item.on { color: var(--primary); background: var(--primary-soft); font-weight: 500; }
@@ -173,6 +182,12 @@ code { font-family: var(--mono); }
 .card {
   background: var(--card); border: 1px solid var(--card-line);
   border-radius: var(--radius-card); padding: 20px;
+  transition: transform var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease),
+              border-color var(--dur-2) var(--ease);
+}
+/* 悬停轻抬 2px + 阴影过渡——仅 hover 设备（触屏没有悬停态，不给它） */
+@media (hover: hover) {
+  .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-1); }
 }
 .card h2 { font-size: 17px; font-weight: 500; margin: 0 0 4px; }
 .card h3 { font-size: 15px; font-weight: 500; margin: 16px 0 6px; }
@@ -210,10 +225,14 @@ input[type=text], input[type=email], input[type=password], input[number], select
   width: 100%; min-height: var(--tap); padding: 8px 14px;
   border: 1px solid var(--line); border-radius: var(--radius-ctl);
   background: var(--card); color: var(--ink); font: inherit;
-  transition: border-color 150ms ease;
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
 }
 input:focus-visible, select:focus-visible, a:focus-visible, button:focus-visible {
   outline: 2px solid var(--focus); outline-offset: 2px;
+}
+/* 焦点环本身也带过渡：Tab 移动时环是滑过去的，不是瞬跳 */
+a, button, .tab, .nav-item, input, select {
+  transition: outline-color var(--dur-1) var(--ease), outline-offset var(--dur-1) var(--ease);
 }
 input:disabled { opacity: .6; }
 .err { color: var(--danger-ink); font-size: 13px; margin: 6px 0; }
@@ -227,11 +246,15 @@ input:disabled { opacity: .6; }
   border: 1px solid transparent; border-radius: var(--radius-ctl);
   background: var(--sub-bg); color: var(--sub-ink); font: inherit; font-weight: 400;
   cursor: pointer; text-decoration: none; white-space: nowrap;
-  transition: background-color 150ms ease, transform 150ms ease, opacity 150ms ease;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
+              border-color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease),
+              opacity var(--dur-1) var(--ease), filter var(--dur-1) var(--ease),
+              box-shadow var(--dur-1) var(--ease);
 }
 .btn:hover { filter: brightness(.97); }
 @media (prefers-color-scheme: dark) { .btn:hover { filter: brightness(1.12); } }
-.btn:active { transform: translateY(1px); }
+/* 微反馈：按下轻微缩进（只 transform，不碰 layout） */
+.btn:active { transform: scale(.97); }
 .btn.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); font-weight: 500; }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn.danger { background: var(--danger-bg); color: var(--danger-ink); border-color: var(--danger); }
@@ -239,7 +262,15 @@ input:disabled { opacity: .6; }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--dim); }
 .btn.ghost:hover { background: var(--card); color: var(--ink); }
 .btn.small { min-height: 34px; padding: 0 12px; font-size: 13px; }
-.btn[aria-busy=true] { opacity: .6; pointer-events: none; }
+.btn[aria-busy=true] { opacity: .75; pointer-events: none; }
+/* 加载态：按钮文字后跟一圈转圈（900ms/圈，纯 opacity+transform；不用扫光）。
+   setBusy() 只切 aria-busy，样式全在这里——所有按钮的加载态天然一致。 */
+.btn[aria-busy=true]::after {
+  content: ""; flex: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid currentColor; border-top-color: transparent;
+  animation: spin 900ms linear infinite;
+}
 .btn .ico { width: 16px; height: 16px; }
 @media (pointer: coarse) {
   .btn, input[type=text], input[type=email], input[type=password], select { min-height: 44px; }
@@ -255,9 +286,15 @@ input:disabled { opacity: .6; }
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   background: var(--card); border: 1px solid var(--card-line);
   border-radius: var(--radius-card); padding: 14px 16px;
-  transition: opacity 150ms ease;
+  transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease),
+              border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
-.item.leaving { opacity: 0; }
+/* 退场：淡出 + 轻微下沉（transform，不碰 height/margin —— 不做折叠高度动画防抖动） */
+.item.leaving { opacity: 0; transform: translateY(-4px); }
+/* 悬停轻抬（仅 hover 设备；触屏没有 hover，不给它） */
+@media (hover: hover) {
+  .item:hover { transform: translateY(-2px); box-shadow: var(--shadow-1); }
+}
 .item .grow { flex: 1 1 220px; min-width: 0; }
 .item .title { font-weight: 500; }
 .item .meta { color: var(--dim); font-size: 13px; }
@@ -290,29 +327,34 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
   min-height: var(--tap); padding: 0 12px; border: 0; background: none;
   color: var(--dim); font: inherit; cursor: pointer; border-bottom: 2px solid transparent;
   white-space: nowrap;
+  transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
 }
 .tab[aria-selected=true] { color: var(--primary); border-bottom-color: var(--primary); font-weight: 500; }
+.tab:active { transform: scale(.97); }
 
-/* ---- 对话框 ---- */
+/* ---- 对话框（弹入：scale .96→1 + fade，200ms；遮罩淡入）---- */
 .dlg {
   border: 1px solid var(--line); border-radius: var(--radius-card);
   background: var(--card); color: var(--ink); padding: 22px;
   max-width: 420px; width: calc(100vw - 32px);
 }
-.dlg::backdrop { background: rgba(0, 0, 0, .4); }
+.dlg[open] { animation: dlg-in var(--dur-3) var(--ease) backwards; }
+.dlg::backdrop { background: rgba(0, 0, 0, .4); animation: fade-in var(--dur-3) var(--ease) backwards; }
 .dlg h2 { margin: 0 0 4px; font-size: 18px; font-weight: 500; }
 .dlg form { display: grid; gap: 6px; }
 
-/* ---- 提示条 ---- */
+/* ---- 提示条（滑入 + 淡入；消失淡出）---- */
 .toast {
-  position: fixed; left: 50%; transform: translateX(-50%);
+  position: fixed; left: 50%; transform: translate(-50%, 8px);
   bottom: max(16px, env(safe-area-inset-bottom));
   background: var(--ink); color: var(--canvas);
   padding: 10px 16px; border-radius: 999px; z-index: 30;
-  font-size: 14px; opacity: 0; transition: opacity 150ms ease;
+  font-size: 14px; opacity: 0;
+  transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease);
   max-width: calc(100vw - 32px);
 }
-.toast.show { opacity: 1; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.bad { background: var(--danger); color: #fff; }
 
 /* ---- 二维码与恢复码 ---- */
@@ -335,7 +377,7 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 .bars { display: grid; gap: 6px; }
 .bar-row { display: grid; grid-template-columns: 84px 1fr 48px; gap: 8px; align-items: center; font-size: 13px; }
 .bar-track { background: var(--canvas); border: 1px solid var(--line); border-radius: 8px; height: 16px; overflow: hidden; }
-.bar-fill { height: 100%; background: var(--primary); transition: width 150ms ease; }
+.bar-fill { height: 100%; background: var(--primary); transition: width var(--dur-3) var(--ease); }
 .bar-num { text-align: right; font-family: var(--mono); }
 
 /* ---- 登录页 ---- */
@@ -358,10 +400,91 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
   th, td { padding: 8px 10px; }
 }
 
+/* =====================================================================
+   动效系统（miuix「丝滑统一」口径）
+   ---------------------------------------------------------------------
+   ① 全站唯一 easing = --ease（cubic-bezier(.2,0,0,1)），时长梯度见 :root；
+   ② 只动 transform / opacity —— 绝不碰 width/height/margin/top 等 layout
+      属性（会触发重排 = 抖动），hover 抬升、按压缩进、退场下沉全是位移；
+   ③ 入场交错（顶栏 → 分区导航 → 内容卡片，stagger 70ms），表格行只给
+      首屏前 10 行错峰（长列表不做整表动画）；
+   ④ 所有动画/过渡在 prefers-reduced-motion 下由文件末尾的媒体查询一刀切关
+      （含 animation-delay 清零），交互反馈保留颜色/透明度变化；
+   ⑤ 动画不延迟焦点与点击：入场元素全程可点（opacity 从 0 起但不挡 hit
+      test 之外的交互），对话框/Toast 不做退场动画以免拖慢「关掉」的反馈。
+   ===================================================================== */
+
+/* ---- 关键帧：只声明位移与透明度 ---- */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes rise-in-sm {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes dlg-in {
+  from { opacity: 0; transform: scale(.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+/* 状态徽标/提示浮现：轻缩放进入（保存成功一类的小反馈） */
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ---- ① 入场：顶栏 → 分区导航 → 内容（stagger 70ms；12px 上浮）----
+   .content 自身不再叠加一层淡入（会与子元素的错峰叠成双倍淡入，观感发糊），
+   由下面的直出子元素错峰顶上；#toast 与 dialog 是浮层，不吃入场动画。 */
+.topbar { animation: rise-in var(--dur-3) var(--ease) backwards; }
+.tabnav { animation: rise-in var(--dur-3) var(--ease) 70ms backwards; }
+.sidenav { animation: rise-in var(--dur-3) var(--ease) 70ms backwards; }
+.content > * { animation: rise-in-sm var(--dur-3) var(--ease) 140ms backwards; }
+.content > *:nth-child(2) { animation-delay: 140ms; }
+.content > *:nth-child(3) { animation-delay: 210ms; }
+.content > *:nth-child(4) { animation-delay: 280ms; }
+.content > *:nth-child(5) { animation-delay: 350ms; }
+.content > *:nth-child(n+6) { animation-delay: 400ms; }   /* 再往后不再拖，齐步进 */
+.content > #toast, .content > dialog { animation: none; }
+
+/* 表格首屏错峰：只有前 10 行，第 11 行起不做动画（长列表不整表动） */
+tbody tr:nth-child(-n+10) { animation: rise-in-sm var(--dur-2) var(--ease) backwards; }
+tbody tr:nth-child(1) { animation-delay: 60ms; }
+tbody tr:nth-child(2) { animation-delay: 90ms; }
+tbody tr:nth-child(3) { animation-delay: 120ms; }
+tbody tr:nth-child(4) { animation-delay: 150ms; }
+tbody tr:nth-child(5) { animation-delay: 180ms; }
+tbody tr:nth-child(6) { animation-delay: 210ms; }
+tbody tr:nth-child(7) { animation-delay: 240ms; }
+tbody tr:nth-child(8) { animation-delay: 270ms; }
+tbody tr:nth-child(9) { animation-delay: 300ms; }
+tbody tr:nth-child(10) { animation-delay: 330ms; }
+
+/* ---- ② 区块切换（页内 tab 换面板）：crossfade + 4px 上浮，180ms ----
+   JS 用 WAAPI 给目标面板挂 swapIn()（见 app.js）；这里给无 JS 场景兜底一个 class。 */
+.swap-in { animation: rise-in-sm var(--dur-2) var(--ease) backwards; }
+
+/* ---- ⑥ 状态变化：徽标/提示轻浮现（pop-in，由 JS 加 .pop 触发）---- */
+.pop { animation: pop-in var(--dur-3) var(--ease) backwards; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     transition-duration: 0.001ms !important;
     animation-duration: 0.001ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
   }
+  /* 交互反馈只留颜色/透明度：位移类的按压与悬停抬升一并撤掉。
+     （入场动画时长归零后停在终态即「可见」，无需额外兜底。） */
+  .btn:active, .tab:active { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) and (hover: hover) {
+  .card:hover, .item:hover { transform: none; box-shadow: none; }
 }
