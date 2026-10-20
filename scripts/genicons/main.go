@@ -1,11 +1,13 @@
 package main
 
-// Command genicons 生成本仓全部品牌图形资产（一次性画、可随时重生）：
+// Command genicons 生成本仓全部图形资产（一次性画、可随时重生）。两种画法：
 //
-//	internal/mail/icons/{calorie-diary,expense-diary,auth}.png  三品牌邮件内嵌图（192px = 96@2x）
-//	internal/ui/static/apple-touch-icon.png                     180px（满幅方形，iOS 自套超椭圆蒙版）
-//	internal/ui/static/favicon.ico                              16/32/48 三档
-//	internal/ui/static/favicon.svg                              96px 超椭圆 path 近似
+//	品牌画法（蓝渐变超椭圆底 + 白色矢量）
+//	  internal/mail/icons/{calorie-diary,expense-diary,auth}.png  三品牌邮件内嵌图（192px = 96@2x）
+//	站点画法（**透明底 + miuix 蓝 #3482FF 描边本体**，2026-10-20 作者拍板）
+//	  internal/ui/static/apple-touch-icon.png                     180px（iOS 主屏会给透明图标垫黑底）
+//	  internal/ui/static/favicon.ico                              16/32/48 三档
+//	  internal/ui/static/favicon.svg                              96px，纯蓝描边 glyph
 //
 // 用法（仓库根目录）：
 //
@@ -72,8 +74,10 @@ func generate() ([]fileOut, error) {
 		out = append(out, fileOut{"internal/mail/icons/" + name + ".png", png})
 	}
 
-	// apple-touch-icon：满幅方形——iOS 会自己套超椭圆蒙版，切了角会在蒙版外留黑边
-	apple, err := encodePNG(iconSpec{size: 180, cutCorners: false, boxFrac: 0.6, paths: fingerprintPaths})
+	// apple-touch-icon：与 favicon 同款**透明底 + #3482FF 蓝 glyph**（2026-10-20 作者
+	// 拍板）。满幅不切角——iOS 主屏自己套超椭圆蒙版；**iOS 会给透明图标垫黑底**
+	//（平台行为），嫌黑再议。
+	apple, err := encodePNG(iconSpec{size: 180, boxFrac: 0.6, paths: fingerprintPaths, transparentBlue: true})
 	if err != nil {
 		return nil, fmt.Errorf("画 apple-touch-icon: %w", err)
 	}

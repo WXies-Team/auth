@@ -39,6 +39,10 @@ type iconSpec struct {
 	cutCorners bool // false = 满幅方形（apple-touch-icon：iOS 自己套超椭圆蒙版）
 	boxFrac    float64
 	paths      []string
+	// transparentBlue = 站点 favicon 三件套的画法（2026-10-20 作者拍板）：
+	// **透明底 + miuix 蓝 #3482FF 的描边本体**，与页面内 lucide .ico 图标同款，
+	// 不带任何背景。false = 品牌画法（蓝渐变超椭圆底 + 白矢量，邮件 CID 图标用）。
+	transparentBlue bool
 }
 
 // transformFor 把字形外包盒缩放居中到 size×size 画布，返回 (scale, tx, ty)。
@@ -123,8 +127,17 @@ func lerpColor(a, b color.RGBA, t float64) color.RGBA {
 	}
 }
 
-// renderIcon 画一枚图标并回 RGBA（A 恒为 255：切角处是完全透明，不是半透明）。
-func renderIcon(spec iconSpec) (*image.RGBA, error) {
+// miuixBlue 是站点 favicon 的描边色（页面主色，与按钮 / theme-color 同值）。
+var miuixBlue = color.RGBA{R: 0x34, G: 0x82, B: 0xFF, A: 0xFF}
+
+// renderIcon 画一枚图标。品牌画法（transparentBlue=false）：超椭圆底 + 竖直渐变 +
+// 白描边，A=覆盖率（切角处完全透明）；站点画法（transparentBlue=true）：
+// **背景完全透明，只留 #3482FF 描边本体**——不铺任何底色。
+//
+// 画布用 *image.NRGBA（**非预乘**）：我们要的是「色不变、只有 alpha 随覆盖率变」，
+// 而 image.RGBA 是预乘语义——把非预乘值塞进去会被 png.Encode 当预乘反算一遍，
+// 抗锯齿边缘的蓝会被吹成薰衣草色。NRGBA 直存直出，编解码零换算。
+func renderIcon(spec iconSpec) (*image.NRGBA, error) {
 	var all []seg
 	for _, d := range spec.paths {
 		got, err := flatten(d)
@@ -140,7 +153,7 @@ func renderIcon(spec iconSpec) (*image.RGBA, error) {
 	ps := toPixel(all, s, tx, ty)
 	hw := strokePxFor(spec.size) / 2
 
-	img := image.NewRGBA(image.Rect(0, 0, spec.size, spec.size))
+	img := image.NewNRGBA(image.Rect(0, 0, spec.size, spec.size))
 	half := float64(spec.size) / 2
 	step := 1.0 / subSamples
 	for y := 0; y < spec.size; y++ {
@@ -164,14 +177,25 @@ func renderIcon(spec iconSpec) (*image.RGBA, error) {
 			if inside == 0 {
 				continue
 			}
+			samples := subSamples * subSamples
+			if spec.transparentBlue {
+				// 透明底：只有描边覆盖到的像素才上色，覆盖率即 alpha（抗锯齿）
+				if stroke == 0 {
+					continue
+				}
+				c := miuixBlue
+				c.A = uint8(float64(stroke)/float64(samples)*255 + 0.5)
+				img.SetNRGBA(x, y, color.NRGBA{R: c.R, G: c.G, B: c.B, A: c.A})
+				continue
+			}
 			gt := (float64(y) + 0.5) / float64(spec.size) // 渐变取色行（竖直渐变只看 y）
 			base := lerpColor(gradTop, gradBottom, gt)
 			c := base
 			if stroke > 0 {
 				c = lerpColor(base, white, float64(stroke)/float64(inside))
 			}
-			c.A = uint8(float64(inside)/float64(subSamples*subSamples)*255 + 0.5)
-			img.SetRGBA(x, y, c)
+			c.A = uint8(float64(inside)/float64(samples)*255 + 0.5)
+			img.SetNRGBA(x, y, color.NRGBA{R: c.R, G: c.G, B: c.B, A: c.A})
 		}
 	}
 	return img, nil
@@ -190,27 +214,9 @@ func encodePNG(spec iconSpec) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// superellipsePath 用折线逼近超椭圆，产出 SVG path d（favicon.svg 的圆角底）。
-func superellipsePath(size float64, n int) string {
-	a := size / 2
-	var b strings.Builder
-	for i := 0; i < n; i++ {
-		t := 2 * math.Pi * float64(i) / float64(n)
-		c, s := math.Cos(t), math.Sin(t)
-		x := a + math.Copysign(math.Pow(math.Abs(c), 2/squircleN)*a, c)
-		y := a + math.Copysign(math.Pow(math.Abs(s), 2/squircleN)*a, s)
-		if i == 0 {
-			fmt.Fprintf(&b, "M%.2f %.2f", x, y)
-		} else {
-			fmt.Fprintf(&b, "L%.2f %.2f", x, y)
-		}
-	}
-	b.WriteString("Z")
-	return b.String()
-}
-
-// faviconSVG 生成 favicon.svg：同款超椭圆渐变底 + 白色 fingerprint 矢量
-//（矢量直接用 lucide 原始 path data，缩放交给 transform）。
+// faviconSVG 生成 favicon.svg：**透明底 + #3482FF 的 fingerprint 描边本体**
+//（2026-10-20 作者拍板，去掉蓝渐变 squircle 底）。stroke-width=2 与页面内
+// lucide .ico 图标同款语义，缩放交给 transform；矢量直接用 lucide 原始 path data。
 func faviconSVG(size float64, paths []string) (string, error) {
 	var all []seg
 	for _, d := range paths {
@@ -221,15 +227,13 @@ func faviconSVG(size float64, paths []string) (string, error) {
 		all = append(all, got...)
 	}
 	s, tx, ty := transformFor(size, 0.6, all)
+	// stroke-width 用**字形空间**的值（渲染后 = 画布 5%，与 lucide「stroke 2 / 24 视野框
+	// ＝ 字形框的 8.3%」同权重——两边都是按字形框归一化的，所以数值不同、观感一致）。
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %g %g" width="%g" height="%g" role="img" aria-label="Auth">
 <title>Auth</title>
-<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-<stop offset="0" stop-color="%s"/><stop offset="1" stop-color="%s"/>
-</linearGradient></defs>
-<path fill="url(#bg)" d="%s"/>
-<g transform="translate(%.3f %.3f) scale(%.5f)" fill="none" stroke="#FFFFFF" stroke-width="%.3f" stroke-linecap="round" stroke-linejoin="round">
-`, size, size, size, size, cssColor(gradTop), cssColor(gradBottom), superellipsePath(size, 160), tx, ty, s, strokePxFor(int(size))/2/s)
+<g transform="translate(%.3f %.3f) scale(%.5f)" fill="none" stroke="#%02X%02X%02X" stroke-width="%.3f" stroke-linecap="round" stroke-linejoin="round">
+`, size, size, size, size, tx, ty, s, miuixBlue.R, miuixBlue.G, miuixBlue.B, strokePxFor(int(size))/s)
 	for _, d := range paths {
 		fmt.Fprintf(&b, "<path d=\"%s\"/>\n", d)
 	}
@@ -237,13 +241,10 @@ func faviconSVG(size float64, paths []string) (string, error) {
 	return b.String(), nil
 }
 
-func cssColor(c color.RGBA) string {
-	return fmt.Sprintf("#%02X%02X%02X", c.R, c.G, c.B)
-}
-
 // encodeICO 打一个 32bpp BMP 条目式 ICO（16/32/48 三档）。位图条目比 PNG-in-ICO
-// 兼容面大（老 Windows 的缩略图与某些浏览器只认位图条目）；32bpp 的 alpha 通道
-// Vista+ 就被采纳，AND 掩码留全 0 即「全部不透明」。
+// 兼容面大（老 Windows 的缩略图与某些浏览器只认位图条目）。**透明底**靠两层表达：
+// 32bpp 的 alpha 通道（Vista+ 采纳）+ AND 掩码按 alpha 置位——只看掩码的老客户端
+// 也能把背景读成透明，而不是垫一块黑。
 func encodeICO(sizes []int, boxFrac float64, paths []string) ([]byte, error) {
 	type entry struct {
 		size   int
@@ -251,7 +252,7 @@ func encodeICO(sizes []int, boxFrac float64, paths []string) ([]byte, error) {
 	}
 	var entries []entry
 	for _, sz := range sizes {
-		img, err := renderIcon(iconSpec{size: sz, cutCorners: true, boxFrac: boxFrac, paths: paths})
+		img, err := renderIcon(iconSpec{size: sz, boxFrac: boxFrac, paths: paths, transparentBlue: true})
 		if err != nil {
 			return nil, err
 		}
@@ -284,8 +285,8 @@ func encodeICO(sizes []int, boxFrac float64, paths []string) ([]byte, error) {
 }
 
 // bmpEntry 把图像编成 ICO 的位图条目：40 字节 BITMAPINFOHEADER（高度 ×2 因为
-// XOR 与 AND 两张图叠放）+ BGRA 自下而上像素行 + 全 0 的 AND 掩码。
-func bmpEntry(img *image.RGBA) []byte {
+// XOR 与 AND 两张图叠放）+ BGRA 自下而上像素行 + 按 alpha 置位的 AND 掩码。
+func bmpEntry(img *image.NRGBA) []byte {
 	w, h := img.Rect.Dx(), img.Rect.Dy()
 	andStride := ((w + 31) / 32) * 4
 	data := make([]byte, 40+w*h*4+andStride*h)
@@ -299,7 +300,7 @@ func bmpEntry(img *image.RGBA) []byte {
 	i := 40
 	for y := h - 1; y >= 0; y-- { // 自下而上
 		for x := 0; x < w; x++ {
-			c := img.RGBAAt(x, y)
+			c := img.NRGBAAt(x, y)
 			data[i] = c.B
 			data[i+1] = c.G
 			data[i+2] = c.R
@@ -307,6 +308,16 @@ func bmpEntry(img *image.RGBA) []byte {
 			i += 4
 		}
 	}
-	// AND 掩码留全 0（32bpp 下 alpha 说了算）
+	// AND 掩码：位=1 表示透明。透明底图标必须把背景置位——只读掩码的老客户端
+	//（缩略图、某些浏览器）不看 alpha，掩码全 0 会把背景画成一块黑。
+	and := i // i 已指向像素区末尾 = 掩码起点
+	for y := h - 1; y >= 0; y-- { // 自下而上，与像素行同序
+		for x := 0; x < w; x++ {
+			if img.NRGBAAt(x, y).A < 128 {
+				data[and+x/8] |= 0x80 >> uint(x%8)
+			}
+		}
+		and += andStride
+	}
 	return data
 }
