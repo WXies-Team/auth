@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS user_profile (
     PRIMARY KEY (user_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
 
+-- app-admin 的按 app 授权（W2 分级授权）：role='admin' 且持有 ≥1 行才是有效
+-- app-admin，只管本 app 范围内的会话/用量/审计；role='super'（平台管理员）绕过
+-- 本表全量通行。一人可管多个项目 = 多行叠加；granted_by/granted_at 只为追溯
+-- 「谁在什么时候授的」，判定不读它们。授予只能由 super 做（只能授予低于自己）。
+CREATE TABLE IF NOT EXISTS admin_scopes (
+    uid        BIGINT      NOT NULL,
+    app        VARCHAR(32) NOT NULL,          -- calorie-diary / expense-diary（与 allowedApps 同源校验）
+    granted_by BIGINT      NOT NULL,
+    granted_at BIGINT      NOT NULL,
+    PRIMARY KEY (uid, app)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci;
+
 -- 四处列变更（role / web_token_hash / web_csrf_hash / reauth_at）与两步登录中间态的
 -- login_states.app 由 internal/db 的 ensureColumn 在启动时按 information_schema
 -- 探测后补：MySQL 的 ADD COLUMN 没有 IF NOT EXISTS，写进本文件会撞「重复列」错误
