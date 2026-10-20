@@ -377,7 +377,7 @@ function initLogin() {
       setBusy(btn, true);
       try {
         const opts = await api('/webauthn/login/options', { method: 'POST', body: {} });
-        const cred = await navigator.credentials.get({ publicKey: opts.publicKey });
+        const cred = await navigator.credentials.get({ publicKey: decodePKOptions(opts.publicKey) });
         await api('/webauthn/login/finish', {
           method: 'POST',
           body: { ceremonyId: opts.ceremonyId, response: assertionJSON(cred) },
@@ -392,6 +392,26 @@ function initLogin() {
 }
 
 /* ---------- WebAuthn：把浏览器对象转成服务端库解析的 JSON 形状 ---------- */
+/* 服务端 JSON 里 challenge/user.id/allowCredentials[].id 是 base64url 字符串，
+   浏览器 WebAuthn 只收 ArrayBuffer/视图——进 create/get 前统一解码（App 端把整个
+   JSON 交给 Credential Manager 自行解析，故两端形态不同）。 */
+function b64urlToBytes(s) {
+  const b = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b.length % 4 ? '='.repeat(4 - (b.length % 4)) : '';
+  const bin = atob(b + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function decodePKOptions(pk) {
+  if (!pk) return pk;
+  if (typeof pk.challenge === 'string') pk.challenge = b64urlToBytes(pk.challenge);
+  if (pk.user && typeof pk.user.id === 'string') pk.user.id = b64urlToBytes(pk.user.id);
+  ['allowCredentials', 'excludeCredentials'].forEach(k => {
+    if (Array.isArray(pk[k])) pk[k].forEach(c => { if (typeof c.id === 'string') c.id = b64urlToBytes(c.id); });
+  });
+  return pk;
+}
 function b64url(buf) {
   const bytes = new Uint8Array(buf);
   let s = '';
@@ -646,7 +666,7 @@ function initPasskeys() {
     setBusy(btn, true);
     try {
       const opts = await api('/webauthn/register/options', { method: 'POST', body: {} });
-      const cred = await navigator.credentials.create({ publicKey: opts.publicKey });
+      const cred = await navigator.credentials.create({ publicKey: decodePKOptions(opts.publicKey) });
       if (!cred) return; // 用户取消
       await api('/webauthn/register/finish', {
         method: 'POST',
