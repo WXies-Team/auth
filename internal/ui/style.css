@@ -289,12 +289,14 @@ input:disabled { opacity: .6; }
   transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease),
               border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
-/* 退场：淡出 + 轻微下沉（transform，不碰 height/margin —— 不做折叠高度动画防抖动） */
+/* 退场：淡出 + 轻微下沉（transform，不碰 height/margin —— 不做折叠高度动画防抖动）。
+   末行 .item.leaving:hover 特异性更高：悬停中被踢的行也照退场，不被抬升规则抢走。 */
 .item.leaving { opacity: 0; transform: translateY(-4px); }
 /* 悬停轻抬（仅 hover 设备；触屏没有 hover，不给它） */
 @media (hover: hover) {
   .item:hover { transform: translateY(-2px); box-shadow: var(--shadow-1); }
 }
+.item.leaving:hover { opacity: 0; transform: translateY(-4px); box-shadow: none; }
 .item .grow { flex: 1 1 220px; min-width: 0; }
 .item .title { font-weight: 500; }
 .item .meta { color: var(--dim); font-size: 13px; }
@@ -487,4 +489,8 @@ tbody tr:nth-child(10) { animation-delay: 330ms; }
 }
 @media (prefers-reduced-motion: reduce) and (hover: hover) {
   .card:hover, .item:hover { transform: none; box-shadow: none; }
+}
+/* 打印：动画不跑，backwards 的起始态会把内容钉在 opacity:0 —— 直接撤掉动画 */
+@media print {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
 }
