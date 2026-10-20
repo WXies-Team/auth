@@ -894,3 +894,108 @@ func staleReauth(t *testing.T, e *routeEnv) {
 		t.Fatalf("清强认证时间: %v", err)
 	}
 }
+
+// 顶栏「管理后台」入口按角色在**模板层**显隐：管理员的概览页 HTML 里有入口与
+// 账号胶囊（邮箱 + 首字母占位），普通用户的 HTML 里连按钮都没有——不是前端藏一下。
+func TestTopbarAdminEntryRendersByRole(t *testing.T) {
+	e := newRouteEnv(t)
+	seedUser(t, e, "topbar-admin@example.com", "secret123", "admin")
+	seedUser(t, e, "topbar-user@example.com", "secret123", "user")
+
+	page := func(email string) string {
+		sess, _ := loginCookie(t, e, email, "secret123")
+		rec := e.do(t, "GET", "/web/console", "", func(r *http.Request) { r.AddCookie(sess) })
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s 打概览页应 200，得到 %d", email, rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	adminHTML := page("topbar-admin@example.com")
+	for _, want := range []string{
+		`id="admin-entry"`, `href="/web/admin"`,
+		"topbar-email", "topbar-admin@example.com", "me-avatar", ">T<",
+	} {
+		if !strings.Contains(adminHTML, want) {
+			t.Errorf("管理员概览页缺顶栏元素 %q", want)
+		}
+	}
+
+	userHTML := page("topbar-user@example.com")
+	if strings.Contains(userHTML, `id="admin-entry"`) {
+		t.Error("普通用户的 HTML 里不该出现管理后台入口（模板层按 role 判定）")
+	}
+	if !strings.Contains(userHTML, "topbar-user@example.com") {
+		t.Error("账号胶囊应带当前邮箱")
+	}
+}
+
+// 「退出其它所有设备」：cookie 调用必须先过 15 分钟强认证窗（401 固定文案），
+// 验过后批量踢出并落审计（scope=others + 踢掉台数）；Bearer 老客户端不受这道闸影响。
+func TestRevokeOthersForcesReauthAndAudits(t *testing.T) {
+	e := newRouteEnv(t)
+	uid := seedUser(t, e, "kick-others@example.com", "secret123", "user")
+	sess, csrf := loginCookie(t, e, "kick-others@example.com", "secret123")
+	withCSRF := func(r *http.Request) {
+		r.AddCookie(sess)
+		r.AddCookie(csrf)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	// 再造一台「别的设备」：同账号第二次登录（业务层建行，不打 HTTP）
+	if _, err := e.svc.Login("kick-others@example.com", "secret123", "calorie-diary",
+		auth.SessionMeta{IP: "10.9.9.9", UserAgent: "OtherPhone/1.0"}); err != nil {
+		t.Fatalf("造第二台设备: %v", err)
+	}
+
+	// ① 强认证窗过期 → 401 + 固定文案（前端据此弹重新验证框）
+	staleReauth(t, e)
+	rec := e.do(t, "POST", "/api/sessions/revoke-others", `{}`, withCSRF)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), auth.MsgReauthRequired) {
+		t.Fatalf("未强认证的批量踢出应 401 + 固定文案，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	var alive int
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NULL", uid).Scan(&alive); err != nil || alive != 2 {
+		t.Fatalf("401 时不该踢掉任何会话，得到 %d err=%v", alive, err)
+	}
+
+	// ② 验过 → 200，回执形状仍恰为 {ok:true}（老端点契约），其它会话全被踢
+	if rec = e.do(t, "POST", "/web/reauth", `{"password":"secret123"}`, withCSRF); rec.Code != http.StatusOK {
+		t.Fatalf("重新验证应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	rec = e.do(t, "POST", "/api/sessions/revoke-others", `{}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("批量踢出应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if got := keysOf(t, rec.Body.Bytes()); got != "ok" {
+		t.Errorf("回执形状应恰为 ok，得到 %s", got)
+	}
+	if err := e.pool.QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NULL", uid).Scan(&alive); err != nil || alive != 1 {
+		t.Errorf("批量踢出后应只剩当前会话，得到 %d err=%v", alive, err)
+	}
+
+	// ③ 审计落行：session.kick + scope=others + 踢掉台数
+	var detail, result string
+	if err := e.pool.QueryRow(
+		"SELECT `detail`, result FROM audit_logs WHERE action = 'session.kick' AND result = 'ok' ORDER BY id DESC LIMIT 1").
+		Scan(&detail, &result); err != nil {
+		t.Fatalf("查审计: %v", err)
+	}
+	if !strings.Contains(detail, `"scope":"others"`) || !strings.Contains(detail, `"count":"1"`) {
+		t.Errorf("批量踢出审计应带 scope=others 与台数，得到 %s", detail)
+	}
+
+	// ④ Bearer 老客户端不受 reauth 闸影响（回执 200，不是 401）
+	resp, err := e.svc.Login("kick-others@example.com", "secret123", "calorie-diary", auth.SessionMeta{})
+	if err != nil {
+		t.Fatalf("取 JWT: %v", err)
+	}
+	staleReauth(t, e)
+	rec = e.do(t, "POST", "/api/sessions/revoke-others", `{}`, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+resp.Token)
+	})
+	if rec.Code != http.StatusOK {
+		t.Errorf("Bearer 调批量踢出不应被 reauth 闸拦，得到 %d %s", rec.Code, rec.Body.String())
+	}
+}
