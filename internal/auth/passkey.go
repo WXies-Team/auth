@@ -143,12 +143,13 @@ func (s *Service) passkeyUserFor(uid int64) (*passkeyUser, error) {
 
 // ---- 仪式中间态 ----
 
-// ceremonyID 生成 ≤2^53 的随机仪式 id：ceremonyId 要经浏览器 JSON.parse 往返，
-// 而 JS number 只有 53 位精度——63 位雪花会被抹圆（实测 …734016 → …734000），
-// finish 查无此行恒 404「验证请求已过期」（网页 Passkey 自 B 批起从未真正通过，
-// Kotlin Long 无损故 App 端不受影响）。行只活 challengeTTL，53 位空间 9e15，
-// 撞 UNIQUE 重摇即可（复用 isDuplicateUID 的 1062 判别）。
-func ceremonyID() (int64, error) {
+// jsSafeID 生成 ≤2^53 的随机行 id：凡要经浏览器 JSON.parse 往返的 id（ceremonyId、
+// passkeys.id——列表 JSON→JS→路径/请求体再回服务端）都必须过这关。JS number 只有
+// 53 位精度，63 位雪花会被抹圆（实测 …734016 → …734000）：finish 查无此行恒 404
+// 「验证请求已过期」、列表删除/改名同样 404（网页 Passkey 自 B 批起从未真正通过；
+// Kotlin Long 无损故 App 端不受影响）。行量少、命短，53 位空间 9e15 随机+重摇足够
+//（复用 isDuplicateUID 的 1062 判别）。
+func jsSafeID() (int64, error) {
 	var b [8]byte
 	for attempt := 0; attempt < 10; attempt++ {
 		if _, err := rand.Read(b[:]); err != nil {
@@ -164,14 +165,14 @@ func ceremonyID() (int64, error) {
 
 // saveChallenge 把 SessionData 整体 JSON 落库（库规定唯一持久化形态），回 ceremonyId。
 // JSON 而非手拼字段：SessionData.Extensions 的序列化形态随库版本漂移，pin 死版本 +
-// 整体存取，升级时旧行一起清（见风险清单第 4 条）。id 用 JS 安全随机（见 ceremonyID）。
+// 整体存取，升级时旧行一起清（见风险清单第 4 条）。id 用 JS 安全随机（见 jsSafeID）。
 func (s *Service) saveChallenge(kind string, userID *int64, sd *webauthn.SessionData) (int64, error) {
 	raw, err := json.Marshal(sd)
 	if err != nil {
 		return 0, fmt.Errorf("序列化仪式数据: %w", err)
 	}
 	now := time.Now()
-	id, err := ceremonyID()
+	id, err := jsSafeID()
 	if err != nil {
 		return 0, err
 	}
@@ -186,7 +187,7 @@ func (s *Service) saveChallenge(kind string, userID *int64, sd *webauthn.Session
 		if attempt >= 5 || !isDuplicateUID(err, id) {
 			return 0, fmt.Errorf("落仪式中间态: %w", err)
 		}
-		if id, err = ceremonyID(); err != nil {
+		if id, err = jsSafeID(); err != nil {
 			return 0, err
 		}
 	}
@@ -520,7 +521,11 @@ func (s *Service) DeletePasskey(c Caller, id int64) (err error) {
 // insertCredential 落一行凭证。credential_id 撞 UNIQUE（同一把 passkey 重复绑定）
 // 翻成 409——用户重试「添加」时手里那把已经绑过了，回 409 比 500 更可执行。
 func (s *Service) insertCredential(uid int64, name string, cred *webauthn.Credential) (int64, error) {
-	id := s.ids.Generate().Int64()
+	// 行 id 过 JS 53 位关（列表 JSON→JS→删除/改名路径再回服务端，见 jsSafeID）
+	id, err := jsSafeID()
+	if err != nil {
+		return 0, err
+	}
 	transports := make([]string, 0, len(cred.Transport))
 	for _, t := range cred.Transport {
 		transports = append(transports, string(t))
@@ -529,19 +534,26 @@ func (s *Service) insertCredential(uid int64, name string, cred *webauthn.Creden
 	if len(cred.Authenticator.AAGUID) > 0 {
 		aaguid = hex.EncodeToString(cred.Authenticator.AAGUID)
 	}
-	_, err := s.pool.ExecContext(context.Background(),
-		`INSERT INTO passkeys
+	for attempt := 0; ; attempt++ {
+		_, err = s.pool.ExecContext(context.Background(),
+			`INSERT INTO passkeys
 		 (id, user_id, name, credential_id, rp_id, public_key, sign_count, transports, aaguid,
 		  backup_eligible, backup_state, created_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, uid, truncateRunes(strings.TrimSpace(name), 64),
-		base64.RawURLEncoding.EncodeToString(cred.ID), passkeyRPID, cred.PublicKey,
-		int64(cred.Authenticator.SignCount), strings.Join(transports, ","), aaguid,
-		boolInt(cred.Flags.BackupEligible), boolInt(cred.Flags.BackupState), time.Now().UnixMilli())
-	if err != nil {
-		// 1062 = Duplicate entry（uq_passkeys_cred）。errors.As 拿结构化错误码，
-		// 与 uid.go / ChangeEmail 同一口径——按错误串子串匹配会被驱动文案变化
-		// 或翻译版本悄悄改坏
+			id, uid, truncateRunes(strings.TrimSpace(name), 64),
+			base64.RawURLEncoding.EncodeToString(cred.ID), passkeyRPID, cred.PublicKey,
+			int64(cred.Authenticator.SignCount), strings.Join(transports, ","), aaguid,
+			boolInt(cred.Flags.BackupEligible), boolInt(cred.Flags.BackupState), time.Now().UnixMilli())
+		if err == nil {
+			break
+		}
+		if attempt < 5 && isDuplicateUID(err, id) {
+			// 行主键撞号：换号重摇（uq_passkeys_cred 的 1062 值≠id，不会落这支）
+			if id, err = jsSafeID(); err != nil {
+				return 0, err
+			}
+			continue
+		}
 		var me *mysql.MySQLError
 		if errors.As(err, &me) && me.Number == 1062 {
 			return 0, &HTTPError{409, "这把 Passkey 已经绑定过了，无需重复添加"}
