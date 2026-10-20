@@ -2,7 +2,7 @@ package main
 
 // Command genicons 生成本仓全部图形资产（一次性画、可随时重生）。两种画法：
 //
-//	品牌画法（蓝渐变超椭圆底 + 白色矢量）
+//	品牌画法（纯色 miuix 品牌蓝 #3482FF 实底 + 白色矢量，squircle 外形）
 //	  internal/mail/icons/{calorie-diary,expense-diary,auth}.png  三品牌邮件内嵌图（192px = 96@2x）
 //	站点画法（**透明底 + miuix 蓝 #3482FF 描边本体**，2026-10-20 作者拍板）
 //	  internal/ui/static/apple-touch-icon.png                     180px（iOS 主屏会给透明图标垫黑底）

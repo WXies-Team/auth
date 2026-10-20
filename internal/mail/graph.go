@@ -45,7 +45,8 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 )
 
-// 内嵌图标：三品牌各一枚 PNG（scripts/genicons 生成，96px@2x 的超椭圆渐变图）。
+// 内嵌图标：三品牌各一枚 PNG（scripts/genicons 生成，96px@2x 的纯色 #3482FF
+// 超椭圆底 + 白色矢量）。
 //
 //go:embed icons/*.png
 var iconFS embed.FS

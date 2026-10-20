@@ -1,11 +1,11 @@
 package main
 
-// 图标光栅化与序列化：超椭圆底 + 竖直渐变 + 白色描边字形。
+// 图标光栅化与序列化：超椭圆底 + 白色/蓝色描边字形。两种画法：
 //
-// 配色与形状照「两 App 启动图标」的定案：竖直渐变 #FF4D95FF → #FF2B6DE8
-//（8 位串按 RRGGBBAA 读：顶粉不透明、底蓝 E8），lucide 白色矢量前景，
-// iOS 超椭圆（squircle）圆角。**统一渲染成不透明**：apple-touch-icon 的半透明
-// 会被 iOS 压成黑底、邮件与网页底色也不可控，E8 与 FF 的可见差只有约 3% 亮度。
+//	品牌画法（邮件 CID 图标）：**纯色 miuix 品牌蓝 #3482FF 实底**（2026-10-20 作者
+//	拍板重做：去掉渐变，起始色既非品牌蓝也非启动图标渐变）+ 白色 lucide 矢量前景，
+//	iOS 超椭圆（squircle）圆角，不透明。
+//	站点画法（favicon 三件套）：**透明底 + #3482FF 描边本体**，不铺任何底色。
 //
 // 自带一个小光栅器的原因：图标要在仓库里可复现地重生（scripts/genicons 一键出全部
 // 资产），不引入任何外部绘图库——Go 标准库画不了路径描边，而图标只有「超椭圆填充 +
@@ -23,9 +23,7 @@ import (
 )
 
 var (
-	gradTop    = color.RGBA{R: 0xFF, G: 0x4D, B: 0x95, A: 0xFF}
-	gradBottom = color.RGBA{R: 0x2B, G: 0x6D, B: 0xE8, A: 0xFF}
-	white      = color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
+	white = color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
 )
 
 const (
@@ -41,7 +39,7 @@ type iconSpec struct {
 	paths      []string
 	// transparentBlue = 站点 favicon 三件套的画法（2026-10-20 作者拍板）：
 	// **透明底 + miuix 蓝 #3482FF 的描边本体**，与页面内 lucide .ico 图标同款，
-	// 不带任何背景。false = 品牌画法（蓝渐变超椭圆底 + 白矢量，邮件 CID 图标用）。
+	// 不带任何背景。false = 品牌画法（**纯色 #3482FF 实底** + 白矢量，邮件 CID 图标用）。
 	transparentBlue bool
 }
 
@@ -130,8 +128,8 @@ func lerpColor(a, b color.RGBA, t float64) color.RGBA {
 // miuixBlue 是站点 favicon 的描边色（页面主色，与按钮 / theme-color 同值）。
 var miuixBlue = color.RGBA{R: 0x34, G: 0x82, B: 0xFF, A: 0xFF}
 
-// renderIcon 画一枚图标。品牌画法（transparentBlue=false）：超椭圆底 + 竖直渐变 +
-// 白描边，A=覆盖率（切角处完全透明）；站点画法（transparentBlue=true）：
+// renderIcon 画一枚图标。品牌画法（transparentBlue=false）：超椭圆**纯色 #3482FF 实底**
+// + 白描边字形，A=覆盖率（切角处完全透明）；站点画法（transparentBlue=true）：
 // **背景完全透明，只留 #3482FF 描边本体**——不铺任何底色。
 //
 // 画布用 *image.NRGBA（**非预乘**）：我们要的是「色不变、只有 alpha 随覆盖率变」，
@@ -188,8 +186,8 @@ func renderIcon(spec iconSpec) (*image.NRGBA, error) {
 				img.SetNRGBA(x, y, color.NRGBA{R: c.R, G: c.G, B: c.B, A: c.A})
 				continue
 			}
-			gt := (float64(y) + 0.5) / float64(spec.size) // 渐变取色行（竖直渐变只看 y）
-			base := lerpColor(gradTop, gradBottom, gt)
+			// 品牌画法：纯色 #3482FF 实底（不做任何渐变），字形描边向白色混（AA）
+			base := miuixBlue
 			c := base
 			if stroke > 0 {
 				c = lerpColor(base, white, float64(stroke)/float64(inside))

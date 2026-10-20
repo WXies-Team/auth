@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/png" // 解码入库 PNG 做像素级断言
 	"os"
@@ -90,7 +91,8 @@ func px(img image.Image, x, y int) (r, g, b, a uint8) {
 }
 
 // 站点 favicon 三件套（2026-10-20 作者拍板）：**透明底 + miuix 蓝 #3482FF 的描边本体**，
-// 不带任何背景；邮件 CID 图标**不受影响**，仍是蓝渐变超椭圆底 + 白色矢量。
+// 不带任何背景；邮件 CID 图标（2026-10-20 重做拍板）：**纯色 #3482FF 实底**（不许渐变）
+// + 白色矢量，squircle 外形不变。
 func TestFaviconTransparentBlueAndMailIconsUnchanged(t *testing.T) {
 	// ---- favicon.svg：纯蓝描边，无渐变、无底 ----
 	svg := string(readAsset(t, "internal/ui/static/favicon.svg"))
@@ -179,37 +181,117 @@ func TestFaviconTransparentBlueAndMailIconsUnchanged(t *testing.T) {
 		}
 	}
 
-	// ---- 邮件 CID 图标不受影响：超椭圆切角 + 品牌粉起点渐变 + 白矢量 ----
+	// ---- 邮件 CID 图标：纯色 #3482FF 实底（**零渐变**）+ 白矢量 + 超椭圆切角 ----
 	for _, name := range []string{"calorie-diary", "expense-diary", "auth"} {
 		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/mail/icons/"+name+".png")))
 		if err != nil {
 			t.Fatalf("解码 %s.png: %v", name, err)
 		}
-		if a := pxAtAlpha(img, 0, 0); a != 0 {
-			t.Errorf("%s 邮件图标四角应为超椭圆切角（透明），得到 alpha=%d", name, a)
+		// ① 四角是超椭圆切角（透明）
+		for _, c := range [][2]int{{0, 0}, {191, 0}, {0, 191}, {191, 191}} {
+			if a := pxAtAlpha(img, c[0], c[1]); a != 0 {
+				t.Errorf("%s 邮件图标角 (%d,%d) 应透明（超椭圆切角），得到 alpha=%d", name, c[0], c[1], a)
+			}
 		}
-		// 顶部中列是渐变起点（字形最高点在其下方），应为品牌粉
-		r, g, b, _ := px(img, 96, 8)
-		if !(r > 235 && g < 110 && b > 130 && b < 185) {
-			t.Errorf("%s 邮件图标顶部应是品牌粉 #FF4D95，得到 rgb(%d,%d,%d)", name, r, g, b)
+		// ② 采样点逐点断言：上/下/左/右四边中点都在字形外包盒之外，必须是
+		//    **不透明的 #3482FF 实底**——顶底同色即证明没有任何竖直渐变
+		for _, p := range [][2]int{{96, 8}, {96, 184}, {8, 96}, {184, 96}} {
+			r, g, b, a := px(img, p[0], p[1])
+			if a != 255 || r != 0x34 || g != 0x82 || b != 0xFF {
+				t.Errorf("%s 邮件图标 (%d,%d) 应为纯色 #3482FF 实底，得到 rgba(%d,%d,%d,%d)",
+					name, p[0], p[1], r, g, b, a)
+			}
 		}
-		// 底部中列是渐变终点（蓝）
-		r, g, b, _ = px(img, 96, 184)
-		if !(r < 80 && g > 85 && g < 130 && b > 210) {
-			t.Errorf("%s 邮件图标底部应是品牌蓝 #2B6DE8，得到 rgb(%d,%d,%d)", name, r, g, b)
-		}
-		// 白色矢量存在
-		white := 0
+		// ③ 全图逐像素：底与字形都只能是「蓝或白」——两个端点的 B 通道都是 0xFF，
+		//    任何渐变色（品红 b=149、渐变蓝底 b=232）都会在这里露馅
+		var solid, whiteGlyph, bad int
+		var badSample string
 		for y := 0; y < img.Bounds().Dy(); y++ {
 			for x := 0; x < img.Bounds().Dx(); x++ {
 				r, g, b, a := px(img, x, y)
-				if a == 255 && r > 245 && g > 245 && b > 245 {
-					white++
+				if a == 0 {
+					continue
+				}
+				if b != 0xFF || r < 0x34 || g < 0x82 {
+					bad++
+					if badSample == "" {
+						badSample = fmt.Sprintf("(%d,%d) rgba(%d,%d,%d,%d)", x, y, r, g, b, a)
+					}
+					continue
+				}
+				if a == 255 && r == 0x34 && g == 0x82 {
+					solid++
+				}
+				if a == 255 && r > 245 && g > 245 {
+					whiteGlyph++
 				}
 			}
 		}
-		if white == 0 {
-			t.Errorf("%s 邮件图标缺白色矢量前景", name)
+		if bad != 0 {
+			t.Errorf("%s 有 %d 个非「纯蓝/白」像素（首例 %s）——底必须是纯色 #3482FF 实底，不许渐变",
+				name, bad, badSample)
+		}
+		if solid == 0 {
+			t.Errorf("%s 缺不透明实底像素", name)
+		}
+		if whiteGlyph == 0 {
+			t.Errorf("%s 缺白色矢量前景", name)
+		}
+	}
+}
+
+// glyphMask 把字形（白或蓝）的全不透明像素拍成位图，用于跨画法比对几何。
+func glyphMask(img image.Image, white bool) []bool {
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	m := make([]bool, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			r, g, b, a := px(img, x, y)
+			hit := white && a == 255 && r > 245 && g > 245 && b > 245
+			if !white {
+				hit = a == 255 && r == 0x34 && g == 0x82 && b == 0xFF
+			}
+			if hit {
+				m[y*w+x] = true
+			}
+		}
+	}
+	return m
+}
+
+// 字形口径（全渠道统一）：auth = **fingerprint**（与站点 favicon 同字形），
+// flame/receipt 只属于两个日记品牌。比对方式：邮件图（品牌画法）与同一套路径
+// 现渲染的站点画法，**字形掩码必须逐像素一致**——映射被改错立刻红。
+func TestMailIconGlyphMapping(t *testing.T) {
+	cases := []struct {
+		file  string
+		paths []string
+	}{
+		{"calorie-diary", flamePaths},
+		{"expense-diary", receiptPaths},
+		{"auth", fingerprintPaths},
+	}
+	for _, c := range cases {
+		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/mail/icons/"+c.file+".png")))
+		if err != nil {
+			t.Fatalf("解码 %s.png: %v", c.file, err)
+		}
+		ref, err := renderIcon(iconSpec{size: 192, boxFrac: 0.6, paths: c.paths, transparentBlue: true})
+		if err != nil {
+			t.Fatalf("渲染参照字形: %v", err)
+		}
+		got, want := glyphMask(img, true), glyphMask(ref, false)
+		if len(got) != len(want) {
+			t.Fatalf("%s 尺寸与参照不一致", c.file)
+		}
+		diff := 0
+		for i := range got {
+			if got[i] != want[i] {
+				diff++
+			}
+		}
+		if diff != 0 {
+			t.Errorf("%s.png 的字形与参照路径不一致（%d 像素差）——品牌→字形映射被改错了", c.file, diff)
 		}
 	}
 }

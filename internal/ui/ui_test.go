@@ -7,7 +7,7 @@ import (
 )
 
 // 所有页面共用 layout 骨架：<head> 必须带三件套 link 与 theme-color，
-// 顶栏品牌区挂 favicon.svg（与两 App 启动图标同源的超椭圆渐变指纹图）。
+// 顶栏品牌区挂 favicon.svg（透明底 + #3482FF 裸蓝 fingerprint，与站点 favicon 同源）。
 func TestLayoutHeadHasIconLinks(t *testing.T) {
 	raw, err := files.ReadFile("templates/layout.html")
 	if err != nil {
