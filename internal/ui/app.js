@@ -434,9 +434,11 @@ async function initConsole() {
   try {
     const me = await api('/web/session', { method: 'POST', body: {} });
     $('#me-email').textContent = me.email;
-    if (me.role === 'admin') {
-      $('#role-badge').hidden = false;
-      popIn($('#role-badge'));   // 徽标浮现
+    if (me.role === 'admin' || me.role === 'super') {
+      const badge = $('#role-badge');
+      badge.textContent = me.role === 'super' ? '平台管理员' : '管理员';
+      badge.hidden = false;
+      popIn(badge);   // 徽标浮现
     }
     $('#stat-password').textContent = me.passwordSet ? '已设置' : '未设置（该账号靠验证码或 Passkey 登录）';
 
