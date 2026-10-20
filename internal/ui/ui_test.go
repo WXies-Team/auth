@@ -137,7 +137,7 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	}
 	head := string(raw)
 	for _, want := range []string{
-		`{{if .IsAdmin}}<a class="btn small admin-entry" href="/web/admin" id="admin-entry">`,
+		`{{if .IsAdmin}}<a class="btn small admin-entry" href="{{if .IsSuper}}/web/admin{{else}}/web/admin/sessions{{end}}" id="admin-entry">`,
 		`<span class="acct-email" id="topbar-email">{{.Email}}</span>`,
 		`<span class="avatar" id="me-avatar" aria-hidden="true">{{.Initial}}</span>`,
 	} {
@@ -152,8 +152,94 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	if got := initialOf("someone@example.com"); got != "S" {
 		t.Errorf("账号胶囊首字母应取邮箱首字符大写，得到 %q", got)
 	}
-	if !IsAdminRole("admin") || IsAdminRole("user") || IsAdminRole("") {
-		t.Error("IsAdminRole 只认 admin")
+	if !IsAdminRole("admin") || !IsAdminRole("super") || IsAdminRole("user") || IsAdminRole("") {
+		t.Error("IsAdminRole 认 admin 与 super 两档")
+	}
+	if !IsSuperRole("super") || IsSuperRole("admin") {
+		t.Error("IsSuperRole 只认 super")
+	}
+}
+
+// W2 项目切换器与角色页：切换器 markup 在 layout、SwitchApps 按角色分叉、
+// 角色/403 页模板齐备、导航按 super 分叉。
+func TestAppSwitchAndRolesPage(t *testing.T) {
+	// 1. layout 带切换器容器（在 admin-entry 与 acct 之间）
+	raw, err := files.ReadFile("templates/layout.html")
+	if err != nil {
+		t.Fatalf("读 layout: %v", err)
+	}
+	head := string(raw)
+	sw := strings.Index(head, `id="app-switch"`)
+	ae := strings.Index(head, `id="admin-entry"`)
+	ac := strings.Index(head, `class="acct"`)
+	if sw < 0 {
+		t.Fatal("layout 缺项目切换器容器 id=app-switch")
+	}
+	if ae > 0 && !(ae < sw && sw < ac) {
+		t.Errorf("切换器应在 admin-entry 与 acct 之间，得到 ae=%d sw=%d ac=%d", ae, sw, ac)
+	}
+
+	// 2. SwitchApps：super 三选项（全部高亮当 currentApp 空）；app-admin 只回授权项
+	super := SwitchApps(true, nil, "")
+	if len(super) != 3 || super[0].Key != "" || super[0].Label != "全部" || !super[0].Active {
+		t.Errorf("super 切换器应三项且「全部」默认高亮，得到 %+v", super)
+	}
+	superCal := SwitchApps(true, nil, "calorie-diary")
+	if superCal[0].Active || !superCal[1].Active {
+		t.Errorf("?app=calorie 时应高亮该项，得到 %+v", superCal)
+	}
+	one := SwitchApps(false, []string{"calorie-diary"}, "")
+	if len(one) != 1 || one[0].Key != "calorie-diary" {
+		t.Errorf("app-admin 切换器只该有授权项，得到 %+v", one)
+	}
+	for _, c := range one {
+		if c.Label == "全部" {
+			t.Error("app-admin 的切换器不该有「全部」")
+		}
+	}
+
+	// 3. 新模板齐备
+	for _, name := range []string{"admin-roles", "denied"} {
+		if !Has(name) {
+			t.Errorf("页面模板缺失: %s", name)
+		}
+	}
+
+	// 4. AdminNav 按角色分叉
+	navS := AdminNav("", true)
+	navA := AdminNav("", false)
+	if len(navS) != 6 {
+		t.Errorf("super 导航应六项，得到 %d", len(navS))
+	}
+	if len(navA) != 3 {
+		t.Errorf("app-admin 导航应三项，得到 %d", len(navA))
+	}
+	for _, it := range navA {
+		if it.Href == "/web/admin" || it.Href == "/web/admin/config" || it.Href == "/web/admin/roles" {
+			t.Errorf("app-admin 导航不该有平台级入口 %q", it.Href)
+		}
+	}
+
+	// 5. 切换器样式只用 transition（动效令牌），不新增 keyframe 绕过门禁
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	cssRuleStr, ok := cssRule(string(cssBytes), ".app-switch")
+	if !ok {
+		t.Fatal("style.css 缺 .app-switch 规则")
+	}
+	for _, frag := range []string{"--card", "--radius-ctl"} {
+		if !strings.Contains(cssRuleStr, frag) {
+			t.Errorf(".app-switch 缺令牌 %q", frag)
+		}
+	}
+	chipRule, ok := cssRule(string(cssBytes), ".app-chip")
+	if !ok {
+		t.Fatal("style.css 缺 .app-chip 规则")
+	}
+	if !strings.Contains(chipRule, "var(--dur-1) var(--ease)") {
+		t.Error(".app-chip 的动效应沿用 --dur-1/--ease 令牌")
 	}
 }
 

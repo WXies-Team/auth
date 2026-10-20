@@ -167,12 +167,12 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 		t.Fatalf("JWT 登录: %v", err)
 	}
 
-	all, total, err := svc.AdminListSessions(0, 20, 0)
+	all, total, err := svc.AdminListSessions(0, nil, 20, 0)
 	if err != nil || total < 2 {
 		t.Fatalf("总览应至少 2 条，得到 total=%d err=%v", total, err)
 	}
 	// 三条：注册即登录那台（newPasskeyUser）+ 本用例建的 web + JWT 各一台
-	mine, _, err := svc.AdminListSessions(c.UID, 20, 0)
+	mine, _, err := svc.AdminListSessions(c.UID, nil, 20, 0)
 	if err != nil || len(mine) != 3 {
 		t.Fatalf("按 uid 过滤应 3 条，得到 %d err=%v", len(mine), err)
 	}
@@ -185,17 +185,17 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 	// 单吊：web 会话被踢后当场 401；重复吊销幂等
 	actor := c
 	actor.Meta = testMeta
-	if err := svc.AdminRevokeSession(actor, ws.SID); err != nil {
+	if err := svc.AdminRevokeSession(actor, ws.SID, nil); err != nil {
 		t.Fatalf("吊销会话: %v", err)
 	}
 	_, werr := svc.ValidWebSession(ws.Token)
 	if code, _ := httpMsg(werr); code != 401 {
 		t.Errorf("被吊销的 web 会话应 401，得到 %d", code)
 	}
-	if err := svc.AdminRevokeSession(actor, ws.SID); err != nil {
+	if err := svc.AdminRevokeSession(actor, ws.SID, nil); err != nil {
 		t.Errorf("重复吊销应幂等成功: %v", err)
 	}
-	if err := svc.AdminRevokeSession(actor, 1234567890123456789); err != nil {
+	if err := svc.AdminRevokeSession(actor, 1234567890123456789, nil); err != nil {
 		t.Errorf("吊销不存在的 id 也应成功（幂等）: %v", err)
 	}
 
@@ -207,7 +207,7 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 	if code, _ := httpMsg(jerr); code != 401 {
 		t.Errorf("被踢用户的 JWT 应 401，得到 %d", code)
 	}
-	rest, _, err := svc.AdminListSessions(c.UID, 20, 0)
+	rest, _, err := svc.AdminListSessions(c.UID, nil, 20, 0)
 	if err != nil || len(rest) != 0 {
 		t.Errorf("踢干净后应 0 条，得到 %d err=%v", len(rest), err)
 	}
@@ -345,7 +345,7 @@ func TestAdminAIUsage(t *testing.T) {
 	svc, _ := newTestService(t)
 
 	// 空表：days 为空数组，页面据此显示「暂无记录」
-	empty, err := svc.AdminAIUsage(30)
+	empty, err := svc.AdminAIUsage(30, nil)
 	if err != nil {
 		t.Fatalf("查空看板: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestAdminAIUsage(t *testing.T) {
 		t.Fatalf("造次日用量: %v", err)
 	}
 
-	report, err := svc.AdminAIUsage(30)
+	report, err := svc.AdminAIUsage(30, nil)
 	if err != nil {
 		t.Fatalf("查看板: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestAdminAIUsage(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = svc.pool.Exec("DELETE FROM app_config WHERE `key` LIKE 'ai_%'")
 	})
-	withQuota, err := svc.AdminAIUsage(30)
+	withQuota, err := svc.AdminAIUsage(30, nil)
 	if err != nil {
 		t.Fatalf("复查看板: %v", err)
 	}

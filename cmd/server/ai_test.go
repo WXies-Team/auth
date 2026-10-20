@@ -100,7 +100,7 @@ func TestAIRouteCheckConsumeRelease(t *testing.T) {
 		t.Errorf("库内计数应与回执一致：%d/%d vs %d/%d", userCount, globalCount, out.DailyUser, out.DailyGlobal)
 	}
 	// 管理后台看板读同一张表同一口径（AdminAIUsage 走 day >= 今天）
-	report, err := e.svc.AdminAIUsage(1)
+	report, err := e.svc.AdminAIUsage(1, nil)
 	if err != nil {
 		t.Fatalf("查看板: %v", err)
 	}

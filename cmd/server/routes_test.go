@@ -46,7 +46,8 @@ func newRouteEnv(t *testing.T) *routeEnv {
 	}
 	// 每轮清干净（与 internal/auth 的用例同一张测试 schema，互不残留）
 	for _, table := range []string{"users", "otp_codes", "sessions", "passkeys", "totp_factors",
-		"recovery_codes", "webauthn_challenges", "login_states", "audit_logs", "ai_usage", "app_config", "user_profile"} {
+		"recovery_codes", "webauthn_challenges", "login_states", "audit_logs", "ai_usage", "app_config",
+		"user_profile", "admin_scopes"} {
 		if _, err := pool.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("清空 %s: %v", table, err)
 		}
@@ -589,11 +590,13 @@ func keys(m map[string]*http.Cookie) string {
 	return b.String()
 }
 
-// 后台授权矩阵（规格 A3 第 7 步）：没绑 MFA 的管理员 403、绑了但强认证过期 401、
-// 重新验证后放行、降级自己 400——四条各挡各的，缺一条后台就是敞开的。
+// 后台授权矩阵（规格 A3 第 7 步 + W2 分级授权）：没绑 MFA 的管理员 403、绑了但
+// 强认证过期 401、重新验证后放行、降级自己 400——四条各挡各的，缺一条后台就是敞开的。
+// boss 是 super（W2：/admin/users 是平台级端点）；app-admin 对它的 403 另见
+// TestAdminScopeMatrix。
 func TestAdminAuthzMatrix(t *testing.T) {
 	e := newRouteEnv(t)
-	boss := seedUser(t, e, "boss@example.com", "secret123", "admin")
+	boss := seedUser(t, e, "boss@example.com", "secret123", "super")
 	worker := seedUser(t, e, "worker@example.com", "secret123", "user")
 
 	sess, csrf := loginCookie(t, e, "boss@example.com", "secret123")
@@ -666,7 +669,7 @@ func TestAdminAuthzMatrix(t *testing.T) {
 // 写入审计也只记 key（白盒：原值不得出现在任何一处响应或审计里）。
 func TestAdminConfigNeverLeaksSecret(t *testing.T) {
 	e := newRouteEnv(t)
-	uid := seedUser(t, e, "cfg-admin@example.com", "secret123", "admin")
+	uid := seedUser(t, e, "cfg-admin@example.com", "secret123", "super")
 	const secret = "leaky-secret-value-8f3a"
 	if _, err := e.pool.Exec("INSERT INTO app_config (`key`, `value`) VALUES (?, ?)",
 		"mail_client_secret", secret); err != nil {
@@ -897,12 +900,16 @@ func staleReauth(t *testing.T, e *routeEnv) {
 
 // 顶栏「管理后台」入口按角色在**模板层**显隐：管理员的概览页 HTML 里有入口与
 // 账号胶囊（邮箱 + 首字母占位），普通用户的 HTML 里连按钮都没有——不是前端藏一下。
+// W2：入口指向按角色分流——super 指用户页（平台落地），app-admin 指会话总览
+//（它的数据落地；用户页对它 302）。
 func TestTopbarAdminEntryRendersByRole(t *testing.T) {
 	e := newRouteEnv(t)
 	seedUser(t, e, "topbar-admin@example.com", "secret123", "admin")
+	seedUser(t, e, "topbar-super@example.com", "secret123", "super")
 	seedUser(t, e, "topbar-user@example.com", "secret123", "user")
 
 	page := func(email string) string {
+		drainLoginBucket()
 		sess, _ := loginCookie(t, e, email, "secret123")
 		rec := e.do(t, "GET", "/web/console", "", func(r *http.Request) { r.AddCookie(sess) })
 		if rec.Code != http.StatusOK {
@@ -913,12 +920,17 @@ func TestTopbarAdminEntryRendersByRole(t *testing.T) {
 
 	adminHTML := page("topbar-admin@example.com")
 	for _, want := range []string{
-		`id="admin-entry"`, `href="/web/admin"`,
+		`id="admin-entry"`, `href="/web/admin/sessions"`,
 		"topbar-email", "topbar-admin@example.com", "me-avatar", ">T<",
 	} {
 		if !strings.Contains(adminHTML, want) {
-			t.Errorf("管理员概览页缺顶栏元素 %q", want)
+			t.Errorf("app-admin 概览页缺顶栏元素 %q", want)
 		}
+	}
+
+	superHTML := page("topbar-super@example.com")
+	if !strings.Contains(superHTML, `id="admin-entry"`) || !strings.Contains(superHTML, `href="/web/admin"`) {
+		t.Error("super 概览页的管理入口应指向 /web/admin")
 	}
 
 	userHTML := page("topbar-user@example.com")
