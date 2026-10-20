@@ -15,26 +15,43 @@
 <body>
 <a class="skip" href="#main">跳到主要内容</a>
 
+{{if not .Minimal}}
+<!-- 顶栏常驻：左品牌、右账号胶囊 + 管理后台入口。
+     管理入口按 role 在**模板层**渲染（pageHandler 现查 users.role 传进来），
+     非管理员的 HTML 里根本没有这个按钮——不是前端藏一下。 -->
 <header class="topbar">
-  <div class="wrap topbar-in">
-    <a class="brand" href="/web">
-      <span class="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" width="24" height="24"></span>
+  <div class="topbar-in">
+    <a class="brand" href="/web/console">
+      <span class="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" width="28" height="28"></span>
       <span class="brand-name">Auth</span>
     </a>
-    {{if not .Minimal}}
-    <nav class="nav" aria-label="主导航">
-      {{range .Nav}}<a class="nav-item{{if .Active}} on{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{.Label}}</span></a>{{end}}
-    </nav>
-    {{end}}
+    <div class="topnav">
+      {{if .IsAdmin}}<a class="btn small admin-entry" href="/web/admin" id="admin-entry">{{icon "shield-check"}} 管理后台</a>{{end}}
+      <span class="acct">
+        <span class="avatar" id="me-avatar" aria-hidden="true">{{.Initial}}</span>
+        <span class="acct-email" id="topbar-email">{{.Email}}</span>
+      </span>
+    </div>
   </div>
+  <nav class="tabnav" aria-label="分区导航（窄屏）">
+    {{range .Nav}}<a class="nav-item{{if .Active}} on{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{.Label}}</span></a>{{end}}
+  </nav>
 </header>
+{{end}}
 
-<main id="main" class="wrap">
-  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  {{template "content" .}}
-</main>
+<div class="shell">
+  {{if not .Minimal}}
+  <nav class="sidenav" aria-label="主导航">
+    {{range .Nav}}<a class="nav-item{{if .Active}} on{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{.Label}}</span></a>{{end}}
+  </nav>
+  {{end}}
+  <main id="main" class="content">
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    {{template "content" .}}
+  </main>
+</div>
 
-<footer class="foot wrap">
+<footer class="foot">
   <span>Auth · 统一账号服务</span>
   <span class="dim">会话为空闲 7 天 / 绝对 90 天过期</span>
 </footer>

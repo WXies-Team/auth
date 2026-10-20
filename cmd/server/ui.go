@@ -32,7 +32,7 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 	defs := []pageDef{
 		{"/web/login", "login", "登录", nil, gatePublic},
 		{"/web/console", "console", "概览", ui.ConsoleNav("console"), gateAuth},
-		{"/web/console/sessions", "sessions", "已登录设备", ui.ConsoleNav("sessions"), gateAuth},
+		{"/web/console/sessions", "sessions", "登录会话", ui.ConsoleNav("sessions"), gateAuth},
 		{"/web/console/passkeys", "passkeys", "Passkey", ui.ConsoleNav("passkeys"), gateAuth},
 		{"/web/console/security", "security", "两步验证", ui.ConsoleNav("security"), gateAuth},
 		{"/web/console/account", "account", "账号", ui.ConsoleNav("account"), gateAuth},
@@ -109,11 +109,16 @@ func pageHandler(svc *auth.Service, name, title string, nav []ui.NavItem, gate p
 			ok    bool
 			wc    auth.WebCaller
 			haveC bool
+			email string
+			admin bool
 		)
 		if ck, err := r.Cookie(auth.WebCookieName); err == nil && ck.Value != "" {
 			if c, err := svc.ValidWebSession(ck.Value); err == nil {
 				ok, wc, haveC = true, c, true
 			}
+		}
+		if haveC {
+			email, admin = wc.Email, ui.IsAdminRole(wc.Role)
 		}
 		switch gate {
 		case gatePublic:
@@ -138,7 +143,13 @@ func pageHandler(svc *auth.Service, name, title string, nav []ui.NavItem, gate p
 				return
 			}
 		}
-		if err := ui.Render(w, name, ui.Data{Title: title, Nav: nav, Minimal: gate == gatePublic}); err != nil {
+		// 顶栏账号胶囊与「管理后台」入口的渲染依据：邮箱取自现查过的会话身份，
+		// 管理入口按 users.role 判定（ui.IsAdminRole 与后台闸同一口径）——
+		// 非管理员的 HTML 里根本没有这个按钮，不是前端藏一下。
+		if err := ui.Render(w, name, ui.Data{
+			Title: title, Nav: nav, Minimal: gate == gatePublic,
+			Email: email, IsAdmin: admin,
+		}); err != nil {
 			// 头多半已经写出（Execute 中途失败），只能记日志让 500 兜底
 			slog.Error("渲染页面失败", "page", name, "err", err)
 		}

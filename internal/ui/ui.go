@@ -28,10 +28,17 @@ type NavItem struct {
 
 // Data 是页面渲染上下文。Style/Script 在 Render 里注入（内联进 HTML，
 // 不额外产生请求），页面模板里不用关心。
+//
+// Email/Initial/IsAdmin 是**顶栏账号胶囊与管理入口**的渲染依据：由路由层从
+// 现查过的会话身份（users.role）带进来，模板层据此决定「管理后台」按钮出不出现——
+// 非管理员的 HTML 里就没有这个按钮，而不是前端 display:none 藏一下。
 type Data struct {
 	Title   string
 	Nav     []NavItem
 	Minimal bool // 登录页这类无导航的壳
+	Email   string
+	Initial string // 账号胶囊头像占位首字母（无档案头像时的兜底）
+	IsAdmin bool
 	Style   template.CSS
 	Script  template.JS
 }
@@ -106,6 +113,22 @@ func Has(name string) bool {
 	return ok
 }
 
+// IsAdminRole 判定「顶栏要不要渲染管理后台入口」。口径与 cmd/server 后台闸
+// （role == "admin"，每请求现查 users 行）同源：模板层放行的按钮，数据层一定
+// 挡得住——本服务的角色只有 user/admin 两档，不引入第二种「看起来像管理员」的名字。
+func IsAdminRole(role string) bool {
+	return role == "admin"
+}
+
+// initialOf 取邮箱首字符做账号胶囊的头像占位字（无档案头像时的兜底）；
+// 空邮箱（登录页等 Minimal 壳）回空串，模板里就不渲染这颗字母。
+func initialOf(email string) string {
+	for _, r := range strings.TrimSpace(email) {
+		return strings.ToUpper(string(r))
+	}
+	return ""
+}
+
 // StaticNames 列出可挂载的静态资产文件名（定序），路由层据此逐个挂 `GET /<name>`。
 func StaticNames() []string {
 	names := make([]string, 0, len(staticTypes))
@@ -133,6 +156,9 @@ func Render(w http.ResponseWriter, name string, data Data) error {
 		return fmt.Errorf("页面模板不存在: %s", name)
 	}
 	data.Style, data.Script = styleCSS, appJS
+	if data.Initial == "" {
+		data.Initial = initialOf(data.Email)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -156,7 +182,7 @@ func iconHTML(name string) template.HTML {
 func ConsoleNav(active string) []NavItem {
 	return []NavItem{
 		{Href: "/web/console", Label: "概览", Icon: "layout-dashboard", Active: active == "console"},
-		{Href: "/web/console/sessions", Label: "已登录设备", Icon: "monitor-smartphone", Active: active == "sessions"},
+		{Href: "/web/console/sessions", Label: "登录会话", Icon: "monitor-smartphone", Active: active == "sessions"},
 		{Href: "/web/console/passkeys", Label: "Passkey", Icon: "key-round", Active: active == "passkeys"},
 		{Href: "/web/console/security", Label: "两步验证", Icon: "shield-check", Active: active == "security"},
 		{Href: "/web/console/account", Label: "账号", Icon: "settings", Active: active == "account"},
