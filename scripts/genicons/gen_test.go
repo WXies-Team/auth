@@ -259,9 +259,10 @@ func glyphMask(img image.Image, white bool) []bool {
 	return m
 }
 
-// 字形口径（全渠道统一）：auth = **fingerprint**（与站点 favicon 同字形），
-// flame/receipt 只属于两个日记品牌。比对方式：邮件图（品牌画法）与同一套路径
-// 现渲染的站点画法，**字形掩码必须逐像素一致**——映射被改错立刻红。
+// 字形口径（全渠道统一）：auth 品牌 = **hexagon**（与站点 favicon 同字形，2026-10-20
+// 换装：曾用 fingerprint，与 passkey 功能图标撞脸），flame/receipt 只属于两个日记品牌。
+// 比对方式：邮件图（品牌画法）与同一套路径现渲染的站点画法，**字形掩码必须逐像素一致**
+// ——映射被改错立刻红。
 func TestMailIconGlyphMapping(t *testing.T) {
 	cases := []struct {
 		file  string
@@ -269,7 +270,7 @@ func TestMailIconGlyphMapping(t *testing.T) {
 	}{
 		{"calorie-diary", flamePaths},
 		{"expense-diary", receiptPaths},
-		{"auth", fingerprintPaths},
+		{"auth", hexagonPaths},
 	}
 	for _, c := range cases {
 		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/mail/icons/"+c.file+".png")))

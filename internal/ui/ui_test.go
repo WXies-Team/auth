@@ -7,7 +7,7 @@ import (
 )
 
 // 所有页面共用 layout 骨架：<head> 必须带三件套 link 与 theme-color，
-// 顶栏品牌区挂 favicon.svg（透明底 + #3482FF 裸蓝 fingerprint，与站点 favicon 同源）。
+// 顶栏品牌区挂 favicon.svg（透明底 + #3482FF 裸蓝 hexagon，与站点 favicon 同源）。
 func TestLayoutHeadHasIconLinks(t *testing.T) {
 	raw, err := files.ReadFile("templates/layout.html")
 	if err != nil {
@@ -499,5 +499,46 @@ func TestBrandMarksShareFaviconAndCenter(t *testing.T) {
 	login, _ := files.ReadFile("templates/login.html")
 	if !strings.Contains(string(login), `<img class="ico" src="/favicon.svg" alt="" width="28" height="28">`) {
 		t.Error("登录页大品牌区应是 alt=\"\" + 显式 28×28 的 img（与顶栏同源）")
+	}
+}
+
+// 换装矩阵（2026-10-20 作者拍板）：**品牌位**走 favicon.svg 的 hexagon，**passkey 功能位**
+// 一律 key-round——两者不许再撞脸。这里钉住三件事：icons.go 有 key-round 且 path 与 lucide
+// 官方一致、登录页 Passkey 按钮用的就是它、全模板没有 fingerprint 功能位残留（防回潮）。
+func TestPasskeyFunctionalIconIsKeyRound(t *testing.T) {
+	glyph, ok := icons["key-round"]
+	if !ok {
+		t.Fatal("icons.go 缺 key-round 条目（passkey 功能位统一用它）")
+	}
+	if !strings.Contains(glyph, `M2.586 17.414A2 2 0 0 0 2 18.828V21`) {
+		t.Error("key-round 的 path 与 lucide 官方 key-round 不符（字形被改了？）")
+	}
+	if _, dead := icons["fingerprint"]; dead {
+		t.Error("icons.go 不该再有 fingerprint 条目（品牌位已换 hexagon、功能位是 key-round）")
+	}
+
+	entries, err := files.ReadDir("templates")
+	if err != nil {
+		t.Fatalf("列模板: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".html") {
+			continue
+		}
+		raw, err := files.ReadFile("templates/" + e.Name())
+		if err != nil {
+			t.Fatalf("读 %s: %v", e.Name(), err)
+		}
+		if strings.Contains(string(raw), `{{icon "fingerprint"}}`) {
+			t.Errorf("%s 还在用 fingerprint 功能图标——passkey 功能位应是 key-round", e.Name())
+		}
+	}
+
+	login, err := files.ReadFile("templates/login.html")
+	if err != nil {
+		t.Fatalf("读 login.html: %v", err)
+	}
+	if !strings.Contains(string(login), `{{icon "key-round"}} 使用 Passkey 登录`) {
+		t.Error("登录页 Passkey 按钮应是 {{icon \"key-round\"}} 使用 Passkey 登录")
 	}
 }
