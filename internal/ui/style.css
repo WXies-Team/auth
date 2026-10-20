@@ -60,6 +60,8 @@ body {
 .topbar-in { display: flex; align-items: center; gap: 20px; min-height: 56px; flex-wrap: wrap; }
 .brand { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); font-weight: 600; }
 .brand-mark { display: inline-flex; width: 24px; height: 24px; color: var(--primary); }
+/* 顶栏品牌区用 favicon.svg（同款超椭圆渐变指纹图，随二进制内嵌）——显式宽高防版面抖动 */
+.brand-mark img { display: block; width: 24px; height: 24px; }
 .nav { display: flex; gap: 4px; flex-wrap: wrap; }
 .nav-item {
   display: inline-flex; align-items: center; gap: 6px;

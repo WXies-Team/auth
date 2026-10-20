@@ -64,6 +64,34 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 	}))
 }
 
+// registerStaticRoutes 挂静态资产（favicon 三件套）与根路径重定向。
+//
+// 三个文件都随二进制内嵌（internal/ui 的 embed），不依赖磁盘布局：部署产物就一个
+// 二进制。Cache-Control 7 天——指纹图标极低频改动，换图属于发版动作，客户端晚几天
+// 拿到无伤；no-store 反而会让每次进站都多一次往返。
+//
+// `/` 现状是 404（真实入口都在 /web 与 /auth），按定案 302 到登录页：浏览器手敲
+// 域名不该撞一堵墙。**只匹配根路径本身**（`/{$}` 精确匹配），不做全站兜底——
+// 打错的 API 路径仍要 404，不能被 302 成 HTML 把排障带偏。
+func registerStaticRoutes(mux *http.ServeMux) {
+	for _, name := range ui.StaticNames() {
+		mux.Handle("GET /"+name, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			data, ctype, ok := ui.Static(name)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", ctype)
+			w.Header().Set("Cache-Control", "public, max-age=604800")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			_, _ = w.Write(data)
+		}))
+	}
+	mux.Handle("GET /{$}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/login", http.StatusFound)
+	}))
+}
+
 // webSessionOK 只判「cookie 会话现在是否有效」（页面门禁用，不需要 Caller 细节）。
 func webSessionOK(svc *auth.Service, r *http.Request) bool {
 	ck, err := r.Cookie(auth.WebCookieName)

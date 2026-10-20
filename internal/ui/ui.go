@@ -11,10 +11,11 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"sort"
 	"strings"
 )
 
-//go:embed templates/*.html style.css app.js
+//go:embed templates/*.html style.css app.js static/*
 var files embed.FS
 
 // NavItem 是顶部导航的一条。
@@ -41,6 +42,16 @@ var (
 	appJS    template.JS
 )
 
+// staticTypes 是站点静态资产清单（favicon 三件套，由 scripts/genicons 生成）：
+// 文件名 → Content-Type。路由层按这份清单逐个挂 `GET /<name>`，清单改这里即可。
+var staticTypes = map[string]string{
+	"favicon.ico":          "image/x-icon",
+	"favicon.svg":          "image/svg+xml; charset=utf-8",
+	"apple-touch-icon.png": "image/png",
+}
+
+var staticFiles = map[string][]byte{}
+
 func init() {
 	css, err := files.ReadFile("style.css")
 	if err != nil {
@@ -52,6 +63,15 @@ func init() {
 		panic(fmt.Errorf("读内联脚本: %w", err))
 	}
 	appJS = template.JS(string(js)) //nolint:gosec // 静态自有资源，内容可信
+
+	// 静态资产随二进制一起打包（零外链口径）：缺一个就在启动时炸
+	for name := range staticTypes {
+		data, err := files.ReadFile("static/" + name)
+		if err != nil {
+			panic(fmt.Errorf("读静态资产 %s: %w", name, err))
+		}
+		staticFiles[name] = data
+	}
 
 	layout, err := files.ReadFile("templates/layout.html")
 	if err != nil {
@@ -84,6 +104,25 @@ func init() {
 func Has(name string) bool {
 	_, ok := pages[name]
 	return ok
+}
+
+// StaticNames 列出可挂载的静态资产文件名（定序），路由层据此逐个挂 `GET /<name>`。
+func StaticNames() []string {
+	names := make([]string, 0, len(staticTypes))
+	for name := range staticTypes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Static 取一份静态资产的内容与 Content-Type；名单外回 ("", "", false)。
+func Static(name string) ([]byte, string, bool) {
+	ctype, ok := staticTypes[name]
+	if !ok {
+		return nil, "", false
+	}
+	return staticFiles[name], ctype, true
 }
 
 // Render 渲染一个页面。响应一律 no-store：页面本身会内嵌登录态相关的骨架，
