@@ -25,6 +25,44 @@ function node(html) {
   return t.content.firstElementChild;
 }
 
+/* ---------- 动效（与 style.css 的动效系统同一套 easing/时长）----------
+   约定：
+   - 只用 transform / opacity（WAAPI 也不许碰 width/height/top 这类 layout 属性）；
+   - 用户开了「减弱动态效果」就全部不播——交互反馈只留颜色/透明度；
+   - 动画绝不拦截交互：不 await 播完再响应点击/焦点，纯装饰。 */
+const MOTION_EASE = 'cubic-bezier(.2, 0, 0, 1)';
+const reducedMotion = () =>
+  !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+/* 区块切换：crossfade + 4px 上浮，180ms（页内 tab 换面板、详情面板展开都走它）。
+   传入的元素必须此刻可见；播放失败静默忽略——动画是装饰，不是流程。 */
+function swapIn(el) {
+  if (!el || reducedMotion() || typeof el.animate !== 'function') return;
+  try {
+    el.animate(
+      [{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 180, easing: MOTION_EASE });
+  } catch (_) { /* 浏览器不支持就静默 */ }
+}
+
+/* 状态浮现：徽标/提示轻缩放进场，200ms（保存成功、角色徽标亮起一类） */
+function popIn(el) {
+  if (!el || reducedMotion() || typeof el.animate !== 'function') return;
+  try {
+    el.animate(
+      [{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'scale(1)' }],
+      { duration: 200, easing: MOTION_EASE });
+  } catch (_) { /* 同上 */ }
+}
+
+/* 行退场：挂 .leaving（CSS 用同一套 easing 做淡出 + 下沉），等它播完再回调。
+   服务端已确认成功才走到这里，所以等 180ms 不拖慢任何交互；reduced-motion 直接回调。 */
+function fadeOutRow(el, done) {
+  if (!el || reducedMotion()) { done(); return; }
+  el.classList.add('leaving');
+  setTimeout(done, 180);
+}
+
 function fmtTime(ms) {
   if (!ms) return '—';
   const d = new Date(Number(ms));
@@ -182,7 +220,9 @@ function initLogin() {
       Object.keys(tabs).forEach(other => {
         const on = other === id;
         $('#' + other).setAttribute('aria-selected', on ? 'true' : 'false');
-        $('#' + tabs[other]).classList.toggle('hidden', !on);
+        const pane = $('#' + tabs[other]);
+        pane.classList.toggle('hidden', !on);
+        if (on) swapIn(pane);   // 换面板：crossfade + 4px 上浮
       });
       showErr('#login-error', ''); showErr('#code-error', ''); showErr('#reset-error', '');
     });
@@ -195,6 +235,7 @@ function initLogin() {
     stepPwd.classList.toggle('hidden', on);
     stepTotp.classList.toggle('hidden', !on);
     $('#login-submit').textContent = on ? '完成登录' : '登录';
+    swapIn(on ? stepTotp : stepPwd);   // 步骤切换同样是区块切换动效
     if (on) $('#login-code-2fa').focus();
   }
   $('#back-to-password').addEventListener('click', () => { loginToken = ''; useTotpStep(false); });
@@ -360,6 +401,7 @@ async function initConsole() {
     $('#me-email').textContent = me.email;
     if (me.role === 'admin') {
       $('#role-badge').hidden = false;
+      popIn($('#role-badge'));   // 徽标浮现
     }
     $('#stat-password').textContent = me.passwordSet ? '已设置' : '未设置（该账号靠验证码或 Passkey 登录）';
 
@@ -467,17 +509,20 @@ function initSessions() {
       if (pending.mode === 'one') {
         await api('/api/sessions/' + pending.id, { method: 'DELETE' });
         closeDialog(dlg);
-        // 行淡出（opacity 过渡）后整表重刷，视觉上是「这台走了」而不是突然消失
-        const row = list.querySelector(`.item[data-id="${pending.id}"]`);
-        if (row) row.classList.add('leaving');
         toast('已退出该设备');
+        // 行先淡出下沉，播完再整表刷新——视觉上是「这台走了」而不是突然消失
+        fadeOutRow(list.querySelector(`.item[data-id="${pending.id}"]`), load);
       } else {
         // 服务端强制 reauth（15 分钟强认证窗），401 会自动弹「重新验证」框再重试
         await api('/api/sessions/revoke-others', { method: 'POST', body: {} });
         closeDialog(dlg);
         toast(`已退出其它 ${pending.count} 台设备`);
+        // 其余会话行一起退场，本设备行留着（随后整表刷新重绘）
+        const leaving = $$('#session-list .item:not(.current)');
+        if (!leaving.length || reducedMotion()) { await load(); return; }
+        leaving.forEach(el => el.classList.add('leaving'));
+        setTimeout(load, 180);
       }
-      await load();
     } catch (err) {
       closeDialog(dlg);
       toast(err.message, true);
@@ -601,8 +646,11 @@ function initSecurity() {
 
   async function refresh() {
     const st = await api('/api/totp');
-    $('#totp-badge').textContent = st.enabled ? '已开启' : '未开启';
-    $('#totp-badge').classList.toggle('on', st.enabled);
+    const badge = $('#totp-badge');
+    const was = badge.textContent;
+    badge.textContent = st.enabled ? '已开启' : '未开启';
+    badge.classList.toggle('on', st.enabled);
+    if (was && was !== badge.textContent) popIn(badge);   // 状态翻转：徽标轻浮现
     $('#totp-off').hidden = st.enabled;
     $('#totp-on').hidden = !st.enabled;
     if (st.enabled) $('#totp-since').textContent = '开启时间：' + fmtTime(st.createdAt);
@@ -619,6 +667,7 @@ function initSecurity() {
     });
     $('#setup-panel').classList.add('hidden');
     $('#codes-panel').classList.remove('hidden');
+    swapIn($('#codes-panel'));   // 恢复码面板浮现
   }
 
   $('#start-setup').addEventListener('click', async () => {
@@ -629,6 +678,7 @@ function initSecurity() {
       $('#setup-secret').textContent = setup.secret;
       $('#setup-code').value = '';
       $('#setup-panel').classList.remove('hidden');
+      swapIn($('#setup-panel'));   // 绑定面板浮现
       $('#setup-code').focus();
     } catch (err) { toast(err.message, true); }
   });
@@ -720,7 +770,9 @@ function initAccount() {
     Object.keys(tabs).forEach(other => {
       const on = other === id;
       $('#' + other).setAttribute('aria-selected', on ? 'true' : 'false');
-      $('#' + tabs[other]).classList.toggle('hidden', !on);
+      const pane = $('#' + tabs[other]);
+      pane.classList.toggle('hidden', !on);
+      if (on) swapIn(pane);   // 换面板：crossfade + 4px 上浮
     });
   }));
 
@@ -860,7 +912,9 @@ function initAdminUsers() {
 
   async function openDetail(uid, email) {
     const panel = $('#user-detail');
+    const wasHidden = panel.classList.contains('hidden');
     panel.classList.remove('hidden');
+    if (wasHidden) swapIn(panel);   // 首次展开做区块切换动效，重绘不重复播
     $('#ud-title').textContent = email;
     $('#ud-body').innerHTML = '<div class="empty">读取中…</div>';
     panel.scrollIntoView({ block: 'nearest' });
