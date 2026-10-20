@@ -336,8 +336,8 @@ func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
 	})
 }
 
-// internalTokenGate 是 /internal/ai/* 三端点的内部凭据闸（M3）：头
-// `X-Internal-Token: <hook_token>`。token 来源与 internalEnsure 同一个 app_config 键
+// internalTokenGate 是 /internal/ai/* 三端点与 /internal/config 的内部凭据闸（M3）：
+// 头 `X-Internal-Token: <hook_token>`。token 来源与 internalEnsure 同一个 app_config 键
 // （10s 热读，改库即生效），比对也同款——各自 sha256 后 subtle 常数时间比，
 // 长度差被散列拉平，直比字符串会按匹配前缀泄露进度。
 // **缺失 / 对不上 / 键没配（want 空）一律 401**：内部凭据没进库就该一条也进不来；
@@ -352,7 +352,7 @@ func internalTokenGate(tokenFor auth.ConfigFunc, next http.Handler) http.Handler
 			return
 		}
 		if want == "" {
-			slog.Warn("hook_token 未配置，AI 端点拒绝一切请求")
+			slog.Warn("hook_token 未配置，内部端点（AI 限额 / 配置分发）拒绝一切请求")
 		}
 		wantSum := sha256.Sum256([]byte(want))
 		gotSum := sha256.Sum256([]byte(r.Header.Get("X-Internal-Token")))

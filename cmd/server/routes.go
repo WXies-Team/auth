@@ -213,9 +213,15 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	mux.Handle("POST /internal/ai/consume", withLogging(loopbackOnly(internalTokenGate(cfg.Require, internalAIConsume(quotaSvc)))))
 	mux.Handle("POST /internal/ai/release", withLogging(loopbackOnly(internalTokenGate(cfg.Require, internalAIRelease(quotaSvc)))))
 
+	// ---- 配置分发（日记服务取本 app 的 LLM/推送配置）----
+	// 防护与 /internal/ai/* 完全同款：最外层环回守卫（公网 403），里层 hook_token
+	// 常数时间比对（缺失/错头/键没配一律 401）。handler 里再挡白名单与取值（见 config.go）。
+	mux.Handle("POST /internal/config", withLogging(loopbackOnly(internalTokenGate(cfg.Require, internalConfig(cfg)))))
+
 	// ---- Web 管理台（自助台 + 管理后台 + 页面）----
 	// 全部挂在 /web、/webauthn、/api/{totp,passkeys}、/admin 新路径下：
 	// 老端点的请求/响应形状一个字节不动，已发布的日记 App 不受影响。
+	registerStaticRoutes(mux)
 	registerPageRoutes(mux, authSvc)
 	registerWebRoutes(mux, authSvc)
 	registerAdminRoutes(mux, authSvc)
