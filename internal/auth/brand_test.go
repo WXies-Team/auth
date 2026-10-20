@@ -3,6 +3,8 @@ package auth
 import (
 	"strings"
 	"testing"
+
+	"github.com/WXies-Team/auth/internal/mail"
 )
 
 // 品牌注册表的取值：两个 App 各回各的串；缺省与未知一律中性品牌 Auth。
@@ -84,6 +86,39 @@ func TestBrandEmailStrings(t *testing.T) {
 		}
 		if !strings.Contains(newBody, b.footer) {
 			t.Errorf("app=%q 通知信缺落款 %q", c.app, b.footer)
+		}
+	}
+}
+
+// 三品牌头部的内嵌图 cid 必须与 mail 包的内嵌注册表同名（cid = PNG 文件名 + "-icon"），
+// 且每封信都真的引用它：对不上就会发出**裂图**——发件箱里看不出来，只有收件人看得见。
+func TestBrandEmailInlineIconCID(t *testing.T) {
+	seen := map[string]string{} // cid → app，抓「三品牌共用一枚图」的偷懒
+	for _, app := range []string{"calorie-diary", "expense-diary", ""} {
+		b := brandFor(app)
+		if b.icon == "" {
+			t.Fatalf("app=%q 的品牌没有内嵌图 cid", app)
+		}
+		if !mail.HasInlineIcon(b.icon) {
+			t.Errorf("app=%q 的 cid %q 在 mail 包里没有对应内嵌 PNG（cid = 文件名 + \"-icon\"）", app, b.icon)
+		}
+		if other, dup := seen[b.icon]; dup {
+			t.Errorf("app=%q 与 app=%q 共用 cid %q，三品牌该各带各的图", app, other, b.icon)
+		}
+		seen[b.icon] = app
+
+		_, codeBody := codeEmail(b, "注册", "123456")
+		_, noticeBody := changeEmailNoticeEmail(b, true, "old@example.com", "new@example.com")
+		for name, body := range map[string]string{"验证码信": codeBody, "改绑通知": noticeBody} {
+			if !strings.Contains(body, `src="cid:`+b.icon+`"`) {
+				t.Errorf("app=%q 的%s正文缺 cid 引用 %q", app, name, b.icon)
+			}
+			// 图标属性三件套：alt（读屏）、显式宽高（版面不随图片加载抖动）、border=0
+			for _, attr := range []string{` alt="`, ` width="44"`, ` height="44"`, `border="0"`} {
+				if !strings.Contains(body, attr) {
+					t.Errorf("app=%q 的%s里图标缺属性 %q", app, name, attr)
+				}
+			}
 		}
 	}
 }

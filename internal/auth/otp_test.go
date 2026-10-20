@@ -99,22 +99,23 @@ func TestMaskEmail(t *testing.T) {
 	}
 }
 
-// 邮件模板的硬约束：验证码与有效期在正文里、深色模式覆盖在、
+// 邮件模板的硬约束：验证码与有效期在正文里、暗色模式覆盖在、
 // 不过 AA 的低对比度灰（#8a8a8e≈3.6:1 / #a1a1a6≈2.6:1）不许出现。
+// 字阶照 miuix 定案：标题 20 / 正文 16 / 验证码 32 / 页脚与元信息 13，小于 13 不许出现。
 func TestCodeEmailTemplateKeepsContract(t *testing.T) {
 	subject, html := codeEmail(brandFor(""), "注册", "123456")
 	if subject != "【Auth】注册验证码" {
 		t.Errorf("主题格式变了: %q", subject)
 	}
 	for _, want := range []string{"123456", "5 分钟内有效", "prefers-color-scheme",
-		"role=\"presentation\"", "max-width:520px", "继续注册"} {
+		"role=\"presentation\"", "max-width:600px", "继续注册"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("正文缺 %q", want)
 		}
 	}
-	for _, bad := range []string{"#8a8a8e", "#a1a1a6", "font-size:12px", "font-size:13px", "font-size:14px"} {
+	for _, bad := range []string{"#8a8a8e", "#a1a1a6", "font-size:12px", "font-size:11px", "font-size:10px"} {
 		if strings.Contains(html, bad) {
-			t.Errorf("低对比度灰/小于 11pt 的字阶 %s 不该进模板", bad)
+			t.Errorf("低对比度灰/小于 10pt 的字阶 %s 不该进模板", bad)
 		}
 	}
 }
@@ -127,7 +128,7 @@ func TestChangeEmailNoticeEmail(t *testing.T) {
 		t.Errorf("旧邮箱信主题变了: %q", subject)
 	}
 	for _, want := range []string{"old@example.com", "new@example.com", "绑定邮箱已更换",
-		"找回密码", "prefers-color-scheme", `role="presentation"`, "max-width:520px"} {
+		"找回密码", "prefers-color-scheme", `role="presentation"`, "max-width:600px"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("旧邮箱信缺 %q", want)
 		}

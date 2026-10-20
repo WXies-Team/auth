@@ -17,22 +17,136 @@
 // 历史实测（2026-10-08，热量日记服务）Exchange 会把显示名覆盖成邮箱对象的
 // DisplayName：若收件箱仍显示旧名，兜底办法是改邮箱 DisplayName（M365 管理中心 /
 // `Set-Mailbox -DisplayName`），改完即生效。
+//
+// **正文是 multipart/related**：HTML + Content-ID 内嵌的品牌图标（见 relatedBody）。
+// 若线上某客户端把 MIME 头当正文显示，回退方案是改走 Graph 的
+// fileAttachment（contentId + isInline）——本包保留 relatedBody 作为唯一发信形态。
 package mail
 
 import (
 	"bytes"
 	"context"
+	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
+
+// 内嵌图标：三品牌各一枚 PNG（scripts/genicons 生成，96px@2x 的超椭圆渐变图）。
+//
+//go:embed icons/*.png
+var iconFS embed.FS
+
+// inlineIcons 是 Content-ID → PNG 字节的注册表。**cid = 文件名 + "-icon"**
+//（icons/calorie-diary.png → <calorie-diary-icon>），auth 包的品牌表按这个口径引用。
+var inlineIcons = func() map[string][]byte {
+	m := map[string][]byte{}
+	entries, err := fs.ReadDir(iconFS, "icons")
+	if err != nil {
+		panic(fmt.Errorf("列内嵌图标: %w", err))
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".png") {
+			continue
+		}
+		data, err := iconFS.ReadFile("icons/" + e.Name())
+		if err != nil {
+			panic(fmt.Errorf("读内嵌图标 %s: %w", e.Name(), err))
+		}
+		m[strings.TrimSuffix(e.Name(), ".png")+"-icon"] = data
+	}
+	if len(m) == 0 {
+		panic("mail: icons/ 下没有任何内嵌 PNG——先跑 go run ./scripts/genicons")
+	}
+	return m
+}()
+
+// HasInlineIcon 报告某个 cid 是否有对应的内嵌图（auth 侧测试用来钉住
+// 「品牌表里的 cid 与注册表同名」，防止邮件里出现裂图）。
+func HasInlineIcon(cid string) bool {
+	_, ok := inlineIcons[cid]
+	return ok
+}
+
+// cidRef 从 HTML 里摘出 src="cid:X"（也容忍单引号与无引号写法：正则只吃到
+// 引号/空白/尖括号之前）。
+var cidRef = regexp.MustCompile(`cid:([A-Za-z0-9][A-Za-z0-9._@+-]*)`)
+
+// referencedCIDs 返回 HTML 引用到的全部 cid（定序去重，保证同一份输入拼出
+// 同一份 MIME）。
+func referencedCIDs(html string) []string {
+	seen := map[string]bool{}
+	for _, m := range cidRef.FindAllStringSubmatch(html, -1) {
+		seen[m[1]] = true
+	}
+	out := make([]string, 0, len(seen))
+	for cid := range seen {
+		out = append(out, cid)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// relatedBody 把 HTML 与它引用的内嵌图拼成一个 multipart/related MIME 实体：
+// 首部是 Content-Type（含 boundary），随后是 text/html 正文部件与若干
+// image/png 内联部件（Content-ID + inline disposition）。
+//
+// **引用了没内嵌的 cid 直接报错**，不发裂图——cid 与注册表同名是 auth 模板、
+// 本包注册表、生成器三方的共同约定，宁可 503 也不投递一封头部裂图的验证码信。
+func relatedBody(html string) (string, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {"text/html; charset=utf-8"},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("拼 HTML 部件: %w", err)
+	}
+	if _, err := io.WriteString(part, html); err != nil {
+		return "", fmt.Errorf("写 HTML 部件: %w", err)
+	}
+	for _, cid := range referencedCIDs(html) {
+		data, ok := inlineIcons[cid]
+		if !ok {
+			return "", fmt.Errorf("邮件引用了未内嵌的 Content-ID %q", cid)
+		}
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Type", `image/png; name="`+cid+`.png"`)
+		h.Set("Content-ID", "<"+cid+">")
+		h.Set("Content-Disposition", `inline; filename="`+cid+`.png"`)
+		h.Set("Content-Transfer-Encoding", "base64")
+		p, err := w.CreatePart(h)
+		if err != nil {
+			return "", fmt.Errorf("拼图标部件 %s: %w", cid, err)
+		}
+		enc := base64.NewEncoder(base64.StdEncoding, p)
+		if _, err := enc.Write(data); err != nil {
+			return "", fmt.Errorf("编码图标 %s: %w", cid, err)
+		}
+		if err := enc.Close(); err != nil {
+			return "", fmt.Errorf("收尾图标 %s: %w", cid, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("收尾 multipart: %w", err)
+	}
+	return "Content-Type: multipart/related; boundary=\"" + w.Boundary() +
+		"\"; type=\"text/html\"\r\n\r\n" + buf.String(), nil
+}
 
 const (
 	// sender 是发信身份（显示地址，不是密钥），保持常量：它出现在每封信的 From 里，
@@ -122,7 +236,8 @@ type sendMailRequest struct {
 	SaveToSentItems bool    `json:"saveToSentItems"`
 }
 
-// Send 发一封 HTML 邮件。fromName 是发件人显示名（品牌名），落到
+// Send 发一封 HTML 邮件（正文为 multipart/related：HTML + cid 内嵌品牌图标）。
+// fromName 是发件人显示名（品牌名），落到
 // message.from.emailAddress.name；成功 = Graph 回 202（已接受；投递仍受 Exchange 限流约束，
 // 微软官方口径：sendMail 成功返回 202 Accepted、响应体为空）。
 // 失败返回带状态码与响应体片段的错误——只进服务端日志，客户端只看到白话。
@@ -136,6 +251,11 @@ func (s *Sender) Send(ctx context.Context, fromName, to, subject, html string) e
 	tenantID, clientID, secret := s.cfg("mail_tenant_id"), s.cfg("mail_client_id"), s.cfg("mail_client_secret")
 	if tenantID == "" || clientID == "" || secret == "" {
 		return errNoCredential
+	}
+	// 正文先拼（HTML + 内嵌图）：cid 对不上就直接失败，**不取 token、不出网**
+	content, err := relatedBody(html)
+	if err != nil {
+		return err
 	}
 	tokenURL := s.tokenURL
 	if tokenURL == "" {
@@ -169,7 +289,7 @@ func (s *Sender) Send(ctx context.Context, fromName, to, subject, html string) e
 	m := message{
 		From:         recipient{EmailAddress: emailAddress{Address: sender, Name: fromName}},
 		Subject:      subject,
-		Body:         body{ContentType: "HTML", Content: html},
+		Body:         body{ContentType: "HTML", Content: content},
 		ToRecipients: []recipient{{EmailAddress: emailAddress{Address: to}}},
 	}
 	payload, err := json.Marshal(sendMailRequest{Message: m})

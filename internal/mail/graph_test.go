@@ -1,10 +1,14 @@
 package mail
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -181,5 +185,150 @@ func TestSendWithoutCredentialFailsOffline(t *testing.T) {
 	err := s.Send(context.Background(), "Auth", "u@example.com", "s", "<p>b</p>")
 	if !errors.Is(err, errNoCredential) {
 		t.Fatalf("缺凭据应回 errNoCredential，得到 %v", err)
+	}
+}
+
+// 正文必须是 multipart/related：text/html 部件 + Content-ID 内嵌 PNG 部件。
+// 逐条钉住：媒体类型、HTML 部件与入参一致、图片是可解码的 PNG、HTML 里的每个
+// cid 引用都有对应部件（缺一个就是收件人眼里的裂图）。
+func TestSendBuildsMultipartRelatedWithInlineIcon(t *testing.T) {
+	const htmlBody = `<html><body>` +
+		`<img src="cid:calorie-diary-icon" width="44" height="44" alt="热量日记" border="0" style="display:block;">` +
+		`<p>654321</p></body></html>`
+	var gotRaw string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"t","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		gotRaw = string(raw)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	if err := newTestSender(ts.URL).Send(context.Background(),
+		"热量日记", "u@example.com", "【热量日记】注册验证码", htmlBody); err != nil {
+		t.Fatalf("发送失败: %v", err)
+	}
+
+	var payload struct {
+		Message struct {
+			Body struct {
+				ContentType string `json:"contentType"`
+				Content     string `json:"content"`
+			} `json:"body"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(gotRaw), &payload); err != nil {
+		t.Fatalf("请求体不是合法 JSON: %v\n%s", err, gotRaw)
+	}
+	b := payload.Message.Body
+	if b.ContentType != "HTML" {
+		t.Errorf("body.contentType 应为 HTML，得到 %q", b.ContentType)
+	}
+	head, rest, ok := strings.Cut(b.Content, "\r\n\r\n")
+	if !ok {
+		t.Fatalf("MIME 实体缺头部空行: %q", b.Content)
+	}
+	value := strings.TrimSpace(strings.TrimPrefix(head, "Content-Type:"))
+	mediaType, params, err := mime.ParseMediaType(value)
+	if err != nil {
+		t.Fatalf("MIME 头部不可解析: %v\n%s", err, value)
+	}
+	if mediaType != "multipart/related" || params["type"] != "text/html" {
+		t.Errorf("正文应为 multipart/related（type=text/html），得到 %q %v", mediaType, params)
+	}
+
+	var htmlPart string
+	icons := map[string][]byte{}
+	mr := multipart.NewReader(strings.NewReader(rest), params["boundary"])
+	for {
+		p, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("读 MIME 部件: %v", err)
+		}
+		switch ct := p.Header.Get("Content-Type"); {
+		case strings.HasPrefix(ct, "text/html"):
+			raw, _ := io.ReadAll(p)
+			htmlPart = string(raw)
+		case strings.HasPrefix(ct, "image/png"):
+			cid := strings.Trim(p.Header.Get("Content-ID"), "<>")
+			if cid == "" {
+				t.Error("图片部件缺 Content-ID")
+			}
+			if disp := p.Header.Get("Content-Disposition"); !strings.HasPrefix(disp, "inline") {
+				t.Errorf("内嵌图应为 inline disposition，得到 %q", disp)
+			}
+			raw, _ := io.ReadAll(p)
+			decoded, err := base64.StdEncoding.DecodeString(string(raw))
+			if err != nil {
+				t.Errorf("图片部件不是合法 base64: %v", err)
+				continue
+			}
+			if !bytes.HasPrefix(decoded, []byte("\x89PNG\r\n\x1a\n")) {
+				t.Errorf("%s 不是 PNG", cid)
+			}
+			icons[cid] = decoded
+		default:
+			t.Errorf("未知 MIME 部件类型: %q", ct)
+		}
+	}
+	if htmlPart != htmlBody {
+		t.Errorf("HTML 部件与入参不一致:\n%s", htmlPart)
+	}
+	// HTML 的每个 cid 引用都得有对应部件，且字节与入库资产一致
+	for _, cid := range referencedCIDs(htmlBody) {
+		got, ok := icons[cid]
+		if !ok {
+			t.Errorf("HTML 引用了 cid %q，但正文里没有对应内嵌部件", cid)
+			continue
+		}
+		if !bytes.Equal(got, inlineIcons[cid]) {
+			t.Errorf("%s 部件与 icons/ 下的入库 PNG 不一致", cid)
+		}
+	}
+	if len(icons) != len(referencedCIDs(htmlBody)) {
+		t.Errorf("内嵌部件数 %d 与 cid 引用数 %d 不等", len(icons), len(referencedCIDs(htmlBody)))
+	}
+}
+
+// 引用了没内嵌的 cid 必须整封失败（且不出网）：宁可 503 让用户重发，
+// 也不投递一封头部裂图的验证码信。
+func TestSendRejectsUnknownCIDOffline(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	err := newTestSender(ts.URL).Send(context.Background(),
+		"Auth", "u@example.com", "s", `<img src="cid:not-an-embedded-icon" alt="x">`)
+	if err == nil || !strings.Contains(err.Error(), "not-an-embedded-icon") {
+		t.Fatalf("引用未内嵌的 cid 应报错并点名，得到 %v", err)
+	}
+	if called {
+		t.Error("cid 对不上不该出网（取 token / sendMail 都不该发生）")
+	}
+}
+
+// 内嵌注册表的口径：cid = 文件名 + "-icon"，三枚都在（auth 品牌表按这个口径引用）。
+func TestInlineIconRegistry(t *testing.T) {
+	for _, cid := range []string{"calorie-diary-icon", "expense-diary-icon", "auth-icon"} {
+		if !HasInlineIcon(cid) {
+			t.Errorf("注册表缺 %q", cid)
+		}
+		data := inlineIcons[cid]
+		if !bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
+			t.Errorf("%s 的入库资产不是 PNG", cid)
+		}
+	}
+	if HasInlineIcon("calorie-diary") || HasInlineIcon("") {
+		t.Error("未带 -icon 后缀的键不该命中注册表")
 	}
 }
