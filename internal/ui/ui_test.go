@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -62,5 +63,104 @@ func TestPageTemplatesPresent(t *testing.T) {
 	}
 	if Has("not-a-page") {
 		t.Error("未知页名不该命中")
+	}
+}
+
+// cssRule 取一条以行首选择器开头的规则体（含大括号）。要求行首是为了不被
+// `.btn .ico` 这类更长的选择器抢匹配。
+func cssRule(css, selector string) (string, bool) {
+	i := strings.Index(css, "\n"+selector+" ")
+	if i < 0 {
+		return "", false
+	}
+	open := strings.Index(css[i:], "{")
+	if open < 0 {
+		return "", false
+	}
+	start := i + open
+	end := strings.Index(css[start:], "}")
+	if end < 0 {
+		return "", false
+	}
+	return css[start : start+end], true
+}
+
+// 品牌区两处（顶栏 `.brand` 与登录页 `.brand-lg`）**同源同款 = favicon.svg 的裸蓝
+// 矢量**；全站不得残留任何带底的 logo 图；图标与文字的垂直居中要有双保险
+//（flex 的 align-items:center 是主保险，inline 盒子的 vertical-align:middle 是兜底）。
+func TestBrandMarksShareFaviconAndCenter(t *testing.T) {
+	// 1. 两处品牌区都用同一个 favicon.svg
+	for _, tpl := range []string{"templates/layout.html", "templates/login.html"} {
+		raw, err := files.ReadFile(tpl)
+		if err != nil {
+			t.Fatalf("读 %s: %v", tpl, err)
+		}
+		if !strings.Contains(string(raw), `src="/favicon.svg"`) {
+			t.Errorf("%s 的品牌区应引用 /favicon.svg（与站点 favicon 同源），实际没有", tpl)
+		}
+	}
+
+	// 2. 全模板扫 <img>：src 只允许 /favicon.svg（二维码那张是运行时注入、本身无 src）
+	entries, err := files.ReadDir("templates")
+	if err != nil {
+		t.Fatalf("列模板: %v", err)
+	}
+	imgTag := regexp.MustCompile(`<img\b[^>]*>`)
+	imgSrc := regexp.MustCompile(`\bsrc="([^"]*)"`)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".html") {
+			continue
+		}
+		raw, err := files.ReadFile("templates/" + e.Name())
+		if err != nil {
+			t.Fatalf("读 %s: %v", e.Name(), err)
+		}
+		for _, tag := range imgTag.FindAllString(string(raw), -1) {
+			m := imgSrc.FindStringSubmatch(tag)
+			if m == nil {
+				continue // 运行时才补 src（二维码）
+			}
+			if m[1] != "/favicon.svg" {
+				t.Errorf("%s 里有非 favicon 的图片引用 %q——品牌图必须统一成裸蓝矢量，不许带底",
+					e.Name(), m[1])
+			}
+		}
+	}
+
+	// 3. 样式：双保险齐备
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	css := string(cssBytes)
+	if strings.Contains(css, "background-image") {
+		t.Error("style.css 不该有 background-image（品牌图标走 <img>，不用底图）")
+	}
+	for _, want := range []struct{ selector, frag string }{
+		{".brand", "align-items: center"},
+		{".brand", "vertical-align: middle"},
+		{".brand-mark", "align-items: center"},
+		{".brand-mark", "vertical-align: middle"},
+		{".ico", "vertical-align: middle"},
+		{".brand-lg", "align-items: center"},
+		{".brand-lg", "justify-content: center"},
+	} {
+		rule, ok := cssRule(css, want.selector)
+		if !ok {
+			t.Errorf("style.css 缺规则 %s", want.selector)
+			continue
+		}
+		if !strings.Contains(rule, want.frag) {
+			t.Errorf("%s 规则缺 %q（图标与文字垂直居中的保险）：\n%s", want.selector, want.frag, rule)
+		}
+	}
+	// 品牌图标必须是显式尺寸的 <img>，加载前不抖版面
+	layout, _ := files.ReadFile("templates/layout.html")
+	if !strings.Contains(string(layout), `<img src="/favicon.svg" alt="" width="24" height="24">`) {
+		t.Error("顶栏品牌图标应是 alt=\"\" + 显式 24×24 的 img")
+	}
+	login, _ := files.ReadFile("templates/login.html")
+	if !strings.Contains(string(login), `<img class="ico" src="/favicon.svg" alt="" width="28" height="28">`) {
+		t.Error("登录页大品牌区应是 alt=\"\" + 显式 28×28 的 img（与顶栏同源）")
 	}
 }

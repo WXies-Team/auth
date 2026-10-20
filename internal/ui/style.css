@@ -58,9 +58,11 @@ body {
 /* ---- 顶栏与导航 ---- */
 .topbar { border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; z-index: 10; }
 .topbar-in { display: flex; align-items: center; gap: 20px; min-height: 56px; flex-wrap: wrap; }
-.brand { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); font-weight: 600; }
-.brand-mark { display: inline-flex; width: 24px; height: 24px; color: var(--primary); }
-/* 顶栏品牌区用 favicon.svg（同款超椭圆渐变指纹图，随二进制内嵌）——显式宽高防版面抖动 */
+.brand { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); font-weight: 600; vertical-align: middle; }
+/* 顶栏品牌区 = favicon.svg 同款裸蓝矢量（无底）。vertical-align 是**兜底**：
+   inline-flex 盒子会按最后一个子项的基线对齐，img 没有文字基线 → 整块下坠 2~4px；
+   两处实际都在 flex 容器里由 align-items:center 兜住，这里再钉一道保险。 */
+.brand-mark { display: inline-flex; align-items: center; width: 24px; height: 24px; color: var(--primary); vertical-align: middle; }
 .brand-mark img { display: block; width: 24px; height: 24px; }
 .nav { display: flex; gap: 4px; flex-wrap: wrap; }
 .nav-item {
@@ -135,7 +137,7 @@ input:disabled { opacity: .6; }
 .btn[aria-busy=true] { opacity: .6; pointer-events: none; }
 .btn .ico { width: 16px; height: 16px; }
 
-.ico { width: 18px; height: 18px; flex: none; }
+.ico { width: 18px; height: 18px; flex: none; vertical-align: middle; }
 
 /* ---- 列表行（设备 / Passkey / 配置）---- */
 .list { display: grid; gap: 10px; }
