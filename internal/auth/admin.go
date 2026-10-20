@@ -235,7 +235,8 @@ func (s *Service) AdminUserDetail(uid int64) (*AdminUserDetail, error) {
 	}
 	detail := &AdminUserDetail{AdminUser: batch[0], HasPassword: password.Valid && strings.TrimSpace(password.String) != ""}
 
-	sessions, _, err := s.AdminListSessions(uid, adminMaxPage, 0)
+	// 用户详情是 super 的全量视角（详情页含跨 app 的会话与凭证），不传 app 过滤
+	sessions, _, err := s.AdminListSessions(uid, nil, adminMaxPage, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -255,10 +256,15 @@ func (s *Service) AdminUserDetail(uid int64) (*AdminUserDetail, error) {
 	return detail, nil
 }
 
-// AdminSetRole 改角色。
+// AdminSetRole 改角色（用户页的 user↔admin 调整；super 的授予/回收走
+// AdminChangeRole，见 scope.go）。
 //
-// 两条守卫：① 不能降级自己（否则一次误操作就把所有人都锁在门外）；
-// ② 角色只认 user/admin 两值——库里多一个没实现过的值等于多一种未知权限。
+// 三条守卫：① 不能降级自己（否则一次误操作就把所有人都锁在门外）；
+// ② 角色只认 user/admin 两值——super 不在本端点值域里（平台角色只能经
+// /admin/roles/{uid}/role 调整，那里有最后一个 super 的守卫）；
+// ③ 目标当前是 super 时拒绝——绕过新端点把 super 降成 admin/user 会躲掉
+// 「不能降级最后一个 super」的锁。降回 user 时同事务清掉 admin_scopes 行，
+// 防止残留授权在下次提权时意外复活。
 func (s *Service) AdminSetRole(actor Caller, targetUID int64, role string) (err error) {
 	defer func() {
 		s.Audit(AuditEvent{
@@ -273,31 +279,50 @@ func (s *Service) AdminSetRole(actor Caller, targetUID int64, role string) (err 
 	if targetUID == actor.UID && role != adminRoleAdmin {
 		return badRequest("不能取消自己的管理员身份")
 	}
-	var exists int
-	if err := s.pool.QueryRowContext(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)", targetUID).Scan(&exists); err != nil {
-		return fmt.Errorf("查目标用户: %w", err)
-	}
-	if exists == 0 {
+	var current string
+	scanErr := s.pool.QueryRowContext(context.Background(),
+		"SELECT role FROM users WHERE id = ?", targetUID).Scan(&current)
+	if errors.Is(scanErr, sql.ErrNoRows) {
 		return &HTTPError{404, "该用户不存在"}
+	}
+	if scanErr != nil {
+		return fmt.Errorf("查目标用户: %w", scanErr)
+	}
+	if IsSuperRole(current) {
+		return badRequest("平台管理员的角色调整请走角色管理页")
 	}
 	if _, err := s.pool.ExecContext(context.Background(),
 		"UPDATE users SET role = ? WHERE id = ?", role, targetUID); err != nil {
 		return fmt.Errorf("改角色: %w", err)
+	}
+	if role == adminRoleUser {
+		// 降回普通用户即清授权行：残留行会在下次提权时把旧 app 权限意外带回来
+		if _, err := s.pool.ExecContext(context.Background(),
+			"DELETE FROM admin_scopes WHERE uid = ?", targetUID); err != nil {
+			return fmt.Errorf("清应用授权: %w", err)
+		}
 	}
 	return nil
 }
 
 // ---- 会话总览 ----
 
-// AdminListSessions 列活跃会话；uid > 0 时只看该用户。
-func (s *Service) AdminListSessions(uid int64, limit, offset int) ([]AdminSession, int, error) {
+// AdminListSessions 列活跃会话；uid > 0 时只看该用户；apps 非空时只回这些
+// app 的行（app-admin 的数据边界——sessions.app 列天然承载归属，过滤成本一次
+// 条件而已），空 = 不限（super 的全量视图）。
+func (s *Service) AdminListSessions(uid int64, apps []string, limit, offset int) ([]AdminSession, int, error) {
 	limit, offset = clampPage(limit, offset)
 	cond := " WHERE s.revoked_at IS NULL"
 	args := []any{}
 	if uid > 0 {
 		cond += " AND s.user_id = ?"
 		args = append(args, uid)
+	}
+	if len(apps) > 0 {
+		cond += " AND s.app IN (" + placeholders(len(apps)) + ")"
+		for _, a := range apps {
+			args = append(args, a)
+		}
 	}
 	var total int
 	if err := s.pool.QueryRowContext(context.Background(),
@@ -330,9 +355,14 @@ func (s *Service) AdminListSessions(uid int64, limit, offset int) ([]AdminSessio
 
 // AdminRevokeSession 吊销**任意**会话（幂等：不存在的 id 也回成功——管理员点两下
 // 不该看到 404）。owner 只为了审计里能带 target_uid。
-func (s *Service) AdminRevokeSession(actor Caller, sid int64) (err error) {
+//
+// apps 非空时是 app-admin 的收权边界：目标会话的 app 不在授权清单内一律 403
+//（不能踢别的 app 的会话）；空 = 不限（super）。越界尝试照记审计（fail）。
+func (s *Service) AdminRevokeSession(actor Caller, sid int64, apps []string) (err error) {
 	var owner sql.NullInt64
-	_ = s.pool.QueryRowContext(context.Background(), "SELECT user_id FROM sessions WHERE id = ?", sid).Scan(&owner)
+	var sessApp string
+	appErr := s.pool.QueryRowContext(context.Background(),
+		"SELECT user_id, app FROM sessions WHERE id = ?", sid).Scan(&owner, &sessApp)
 	defer func() {
 		s.Audit(AuditEvent{
 			Action: AuditAdminSession, OK: err == nil, ActorUID: uidPtr(actor.UID),
@@ -340,6 +370,12 @@ func (s *Service) AdminRevokeSession(actor Caller, sid int64) (err error) {
 			Detail: map[string]string{"session": fmt.Sprint(sid)},
 		})
 	}()
+	// 查无此行（含 appErr=ErrNoRows）维持幂等成功语义：不存在的会话没有可越界的
+	// app，下面的 UPDATE 也是 0 行命中
+	if appErr == nil && len(apps) > 0 && !containsStr(apps, sessApp) {
+		err = &HTTPError{403, "没有该应用的管理权限"}
+		return err
+	}
 	if _, err = s.pool.ExecContext(context.Background(),
 		"UPDATE sessions SET revoked_at = ? WHERE id = ?", time.Now().UnixMilli(), sid); err != nil {
 		return fmt.Errorf("吊销会话: %w", err)
@@ -514,7 +550,15 @@ var aiQuotaKeys = []struct {
 
 // AdminAIUsage 聚合近 N 天的 AI 用量与四档限额现值。
 // 表为空回 days=[]（页面显示「暂无记录」）——不做任何造数。
-func (s *Service) AdminAIUsage(days int) (*AIUsageReport, error) {
+//
+// apps 非空 = app-admin 视角。ai_usage **没有 app 维度**（列只有
+// scope/subject/day/count，见 schema.sql），诚实可行的过滤口径是「subject 归属
+// 该 app 的用户」：subject（uid 十进制串）∈ 在该 app 有会话行的用户集合。两点
+// 如实声明：① sessions 行在注销后即删、死会话保留 30 天（cleanup.go），新近
+// 才流失的用户可能短暂落出视图——现状数据结构下没有更准的归属源；②
+// scope='global' 的行是全站跨 app 合计，属跨 app 数据，对 app-admin 一律隐藏。
+// 限额四档是全站配置，两档视角都显示（app-admin 的「限额视图」是需求明列的）。
+func (s *Service) AdminAIUsage(days int, apps []string) (*AIUsageReport, error) {
 	if days <= 0 {
 		days = 30
 	}
@@ -522,8 +566,17 @@ func (s *Service) AdminAIUsage(days int) (*AIUsageReport, error) {
 		days = 90
 	}
 	since := time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	cond := ""
+	args := []any{since}
+	if len(apps) > 0 {
+		cond = " AND scope = 'user' AND CAST(subject AS UNSIGNED) IN" +
+			" (SELECT user_id FROM sessions WHERE app IN (" + placeholders(len(apps)) + "))"
+		for _, a := range apps {
+			args = append(args, a)
+		}
+	}
 	rows, err := s.pool.QueryContext(context.Background(),
-		"SELECT day, subject, count FROM ai_usage WHERE day >= ? ORDER BY day DESC, count DESC", since)
+		"SELECT day, subject, count FROM ai_usage WHERE day >= ?"+cond+" ORDER BY day DESC, count DESC", args...)
 	if err != nil {
 		return nil, fmt.Errorf("查用量: %w", err)
 	}

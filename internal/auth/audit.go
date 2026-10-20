@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,11 @@ const (
 	AuditAdminSession   = "admin.session.revoke"
 	AuditAdminConfig    = "admin.config.set"
 	AuditAdminAuditView = "admin.audit.view"
+	// W2 分级授权三事件：scope 授予/回收与平台角色调整（detail 只带 app 或目标
+	// role，不带值域外信息——见 scope.go）。
+	AuditRoleGrant  = "admin.role.grant"
+	AuditRoleRevoke = "admin.role.revoke"
+	AuditRoleChange = "admin.role.change"
 	// AuditInternalEnsure 存量用户并入（POST /internal/users/ensure）：actor 是
 	// hook_token 的持有方（迁移脚本，无用户身份 → 匿名事件），detail 记批量数。
 	AuditInternalEnsure = "internal.ensure"
@@ -139,6 +145,13 @@ type AuditQuery struct {
 	To     int64
 	Limit  int
 	Offset int
+	// Apps 非空 = app-admin 的可见边界：只回 detail JSON 里带该 app 标记的条目
+	//（`"app":"calorie-diary"` 子串匹配）。**这是现状数据结构下唯一诚实可行的
+	// 口径**——audit_logs 没有 app 列，登录/注册类事件把 app 放进 detail（见
+	// auth.go 的 {"app": app}），其余事件（改密、凭证操作等）天然不归属任何
+	// app，app-admin 看不到它们正是收权想要的效果。空 = 不限（super）。
+	// LIKE 的模式来自 allowedApps 白名单（不含 %/_ 通配），无注入面。
+	Apps []string
 }
 
 // AuditLimit / AuditOffsetCap：审计查询的页大小与翻页上限。50 是管理台一页
@@ -185,6 +198,15 @@ func (s *Service) QueryAudit(q AuditQuery) ([]AuditRow, int, error) {
 		cond += " AND ts <= ?"
 		args = append(args, q.To)
 	}
+	if len(q.Apps) > 0 {
+		// OR 组合各 app 的 detail 子串命中。LIKE 模式走占位符；app 值本身来自
+		// 服务端 allowedApps 白名单（route 层已挡名单外取值），LIKE 通配符不在
+		// 白名单字符集里，双重保险不构成注入面
+		cond += " AND (" + auditAppOR(len(q.Apps)) + ")"
+		for _, a := range q.Apps {
+			args = append(args, `%"app":"`+a+`"%`)
+		}
+	}
 
 	var total int
 	if err := s.pool.QueryRowContext(context.Background(), "SELECT COUNT(*)"+base+cond, args...).
@@ -224,6 +246,11 @@ func (s *Service) QueryAudit(q AuditQuery) ([]AuditRow, int, error) {
 		return nil, 0, fmt.Errorf("遍历审计: %w", err)
 	}
 	return out, total, nil
+}
+
+// auditAppOR 生成 n 个 `detail LIKE ?` 的 OR 串。
+func auditAppOR(n int) string {
+	return strings.TrimSuffix(strings.Repeat("detail LIKE ? OR ", n), " OR ")
 }
 
 // CleanAuditLogs 删掉超过保留期的审计行。挂发码路径（otp.go issue）周期性调用，

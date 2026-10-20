@@ -1201,11 +1201,17 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 	// 外加两步登录的中间态——它们是 5 分钟的在途凭证，账号没了还挂着就是一张废票。
 	// user_profile 也在列：档案归身份提供方，账号删了还留着昵称/头像就是隐私残留
 	//（日记侧的对应资料行由注销钩子清，本服务这行只能在这里删）。
+	// admin_scopes 同列名 uid（不是 user_id），单独一条 DELETE：授权行指向已注销
+	// 的账号既无意义也是残留（uid 复用时会把前任的授权送给人）。
 	for _, table := range []string{"passkeys", "totp_factors", "recovery_codes", "webauthn_challenges", "login_states", "user_profile"} {
 		if _, err := tx.ExecContext(context.Background(),
 			"DELETE FROM "+table+" WHERE user_id = ?", userID); err != nil {
 			return fmt.Errorf("清空 %s: %w", table, err)
 		}
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		"DELETE FROM admin_scopes WHERE uid = ?", userID); err != nil {
+		return fmt.Errorf("清空应用授权: %w", err)
 	}
 	// m14：个人 AI 用量行同批清（scope='user' AND subject=uid）——隐私残留 +
 	// 防日后 uid 复用时把前任的用量算到新人头上。global 行与迁移映射表行**保留**：
