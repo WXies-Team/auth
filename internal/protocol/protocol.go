@@ -24,7 +24,8 @@ type AuthRequest struct {
 }
 
 // SendCodeRequest 对应 SendCodeRequest。Purpose 取 auth.PurposeRegister /
-// PurposeReset / PurposeLogin（客户端 CodePurpose 三值，服务端白名单同集，其余回 400）。
+// PurposeReset / PurposeLogin / PurposeLogin2FA（客户端 CodePurpose 四值，服务端
+// 白名单同集，其余回 400）。
 //
 // App 是本服务新增的**可选**字段：决定这封验证码邮件的品牌（空白 = 中性品牌 Auth，
 // 预留给将来的 web 账号台；给了就必须在 calorie-diary / expense-diary 白名单，未知值 400）。
@@ -154,10 +155,13 @@ type EnsureUserResult struct {
 // SessionInfo 是 GET /api/sessions 的一条「已登录设备」（本服务新增的端点，
 // 不属于与日记客户端既有 /auth/* 逐字对齐的那批 DTO）。
 //
-// ID 是 63 位雪花：用 int64 字段接收（decode 成 float64 会丢低位）；
+// ID 是 63 位雪花，**以十进制字符串输出**：经浏览器 JSON.parse 往返的数值只有
+// 53 位精度，63 位雪花会被抹圆（见 passkey.go jsSafeID 的实测注释），前端拿抹圆
+// 的 id 再来踢人只会 404「该会话不存在」。字符串 id 原样回传即可（路径与请求体里
+// 的会话 id 同样一律按字符串传）。
 // Current 标出发起本次请求的那台——踢谁都行，踢掉自己等于本地登出。
 type SessionInfo struct {
-	ID         int64  `json:"id"`
+	ID         string `json:"id"`
 	App        string `json:"app"`
 	Device     string `json:"device"`
 	IP         string `json:"ip"`
@@ -211,12 +215,18 @@ type WebLoginCodeRequest struct {
 	Code  string `json:"code"`
 }
 
-// WebLoginTOTPRequest 是 POST /web/login/totp 的请求体：Code 与 RecoveryCode
-// 二选一（哪个非空用哪个）。
+// WebLoginTOTPRequest 是 POST /web/login/totp 的请求体：Code / RecoveryCode /
+// EmailCode **三选一**（哪个非空用哪个，优先级 recoveryCode > emailCode > code——
+// 前两个是专用字段、语义无歧义，code 是兜底的通用位）。
+//
+// EmailCode 是**可选**字段（邮箱验证码作第二因子，purpose=login_2fa 的码）：
+// 只在 Web 登录流的「邮箱码模式」提交，日记客户端不传照常工作——多收一个不认识的
+// 字段是本服务的既定兼容口径。
 type WebLoginTOTPRequest struct {
 	LoginToken   string `json:"loginToken"`
 	Code         string `json:"code"`
 	RecoveryCode string `json:"recoveryCode"`
+	EmailCode    string `json:"emailCode"`
 }
 
 // WebLoginPending 是两步登录第一步的回执（与 {token,email} 互斥）。
@@ -241,11 +251,18 @@ type WebSessionResponse struct {
 	PasswordSet bool `json:"passwordSet"`
 }
 
-// WebReauthRequest 是 POST /web/reauth 的请求体：Password 与 TOTPCode 二选一，
-// 都为空则回 400（「重新验证」必须真的验点什么）。
+// WebReauthRequest 是 POST /web/reauth 的请求体：Password / TOTPCode /
+// RecoveryCode **三选一**（哪个非空用哪个，优先级同序），全为空则回 400
+//（「重新验证」必须真的验点什么）。
+//
+// RecoveryCode 是本批新增的可选字段：重新验证弹框的「使用恢复码」模式提交到这里。
+// 恢复码与两步验证码在业务层按**格式分流**（与安全页一框二选一同一套判定）：
+// 恢复码单次使用、用掉即废（NIST SP 800-63B §4.2.1.1 的口径），失败不消耗其它因子。
+// 老调用方不传它照常工作——多收一个不认识的字段是本服务的既定兼容口径。
 type WebReauthRequest struct {
-	Password string `json:"password"`
-	TOTPCode string `json:"totpCode"`
+	Password     string `json:"password"`
+	TOTPCode     string `json:"totpCode"`
+	RecoveryCode string `json:"recoveryCode"`
 }
 
 // PasskeyFinishRequest 是 /webauthn/*/finish 的请求体：ceremonyId 是我们发的

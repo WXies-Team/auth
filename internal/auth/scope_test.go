@@ -85,8 +85,8 @@ func TestAdminSetScopeGrantRevoke(t *testing.T) {
 	}
 
 	// ⑥ 非法输入：名单外 app 400；查无 uid 404；授予 super 400
-	if code, msg := httpMsg(svc.AdminSetScope(super, target.UID, "evil-app", true)); code != 400 || !strings.Contains(msg, "未知应用") {
-		t.Errorf("名单外 app 应 400「未知应用」，得到 %d %q", code, msg)
+	if code, msg := httpMsg(svc.AdminSetScope(super, target.UID, "evil-app", true)); code != 400 || !strings.Contains(msg, "未知项目") {
+		t.Errorf("名单外 app 应 400「未知项目」，得到 %d %q", code, msg)
 	}
 	if code, _ := httpMsg(svc.AdminSetScope(super, 999999999999999999, "calorie-diary", true)); code != 404 {
 		t.Errorf("查无 uid 应 404，得到 %d", code)
@@ -116,131 +116,10 @@ func TestAdminSetScopeGrantRevoke(t *testing.T) {
 	}
 }
 
-// 平台角色调整：admin↔super 双向、最后一个 super 不可降级、不能动自己、
-// 非管理员目标拒绝、非法角色值拒绝，审计落 admin.role.change。
-func TestAdminChangeRole(t *testing.T) {
-	svc, mailer := newTestService(t)
-	superA := seedAdminUser(t, svc, mailer, "role-super-a@example.com", adminRoleSuper)
-	superB := seedAdminUser(t, svc, mailer, "role-super-b@example.com", adminRoleSuper)
-	// 目标先是个 app-admin（ChangeRole 只认 admin↔super 两值的调整）
-	target := newPasskeyUser(t, svc, mailer, "role-target@example.com")
-	if err := svc.AdminSetScope(superA, target.UID, "calorie-diary", true); err != nil {
-		t.Fatalf("造 app-admin: %v", err)
-	}
+// 平台角色（super 的授予/回收）与三值角色调整已合并到 admin.go 的 AdminSetRole
+//（POST /admin/users/{uid}/role），用例见 admin_test.go 的 TestAdminSetRole 与
+// TestAdminSetRoleRootSuperOnly（含根 su 收口、清 scopes、幂等与审计分流）。
 
-	// ① admin → super
-	if err := svc.AdminChangeRole(superA, target.UID, adminRoleSuper); err != nil {
-		t.Fatalf("admin 升 super: %v", err)
-	}
-	if got, _ := svc.SessionRole(target.UID); got != adminRoleSuper {
-		t.Errorf("升后应为 super，得到 %q", got)
-	}
-	// ② super → admin（库里还有两个 super，不构成「最后一个」）
-	if err := svc.AdminChangeRole(superA, target.UID, adminRoleAdmin); err != nil {
-		t.Fatalf("super 降 admin: %v", err)
-	}
-
-	// ③ 只剩一个 super 时降级它 → 400（把 superB 也降了，然后试降 superA）
-	if err := svc.AdminChangeRole(superA, superB.UID, adminRoleAdmin); err != nil {
-		t.Fatalf("两 super 时降其一应成功: %v", err)
-	}
-	if code, msg := httpMsg(svc.AdminChangeRole(target, superA.UID, adminRoleAdmin)); code != 400 || !strings.Contains(msg, "最后一个") {
-		t.Errorf("降级最后一个 super 应 400，得到 %d %q", code, msg)
-	}
-	// 复原 superB，后续用例还需要两个 super 的环境
-	if err := svc.AdminChangeRole(superA, superB.UID, adminRoleSuper); err != nil {
-		t.Fatalf("复原 superB: %v", err)
-	}
-
-	// ④ 不能动自己
-	if code, msg := httpMsg(svc.AdminChangeRole(superA, superA.UID, adminRoleAdmin)); code != 400 || !strings.Contains(msg, "自己") {
-		t.Errorf("调整自己应 400，得到 %d %q", code, msg)
-	}
-	// ⑤ 非法角色值 / 值域外（user 不在此端点）
-	if code, _ := httpMsg(svc.AdminChangeRole(superA, target.UID, adminRoleUser)); code != 400 {
-		t.Errorf("user 不该是 ChangeRole 的合法目标值，得到 %d", code)
-	}
-	if code, _ := httpMsg(svc.AdminChangeRole(superA, target.UID, "root")); code != 400 {
-		t.Errorf("未知角色应 400，得到 %d", code)
-	}
-	// ⑥ 普通用户目标 → 400（先给 target 降成 user）
-	if err := svc.AdminSetScope(superA, target.UID, "calorie-diary", false); err != nil {
-		t.Fatalf("收光授权: %v", err)
-	}
-	if code, msg := httpMsg(svc.AdminChangeRole(superA, target.UID, adminRoleSuper)); code != 400 || !strings.Contains(msg, "先授予应用授权") {
-		t.Errorf("普通用户应 400 且点名路径，得到 %d %q", code, msg)
-	}
-
-	// ⑦ 审计
-	var cnt int
-	if err := svc.pool.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = 'ok'",
-		AuditRoleChange).Scan(&cnt); err != nil || cnt == 0 {
-		t.Errorf("角色调整应进审计，得到 %d err=%v", cnt, err)
-	}
-}
-
-// 老端点 AdminSetRole 的 W2 新守卫：super 目标拒（走角色页）、降 user 清 scopes。
-func TestAdminSetRoleSuperGuards(t *testing.T) {
-	svc, mailer := newTestService(t)
-	super := seedAdminUser(t, svc, mailer, "setrole-super@example.com", adminRoleSuper)
-	target := newPasskeyUser(t, svc, mailer, "setrole-target@example.com")
-	if err := svc.AdminSetScope(super, target.UID, "calorie-diary", true); err != nil {
-		t.Fatalf("造 app-admin: %v", err)
-	}
-
-	// super 目标 → 400（防绕过「最后一个 super」锁）
-	if code, msg := httpMsg(svc.AdminSetRole(super, super.UID, adminRoleAdmin)); code != 400 || !strings.Contains(msg, "角色管理页") {
-		t.Errorf("老端点改 super 应 400 且指路，得到 %d %q", code, msg)
-	}
-	// 降 user 清 scopes（残留行不许在下次提权时复活）
-	if err := svc.AdminSetRole(super, target.UID, adminRoleUser); err != nil {
-		t.Fatalf("降 user: %v", err)
-	}
-	var left int
-	_ = svc.pool.QueryRow("SELECT COUNT(*) FROM admin_scopes WHERE uid = ?", target.UID).Scan(&left)
-	if left != 0 {
-		t.Errorf("降 user 应清空授权行，剩 %d", left)
-	}
-}
-
-// 角色管理页摘要：scopes 按 uid 回填、检索口径与用户页一致。
-func TestAdminListRoles(t *testing.T) {
-	svc, mailer := newTestService(t)
-	super := seedAdminUser(t, svc, mailer, "roles-super@example.com", adminRoleSuper)
-	a := newPasskeyUser(t, svc, mailer, "roles-a@example.com")
-	b := newPasskeyUser(t, svc, mailer, "roles-b@example.com")
-	if err := svc.AdminSetScope(super, a.UID, "calorie-diary", true); err != nil {
-		t.Fatalf("授予: %v", err)
-	}
-	if err := svc.AdminSetScope(super, b.UID, "expense-diary", true); err != nil {
-		t.Fatalf("授予: %v", err)
-	}
-
-	list, total, err := svc.AdminListRoles("", 50, 0)
-	if err != nil || total < 3 || len(list) != total {
-		t.Fatalf("应列出全部用户，total=%d len=%d err=%v", total, len(list), err)
-	}
-	byUID := map[int64]AdminRoleUser{}
-	for _, u := range list {
-		byUID[u.UID] = u
-	}
-	if got := byUID[a.UID]; got.Role != adminRoleAdmin || len(got.Scopes) != 1 || got.Scopes[0] != "calorie-diary" {
-		t.Errorf("a 的摘要不对: %+v", got)
-	}
-	if got := byUID[b.UID]; len(got.Scopes) != 1 || got.Scopes[0] != "expense-diary" {
-		t.Errorf("b 的摘要不对: %+v", got)
-	}
-	if got := byUID[super.UID]; got.Role != adminRoleSuper {
-		t.Errorf("super 的 role 应为 super，得到 %q", got.Role)
-	}
-	// 按邮箱片段检索
-	hits, _, err := svc.AdminListRoles("roles-b", 20, 0)
-	if err != nil || len(hits) != 1 || hits[0].UID != b.UID {
-		t.Errorf("按片段应只命中 b，得到 %+v err=%v", hits, err)
-	}
-}
-
-// 会话列表的 app 过滤：apps 非空只回授权 app 的行；空 = 全量。
 func TestAdminListSessionsAppsFilter(t *testing.T) {
 	svc, mailer := newTestService(t)
 	newPasskeyUser(t, svc, mailer, "sessfilter@example.com")
@@ -251,11 +130,11 @@ func TestAdminListSessionsAppsFilter(t *testing.T) {
 		t.Fatalf("expense 登录: %v", err)
 	}
 
-	all, _, err := svc.AdminListSessions(0, nil, 50, 0)
+	all, _, _, err := svc.AdminListSessions(0, nil, "", 50, 0)
 	if err != nil || len(all) < 3 {
 		t.Fatalf("全量应至少 3 行（注册 + 两 app），得到 %d err=%v", len(all), err)
 	}
-	cal, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, 50, 0)
+	cal, _, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, "", 50, 0)
 	if err != nil || len(cal) == 0 {
 		t.Fatalf("按 app 过滤应有行，得到 %d err=%v", len(cal), err)
 	}
@@ -264,7 +143,7 @@ func TestAdminListSessionsAppsFilter(t *testing.T) {
 			t.Errorf("过滤后不该出现 %s 的行: %+v", it.App, it)
 		}
 	}
-	both, _, err := svc.AdminListSessions(0, []string{"calorie-diary", "expense-diary"}, 50, 0)
+	both, _, _, err := svc.AdminListSessions(0, []string{"calorie-diary", "expense-diary"}, "", 50, 0)
 	if err != nil || len(both) < 2 {
 		t.Errorf("双 app 过滤应含两 app 的行，得到 %d err=%v", len(both), err)
 	}
@@ -298,7 +177,7 @@ func TestAdminRevokeSessionScopeBoundary(t *testing.T) {
 	calSID, expSID := sidOf("calorie-diary"), sidOf("expense-diary")
 
 	// 越界：踢 expense 会话 → 403，会话仍活着
-	if code, msg := httpMsg(svc.AdminRevokeSession(adminA, expSID, []string{"calorie-diary"})); code != 403 || !strings.Contains(msg, "没有该应用") {
+	if code, msg := httpMsg(svc.AdminRevokeSession(adminA, expSID, []string{"calorie-diary"})); code != 403 || !strings.Contains(msg, "没有该项目") {
 		t.Errorf("越界踢会话应 403，得到 %d %q", code, msg)
 	}
 	var revoked sql.NullInt64
@@ -405,26 +284,33 @@ func TestAdminAIUsageAppsFilter(t *testing.T) {
 		t.Fatalf("造 global 用量: %v", err)
 	}
 
-	// super（nil）：全量，含 global 行（99 会进当日 total）
+	// super（nil）：全量 user 行合计；global 行单独走 global.used（不与 user 行相加，
+	// 否则真实数据里 global == Σuser 会把总量翻倍）
 	full, err := svc.AdminAIUsage(7, nil)
 	if err != nil || len(full.Days) == 0 {
 		t.Fatalf("全量看板: %v", err)
 	}
-	if full.Days[0].Total != 5+7+99 {
-		t.Errorf("全量当日 total 应为 111，得到 %d", full.Days[0].Total)
+	if full.Today != 5+7 {
+		t.Errorf("全量今日 user 行合计应为 12，得到 %d", full.Today)
+	}
+	if full.Global == nil || full.Global.Used != 99 {
+		t.Errorf("super 视角应带 global.used=99，得到 %+v", full.Global)
 	}
 
-	// calorie 视角：只见 u1（5）；u2 与 global 都不在
+	// calorie 视角：只见 u1（5）；u2 与 global 行都在视野外
 	cal, err := svc.AdminAIUsage(7, []string{"calorie-diary"})
 	if err != nil || len(cal.Days) == 0 {
 		t.Fatalf("calorie 看板: %v", err)
 	}
-	if cal.Days[0].Total != 5 {
-		t.Errorf("calorie 当日 total 应为 5，得到 %d", cal.Days[0].Total)
+	if cal.Today != 5 {
+		t.Errorf("calorie 今日合计应为 5，得到 %d", cal.Today)
 	}
-	for _, it := range cal.Days[0].ByUserTop {
-		if it.Subject == strconv.FormatInt(u2, 10) || it.Subject == "" {
-			t.Errorf("calorie 视角混入 global 或 u2: %+v", it)
+	if cal.Global != nil {
+		t.Errorf("app-admin 视角应隐藏 global 行，得到 %+v", cal.Global)
+	}
+	for _, u := range cal.Users {
+		if u.UID == u2 || u.UID == 0 {
+			t.Errorf("calorie 视角混入 global/u2: %+v", u)
 		}
 	}
 
@@ -433,11 +319,22 @@ func TestAdminAIUsageAppsFilter(t *testing.T) {
 	if err != nil || len(exp.Days) == 0 {
 		t.Fatalf("expense 看板: %v", err)
 	}
-	if exp.Days[0].Total != 7 {
-		t.Errorf("expense 当日 total 应为 7，得到 %d", exp.Days[0].Total)
+	if exp.Today != 7 {
+		t.Errorf("expense 今日合计应为 7，得到 %d", exp.Today)
+	}
+	if exp.Global != nil {
+		t.Errorf("app-admin 视角应隐藏 global 行，得到 %+v", exp.Global)
+	}
+
+	// 钻取的收权口径与总览同源：calorie 视角钻 u2（expense 用户）→ 404（不泄露存在性）
+	_, derr := svc.AdminAIUsageUser(7, []string{"calorie-diary"}, u2)
+	if code, _ := httpMsg(derr); code != 404 {
+		t.Errorf("越界钻取应 404，得到 %d", code)
+	}
+	if _, err := svc.AdminAIUsageUser(7, []string{"calorie-diary"}, u1); err != nil {
+		t.Errorf("授权项目内钻取应成功: %v", err)
 	}
 }
-
 // 注销清 scopes：授权行随账号删除，不留指向已删账号的残留。
 func TestDeleteAccountClearsScopes(t *testing.T) {
 	svc, mailer := newTestService(t)

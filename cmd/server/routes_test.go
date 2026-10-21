@@ -177,10 +177,13 @@ func TestLegacySessionsResponseShape(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("取设备列表应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	var items []map[string]json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
-		t.Fatalf("回执不是数组: %v", err)
+	var body struct {
+		Sessions []map[string]json.RawMessage `json:"sessions"`
 	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Sessions == nil {
+		t.Fatalf("回执应是 {sessions:[...]} 对象信封: %v（%s）", err, rec.Body.String())
+	}
+	items := body.Sessions
 	if len(items) == 0 {
 		t.Fatal("登录过应至少一台设备")
 	}
@@ -453,7 +456,7 @@ func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
 		t.Fatalf("App 登录: %v", err)
 	}
 
-	// 改密（cookie + CSRF；登录即强认证，15 分钟窗内直接过）
+	// 改密（cookie + CSRF；登录即强认证，2 小时窗内直接过）
 	rec := e.do(t, "POST", "/auth/change-password",
 		`{"oldPassword":"secret123","newPassword":"newsecret9"}`, withCSRF)
 	if rec.Code != http.StatusOK {
@@ -890,7 +893,7 @@ func enrollMFA(t *testing.T, e *routeEnv, uid int64) {
 	}
 }
 
-// staleReauth 把该账号全部会话的强认证时间清空（模拟超过 15 分钟）。
+// staleReauth 把该账号全部会话的强认证时间清空（模拟从未验证过 / 窗已过期）。
 func staleReauth(t *testing.T, e *routeEnv) {
 	t.Helper()
 	if _, err := e.pool.Exec("UPDATE sessions SET reauth_at = NULL WHERE revoked_at IS NULL"); err != nil {
@@ -942,7 +945,7 @@ func TestTopbarAdminEntryRendersByRole(t *testing.T) {
 	}
 }
 
-// 「退出其它所有设备」：cookie 调用必须先过 15 分钟强认证窗（401 固定文案），
+// 「退出其它所有设备」：cookie 调用必须先过 2 小时强认证窗（401 固定文案），
 // 验过后批量踢出并落审计（scope=others + 踢掉台数）；Bearer 老客户端不受这道闸影响。
 func TestRevokeOthersForcesReauthAndAudits(t *testing.T) {
 	e := newRouteEnv(t)
@@ -1009,5 +1012,79 @@ func TestRevokeOthersForcesReauthAndAudits(t *testing.T) {
 	})
 	if rec.Code != http.StatusOK {
 		t.Errorf("Bearer 调批量踢出不应被 reauth 闸拦，得到 %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// reauth 窗 = 2 小时且**滑动续期**（GitHub sudo mode 口径）：三道 reauth 闸
+//（reauthThen / reauthed / admin gate）里过闸且成功的敏感操作把 reauth_at 刷到现在，
+// 失败不刷。回拨 90 分钟仍放行（老的 15 分钟窗早已超时），本身也钉住了 2 小时窗。
+func TestReauthWindowSlidesOnSensitiveOps(t *testing.T) {
+	e := newRouteEnv(t)
+	uid := seedUser(t, e, "slide-reauth@example.com", "secret123", "user")
+	drainLoginBucket()
+	sess, csrf := loginCookie(t, e, "slide-reauth@example.com", "secret123")
+	withCSRF := func(r *http.Request) {
+		r.AddCookie(sess)
+		r.AddCookie(csrf)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+	reauthAt := func(user int64) int64 {
+		t.Helper()
+		var at int64
+		if err := e.pool.QueryRow(
+			"SELECT reauth_at FROM sessions WHERE user_id = ? AND app = 'web' AND revoked_at IS NULL",
+			user).Scan(&at); err != nil {
+			t.Fatalf("查 reauth_at: %v", err)
+		}
+		return at
+	}
+	backdate := func(user int64, d time.Duration) {
+		t.Helper()
+		if _, err := e.pool.Exec(
+			"UPDATE sessions SET reauth_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+			time.Now().Add(-d).UnixMilli(), user); err != nil {
+			t.Fatalf("回拨 reauth_at: %v", err)
+		}
+	}
+
+	// ① reauthThen 成功：90 分钟前（>老 15 分钟窗，<2 小时窗）仍过闸，成功后滑到现在
+	backdate(uid, 90*time.Minute)
+	rec := e.do(t, "POST", "/api/sessions/revoke-others", `{}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("回拨 90 分钟仍在 2 小时窗内应放行，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if age := time.Since(time.UnixMilli(reauthAt(uid))); age > time.Minute {
+		t.Errorf("成功的敏感操作应滑动续期 reauth_at，得到 %v 前", age)
+	}
+
+	// ② reauthThen 失败：过闸但业务 400 → reauth_at 停在回拨点（失败不刷）
+	backdate(uid, 90*time.Minute)
+	rec = e.do(t, "POST", "/api/sessions/revoke-many", `{"ids":["bogus"]}`, withCSRF)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("坏 id 应 400，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if age := time.Since(time.UnixMilli(reauthAt(uid))); age < 89*time.Minute {
+		t.Errorf("失败的敏感操作不该刷新 reauth_at，得到 %v 前", age)
+	}
+
+	// ③ reauthed 闸（/api/totp/* 等）成功同样滑动
+	backdate(uid, 90*time.Minute)
+	rec = e.do(t, "POST", "/api/totp/setup", `{}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup 应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if age := time.Since(time.UnixMilli(reauthAt(uid))); age > time.Minute {
+		t.Errorf("reauthed 闸的成功操作也应滑动续期，得到 %v 前", age)
+	}
+
+	// ④ admin gate 成功同样滑动（super 身份，cookie + role + MFA + reauth 四道闸全过）
+	sup := makeActor(t, e, "slide-super", "super", nil)
+	backdate(sup.uid, 90*time.Minute)
+	rec = e.do(t, "GET", "/admin/users", "", sup.cookieOnly)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("后台用户列表应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if age := time.Since(time.UnixMilli(reauthAt(sup.uid))); age > time.Minute {
+		t.Errorf("admin gate 的成功操作也应滑动续期，得到 %v 前", age)
 	}
 }

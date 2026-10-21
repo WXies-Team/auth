@@ -214,7 +214,7 @@ func health(pool *sql.DB, require func(string) (string, error)) http.Handler {
 		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		if err := pool.PingContext(pingCtx); err != nil {
-			writeError(w, http.StatusServiceUnavailable, "数据库不可用")
+			writeError(w, http.StatusServiceUnavailable, "数据库不可用，请稍后重试")
 			return
 		}
 		// 邮件凭据没有兜底值：缺键时发码全 503，/health 给个开关位让部署方自查，
@@ -223,7 +223,7 @@ func health(pool *sql.DB, require func(string) (string, error)) http.Handler {
 		mailKey, err := require("mail_client_secret")
 		if err != nil {
 			slog.Error("读邮件凭据配置失败", "err", err)
-			writeError(w, http.StatusServiceUnavailable, "配置读取失败")
+			writeError(w, http.StatusServiceUnavailable, "配置读取失败，请检查邮件凭据配置")
 			return
 		}
 		writeJSON(w, http.StatusOK, healthResponse{
@@ -262,7 +262,7 @@ func internalVerify(v verifier) http.Handler {
 		}
 		// app 缺失/未知在这里挡掉，不进 Verify——期望值都对不上就别浪费一次查库
 		if req.App == "" {
-			writeError(w, http.StatusBadRequest, "参数不正确")
+			writeError(w, http.StatusBadRequest, "参数不正确，请在请求体里带上 app 字段")
 			return
 		}
 		// 限流**按 app 分键**（键里不含来源）：两个日记服务都经同机回环调用，
@@ -314,7 +314,7 @@ func internalEnsure(tokenFor auth.ConfigFunc, svc userEnsurer) http.Handler {
 		wantSum := sha256.Sum256([]byte("Bearer " + want))
 		gotSum := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 		if want == "" || subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
-			writeError(w, http.StatusUnauthorized, "未授权")
+			writeError(w, http.StatusUnauthorized, "内部凭据无效，请检查调用方的令牌配置")
 			return
 		}
 		var entries []protocol.EnsureUserEntry
@@ -357,7 +357,7 @@ func internalTokenGate(tokenFor auth.ConfigFunc, next http.Handler) http.Handler
 		wantSum := sha256.Sum256([]byte(want))
 		gotSum := sha256.Sum256([]byte(r.Header.Get("X-Internal-Token")))
 		if want == "" || subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
-			writeError(w, http.StatusUnauthorized, "未授权")
+			writeError(w, http.StatusUnauthorized, "内部凭据无效，请检查调用方的令牌配置")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -393,9 +393,9 @@ func decodeOr400(w http.ResponseWriter, r *http.Request, v any) bool {
 func decodeOr400Limit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
 	if err := decodeLimited(w, r, v, limit); err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "请求体过大")
+			writeError(w, http.StatusRequestEntityTooLarge, "请求体过大，请精简内容后重试")
 		} else {
-			writeError(w, http.StatusBadRequest, "请求格式不正确")
+			writeError(w, http.StatusBadRequest, "请求格式不正确，请检查后重试")
 		}
 		return false
 	}
@@ -443,7 +443,7 @@ func withRecover(next http.Handler) http.Handler {
 				// 这里补一条同构 request 日志，panic 轮次也能按 500 检索
 				slog.Info("request", "method", r.Method, "path", r.URL.Path,
 					"status", http.StatusInternalServerError, "panicked", true)
-				writeError(w, http.StatusInternalServerError, "服务出了点问题，请稍后再试")
+				writeError(w, http.StatusInternalServerError, "服务出了点问题，请稍后重试")
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -571,7 +571,7 @@ func loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !containsIP(trustedProxies(), hostOnly(r.RemoteAddr)) {
 			slog.Warn("内部端点拒绝非受信来源", "path", r.URL.Path, "remote", r.RemoteAddr)
-			writeError(w, http.StatusForbidden, "禁止访问")
+			writeError(w, http.StatusForbidden, "仅限服务端调用，请从内网调用方发起")
 			return
 		}
 		next.ServeHTTP(w, r)

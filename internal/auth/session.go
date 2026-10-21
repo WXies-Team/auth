@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,12 +85,32 @@ func (s *Service) sessionAlive(userID, sid int64) (bool, error) {
 	return true, nil
 }
 
-// ListSessions 回当前用户的全部活跃会话，last_seen_at 倒序（刚用过的设备排最前），
+// 会话作用域（本批拍板）：会话归属 uid 之外还带一层「可见 app」。
+//
+//	cookie（网页控制台 / 管理后台）调用者 → apps = nil = 全部 app 的会话；
+//	Bearer（JWT aud 或 web 会话 token 的 app='web'）调用者 → 只限自己 app 的会话。
+//
+// 超范围与查无此行**同回 404**（同一句文案）：不给「这个 id 存不存在 / 属于谁」的
+// 存在性探针。路由层据凭据形态填 apps，业务层只认这个参数。
+
+// ListSessions 回当前用户的活跃会话，last_seen_at 倒序（刚用过的设备排最前），
 // current 标出发起本请求的那台——客户端据此判断哪些能踢、哪台是自己。
-func (s *Service) ListSessions(userID, currentSID int64) ([]protocol.SessionInfo, error) {
+// apps 非空 = 只回这些 app 的行；空 = 不限（见文件顶部的会话作用域注释）。
+//
+// ID 以**十进制字符串**回出（见 protocol.SessionInfo 的注释：63 位雪花过不了
+// 浏览器 JSON.parse 的 53 位精度）。
+func (s *Service) ListSessions(userID, currentSID int64, apps []string) ([]protocol.SessionInfo, error) {
+	cond := " WHERE user_id = ? AND revoked_at IS NULL"
+	args := []any{userID}
+	if len(apps) > 0 {
+		cond += " AND app IN (" + placeholders(len(apps)) + ")"
+		for _, a := range apps {
+			args = append(args, a)
+		}
+	}
 	rows, err := s.pool.QueryContext(context.Background(),
-		"SELECT id, app, device, ip, created_at, last_seen_at FROM sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY last_seen_at DESC, id DESC",
-		userID)
+		"SELECT id, app, device, ip, created_at, last_seen_at FROM sessions"+cond+
+			" ORDER BY last_seen_at DESC, id DESC", args...)
 	if err != nil {
 		return nil, fmt.Errorf("查登录会话: %w", err)
 	}
@@ -97,11 +118,15 @@ func (s *Service) ListSessions(userID, currentSID int64) ([]protocol.SessionInfo
 
 	out := make([]protocol.SessionInfo, 0, 8)
 	for rows.Next() {
-		var it protocol.SessionInfo
-		if err := rows.Scan(&it.ID, &it.App, &it.Device, &it.IP, &it.CreatedAt, &it.LastSeenAt); err != nil {
+		var (
+			it protocol.SessionInfo
+			id int64
+		)
+		if err := rows.Scan(&id, &it.App, &it.Device, &it.IP, &it.CreatedAt, &it.LastSeenAt); err != nil {
 			return nil, fmt.Errorf("读登录会话: %w", err)
 		}
-		it.Current = it.ID == currentSID
+		it.ID = strconv.FormatInt(id, 10)
+		it.Current = id == currentSID
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {
@@ -110,15 +135,16 @@ func (s *Service) ListSessions(userID, currentSID int64) ([]protocol.SessionInfo
 	return out, nil
 }
 
-// RevokeSession 踢单台会话。**只能踢自己的**：别人的会话与不存在的 id 回同一个
-// 404，不给「这个 id 存不存在」的探针。幂等——自己的已吊销会话再踢一次照样 200，
-// 客户端重试不必对错误码分支处理。
-func (s *Service) RevokeSession(userID, sid int64) error {
+// RevokeSession 踢单台会话。**只能踢自己的、且在可见范围内**：别人的会话、
+// 超出 apps 范围的会话与不存在的 id 回同一个 404，不给「这个 id 存不存在」的探针。
+// 幂等——自己的已吊销会话再踢一次照样 200，客户端重试不必对错误码分支处理。
+func (s *Service) RevokeSession(userID, sid int64, apps []string) error {
 	var owner int64
+	var sessApp string
 	err := s.pool.QueryRowContext(context.Background(),
-		"SELECT user_id FROM sessions WHERE id = ?", sid).Scan(&owner)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && owner != userID) {
-		return &HTTPError{404, "该会话不存在"}
+		"SELECT user_id, app FROM sessions WHERE id = ?", sid).Scan(&owner, &sessApp)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (owner != userID || (len(apps) > 0 && !containsStr(apps, sessApp)))) {
+		return &HTTPError{404, msgSessionGone}
 	}
 	if err != nil {
 		return fmt.Errorf("查会话归属: %w", err)
@@ -131,30 +157,118 @@ func (s *Service) RevokeSession(userID, sid int64) error {
 	return nil
 }
 
-// RevokeOtherSessions 撤掉除 keepSID 外的全部会话（「退出其它设备」）。
-// **不碰 token_version**：只在会话层动手，当前设备的 token 照用——与踢人同一套语义。
-func (s *Service) RevokeOtherSessions(userID, keepSID int64) error {
-	return revokeUserSessions(context.Background(), s.pool, userID, keepSID)
+// msgSessionGone 是「查无此行 / 不属于你 / 不在你的可见范围」三态共用的一句话：
+// 三者分开说等于把存在性探针白送给调用方。
+const msgSessionGone = "该会话不存在或已退出，请刷新设备列表后重试"
+
+// maxRevokeBatch 是批量退出（POST /api/sessions/revoke-many）一次的 id 上限：
+// 一条 UPDATE 最多 100 个占位符，超了就是客户端 bug 或恶意灌包。
+const maxRevokeBatch = 100
+
+// RevokeSessions 批量踢会话（网页端「退出该设备全部会话」）：先整批校验归属与
+// 可见范围，**任一不合法即整体 404**（与单踢同句文案、同一套不泄露存在性口径），
+// 再一条 UPDATE 吊销——不会出现「踢了一半」的中间态。回执是实际踢掉的台数
+// （已吊销的行不计，重复提交仍回 200）。
+func (s *Service) RevokeSessions(userID int64, ids []int64, apps []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, badRequest("未选择要退出的会话，请先勾选设备")
+	}
+	if len(ids) > maxRevokeBatch {
+		return 0, badRequest(fmt.Sprintf("一次最多退出 %d 个会话，请分批操作", maxRevokeBatch))
+	}
+	holders := placeholders(len(ids))
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := s.pool.QueryContext(context.Background(),
+		"SELECT id, user_id, app FROM sessions WHERE id IN ("+holders+")", args...)
+	if err != nil {
+		return 0, fmt.Errorf("查待退出会话: %w", err)
+	}
+	seen := make(map[int64]bool, len(ids))
+	var bad bool
+	for rows.Next() {
+		var (
+			id, owner int64
+			sessApp   string
+		)
+		if err := rows.Scan(&id, &owner, &sessApp); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("读待退出会话: %w", err)
+		}
+		seen[id] = true
+		if owner != userID || (len(apps) > 0 && !containsStr(apps, sessApp)) {
+			bad = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("遍历待退出会话: %w", err)
+	}
+	_ = rows.Close()
+	if bad || len(seen) != len(ids) {
+		// 缺行（别人会话 / 超范围 / 已被清理）一律 404，与单踢同口径
+		return 0, &HTTPError{404, msgSessionGone}
+	}
+	res, err := s.pool.ExecContext(context.Background(),
+		"UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND id IN ("+holders+")",
+		append([]any{time.Now().UnixMilli(), userID}, args...)...)
+	if err != nil {
+		return 0, fmt.Errorf("批量吊销会话: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("读批量吊销结果: %w", err)
+	}
+	return int(n), nil
 }
 
-// revokeUserSessions 吊销该用户全部未吊销会话；keepSID > 0 时保留它自己。
-func revokeUserSessions(ctx context.Context, ex execer, userID, keepSID int64) error {
+// RevokeOtherSessions 撤掉除 keepSID 外的会话（「退出其它设备」），只动
+// **可见范围内**的行（apps 空 = 不限）。**不碰 token_version**：只在会话层动手，
+// 当前设备的 token 照用——与踢人同一套语义。
+func (s *Service) RevokeOtherSessions(userID, keepSID int64, apps []string) error {
+	return revokeUserSessions(context.Background(), s.pool, userID, keepSID, apps)
+}
+
+// revokeUserSessions 吊销该用户可见范围内的全部未吊销会话；keepSID > 0 时保留它自己。
+func revokeUserSessions(ctx context.Context, ex execer, userID, keepSID int64, apps []string) error {
+	cond := ""
+	args := []any{time.Now().UnixMilli(), userID, keepSID}
+	if len(apps) > 0 {
+		cond = " AND app IN (" + placeholders(len(apps)) + ")"
+		for _, a := range apps {
+			args = append(args, a)
+		}
+	}
 	if _, err := ex.ExecContext(ctx,
-		"UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND id <> ?",
-		time.Now().UnixMilli(), userID, keepSID); err != nil {
+		"UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL AND id <> ?"+cond,
+		args...); err != nil {
 		return fmt.Errorf("吊销登录会话: %w", err)
 	}
 	return nil
 }
 
-// shortDevice 把 User-Agent 尽力压成短标签，认不出来就退回 UA 原文截断。
+// shortDevice 把 User-Agent 压成**设备列表里显示的那一格**。三态定案：
 //
-// 形态按作者定案：有机型的移动设备出「系统 · 机型」（Android · Pixel 8），
-// 桌面出「浏览器 · 系统」（Chrome · Linux）；都认不出（脚本、残缺 UA）就存原文——
-// 设备列表宁可给一串可辨认的 UA，也不要空着一列。
+//	① App 规范 UA（`calorie-diary/1.2.3 (Android; Pixel 8)`）→ 友好机型（Pixel 8）；
+//	② 浏览器 UA → 有机型出「系统 · 机型」（Android · Pixel 8），否则「浏览器 · 系统」；
+//	③ 认不出 → 「未知设备」。
+//
+// 第 ③ 条是本批收紧的：早先认不出就存 UA 原文，于是 Ktor/OkHttp 这类**库名 UA**
+// 被当成设备名显示（「ktor-client/2.0」根本不是一台设备）。原文不丢——完整 UA
+// 仍按 512 字截断落在 user_agent 列，排障时照查。
 func shortDevice(ua string) string {
 	if strings.TrimSpace(ua) == "" {
 		return "未知设备"
+	}
+	if ok, osName, model := parseAppUA(ua); ok {
+		if model != "" {
+			return model
+		}
+		if osName != "" {
+			return osName
+		}
 	}
 	os, browser, model := classifyUA(ua)
 	switch {
@@ -167,8 +281,60 @@ func shortDevice(ua string) string {
 	case browser != "":
 		return browser
 	default:
-		return truncateRunes(ua, 191)
+		return "未知设备"
 	}
+}
+
+// parseAppUA 识别 App 上报的规范 User-Agent：`产品名/版本 (系统; 机型)`。
+// 返回 ok 及平台段的系统与机型两段（任一可缺省）。
+//
+// 认定条件（缺一即不是 App UA）：头部必须是 `字母数字连字符/数点版本`，必须带
+// 平台段，且 UA 里不能出现 Mozilla——浏览器 UA 的头部同样是 `名字/版本`
+//（Mozilla/5.0），不挡它会把整张设备表都判成 App UA。ktor/okhttp 这类库名 UA
+// 通常没有平台段，天然落不进来。
+func parseAppUA(ua string) (ok bool, osName, model string) {
+	if strings.Contains(ua, "Mozilla") {
+		return false, "", ""
+	}
+	head, rest, found := strings.Cut(ua, " ")
+	if !found || !strings.Contains(rest, "(") {
+		return false, "", ""
+	}
+	name, ver, hasVer := strings.Cut(head, "/")
+	if !hasVer || !allOfRunes(name, uaProductRunes) || !allOfRunes(ver, uaVersionRunes) {
+		return false, "", ""
+	}
+	parts := parenParts(ua)
+	if len(parts) == 0 {
+		return false, "", ""
+	}
+	if len(parts) > 1 {
+		model = parts[1]
+	}
+	return true, parts[0], model
+}
+
+// uaProductRunes / uaVersionRunes 是 App UA 头部两段的字符集：
+// 产品名 = 字母数字与连字符（calorie-diary），版本 = 数字与点（1.2.3）。
+func uaProductRunes(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-'
+}
+
+func uaVersionRunes(r rune) bool {
+	return (r >= '0' && r <= '9') || r == '.'
+}
+
+// allOfRunes 判定串里每个字符都过 pred（空串不过——产品名/版本不能为空）。
+func allOfRunes(s string, pred func(rune) bool) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !pred(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyUA 从 UA 里分拣出系统、浏览器与机型三个要素（任一可缺省）。

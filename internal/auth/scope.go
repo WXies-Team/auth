@@ -17,8 +17,10 @@ import (
 //
 //	有效 app-admin = role='admin' 且持有 ≥1 条 admin_scopes 行（无行 = 无权限，
 //	页面只见空态说明）；role='super' 绕过 scope 全量通行。一人管多个项目 = 多行叠加。
-//	授予规则按业界「只能授予低于自己」：只有 super 能授予/回收 app-admin 与 super，
-//	app-admin 无任何授予权（新端点全部 super-only，路由层把闸）。
+//	授予规则按业界「只能授予低于自己」：app-admin 的授予/回收任一 super 都可做
+//	（POST /admin/roles/{uid}/scope），super 角色本身的授予/回收只认根 su
+//	（见 admin.go 的 RootSuperEmail / AdminSetRole）；app-admin 无任何授予权
+//	（新端点全部 super-only，路由层把闸）。
 //	scope 解析每请求查库（每请求两行成本可接受，与「撤销当场生效」同款理由，
 //	不做进程缓存——token_version 从不缓存的同一条规矩）。
 const (
@@ -58,61 +60,6 @@ func (s *Service) AdminScopes(uid int64) ([]string, error) {
 	return out, nil
 }
 
-// AdminRoleUser 是角色管理页（GET /admin/roles）的一行：身份 + 角色 + 授权摘要。
-type AdminRoleUser struct {
-	UID    int64    `json:"uid"`
-	Email  string   `json:"email"`
-	Role   string   `json:"role"`
-	Scopes []string `json:"scopes"`
-}
-
-// AdminListRoles 列用户与角色/授权摘要（检索口径与 AdminSearchUsers 一致：
-// 空查询列全部、纯数字按 uid 精确、其余按邮箱片段）。scopes 按 uid IN 批量回填，
-// 不做 N+1。
-func (s *Service) AdminListRoles(query string, limit, offset int) ([]AdminRoleUser, int, error) {
-	users, total, err := s.AdminSearchUsers(query, limit, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	out := make([]AdminRoleUser, 0, len(users))
-	for _, u := range users {
-		out = append(out, AdminRoleUser{UID: u.UID, Email: u.Email, Role: u.Role, Scopes: []string{}})
-	}
-	if len(out) == 0 {
-		return out, total, nil
-	}
-	ids := make([]any, 0, len(out))
-	holders := make([]string, 0, len(out))
-	for _, u := range out {
-		ids = append(ids, u.UID)
-		holders = append(holders, "?")
-	}
-	rows, err := s.pool.QueryContext(context.Background(),
-		"SELECT uid, app FROM admin_scopes WHERE uid IN ("+strings.Join(holders, ",")+") ORDER BY app", ids...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("查授权摘要: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	byUID := map[int64]int{}
-	for i, u := range out {
-		byUID[u.UID] = i
-	}
-	for rows.Next() {
-		var uid int64
-		var app string
-		if err := rows.Scan(&uid, &app); err != nil {
-			return nil, 0, fmt.Errorf("读授权摘要行: %w", err)
-		}
-		if i, ok := byUID[uid]; ok {
-			out[i].Scopes = append(out[i].Scopes, app)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("遍历授权摘要: %w", err)
-	}
-	return out, total, nil
-}
-
 // AdminSetScope 授予（grant）或回收（revoke）一个 app-admin 的应用授权。
 //
 // 授予隐含把 role 提为 admin（scope 行是有效性的来源，role 是门槛——两者都要在位）；
@@ -133,19 +80,19 @@ func (s *Service) AdminSetScope(actor Caller, targetUID int64, app string, grant
 		})
 	}()
 	if !allowedApps[app] {
-		return badRequest("未知应用")
+		return badRequest("未知项目，请重新选择后重试")
 	}
 	var role string
 	scanErr := s.pool.QueryRowContext(context.Background(),
 		"SELECT role FROM users WHERE id = ?", targetUID).Scan(&role)
 	if errors.Is(scanErr, sql.ErrNoRows) {
-		return &HTTPError{404, "该用户不存在"}
+		return &HTTPError{404, "该用户不存在，请刷新用户列表后重试"}
 	}
 	if scanErr != nil {
 		return fmt.Errorf("查目标用户: %w", scanErr)
 	}
 	if IsSuperRole(role) {
-		return badRequest("平台管理员无需按应用授权")
+		return badRequest("平台管理员的权限覆盖全部项目，无需按项目授权")
 	}
 
 	tx, err := s.pool.BeginTx(context.Background(), nil)
@@ -184,59 +131,6 @@ func (s *Service) AdminSetScope(actor Caller, targetUID int64, app string, grant
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交授权变更: %w", err)
-	}
-	return nil
-}
-
-// AdminChangeRole 调整平台角色（POST /admin/roles/{uid}/role）：**仅 admin↔super 之间**。
-// 普通用户的提权走 AdminSetScope 的隐含提升（先有授权才有角色），这里不收 user——
-// 「仅 super↔admin 间调整」是定稿语义。
-//
-// 两道守卫：① 不能调整自己（防自贬把平台锁死，也防误操作清空最后一个 super——
-// 最后一道锁在 ②）；② 降级 super→admin 时目标必须不是最后一个 super
-//（库里一个 super 都不剩，授予/回收/配置从此无人能做，平台锁死）。
-func (s *Service) AdminChangeRole(actor Caller, targetUID int64, role string) (err error) {
-	defer func() {
-		s.Audit(AuditEvent{
-			Action: AuditRoleChange, OK: err == nil, ActorUID: uidPtr(actor.UID),
-			ActorEmail: maskEmail(actor.Email), TargetUID: uidPtr(targetUID), Meta: actor.Meta,
-			Detail: map[string]string{"role": role},
-		})
-	}()
-	if role != adminRoleAdmin && role != adminRoleSuper {
-		return badRequest("角色只能是 admin 或 super")
-	}
-	if targetUID == actor.UID {
-		return badRequest("不能调整自己的平台角色")
-	}
-	var current string
-	scanErr := s.pool.QueryRowContext(context.Background(),
-		"SELECT role FROM users WHERE id = ?", targetUID).Scan(&current)
-	if errors.Is(scanErr, sql.ErrNoRows) {
-		return &HTTPError{404, "该用户不存在"}
-	}
-	if scanErr != nil {
-		return fmt.Errorf("查目标用户: %w", scanErr)
-	}
-	if current != adminRoleAdmin && current != adminRoleSuper {
-		return badRequest("该用户不是管理员，请先授予应用授权")
-	}
-	if current == role {
-		return nil // 幂等：已是目标角色，不写不报错
-	}
-	if IsSuperRole(current) && role == adminRoleAdmin {
-		var supers int
-		if err := s.pool.QueryRowContext(context.Background(),
-			"SELECT COUNT(*) FROM users WHERE role = ?", adminRoleSuper).Scan(&supers); err != nil {
-			return fmt.Errorf("数平台管理员: %w", err)
-		}
-		if supers <= 1 {
-			return badRequest("不能降级最后一个平台管理员")
-		}
-	}
-	if _, err := s.pool.ExecContext(context.Background(),
-		"UPDATE users SET role = ? WHERE id = ?", role, targetUID); err != nil {
-		return fmt.Errorf("改角色: %w", err)
 	}
 	return nil
 }

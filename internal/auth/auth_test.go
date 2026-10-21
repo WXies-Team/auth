@@ -386,10 +386,10 @@ func TestChangePasswordRevokesOldSession(t *testing.T) {
 	}
 	// 会话层与 token 层同批吊销：改密后设备列表只剩换发给本设备的新会话，
 	// 旧行不留在列表里当没有 token 的活死行
-	items, err := svc.ListSessions(caller.UID, reissued.SID)
+	items, err := svc.ListSessions(caller.UID, reissued.SID, []string{"calorie-diary"})
 	if err != nil {
 		t.Errorf("取设备列表失败: %v", err)
-	} else if len(items) != 1 || items[0].ID != reissued.SID || !items[0].Current {
+	} else if len(items) != 1 || items[0].ID != sidStr(reissued.SID) || !items[0].Current {
 		t.Errorf("改密后应只剩本设备的新会话，得到 %+v", items)
 	}
 	// 新密码登录成功、旧密码失败
@@ -914,16 +914,74 @@ func TestChangeEmailFlow(t *testing.T) {
 	}
 }
 
-// 日记侧 CodePurpose 的三值（AuthDtos.kt 快照，2026-10-19，对拍见
-// protocol.TestProtocolMatchesDiaryAuthDtos）必须与服务端发码白名单同值——
-// 漂了客户端发的 purpose 会直接吃 400。
+// 日记侧 CodePurpose 的四值（AuthDtos.kt 的 CodePurpose 常量，2026-10-21 从三值扩为
+// 四值加 LOGIN_2FA；字段快照对拍见 protocol.TestProtocolMatchesDiaryAuthDtos——那份
+// 快照只钉十类数据类的字段、不含本常量对象，所以四个常量值在此单独钉）必须与服务端
+// 发码白名单同值——漂了客户端发的 purpose 会直接吃 400。
 func TestDiaryCodePurposeMatchesServerWhitelist(t *testing.T) {
-	pinned := map[string]string{"REGISTER": "register", "RESET": "reset", "LOGIN": "login"}
-	got := map[string]string{"REGISTER": PurposeRegister, "RESET": PurposeReset, "LOGIN": PurposeLogin}
+	pinned := map[string]string{"REGISTER": "register", "RESET": "reset", "LOGIN": "login", "LOGIN_2FA": "login_2fa"}
+	got := map[string]string{
+		"REGISTER": PurposeRegister, "RESET": PurposeReset,
+		"LOGIN": PurposeLogin, "LOGIN_2FA": PurposeLogin2FA,
+	}
 	for k, want := range pinned {
 		if got[k] != want {
 			t.Errorf("CodePurpose.%s 应为 %q，得到 %q", k, want, got[k])
 		}
+	}
+}
+
+// login_2fa（两步验证第二步的邮箱码）发码：白名单四值之一、只对已开两步验证的
+// 账号发、主题按 <prefix><场景>验证码 口径出「登录两步验证验证码」，码与
+// purpose=login 的登录码分键（拿两步码去走邮箱验证码登录只会吃到「过期」）。
+func TestSendCodeLogin2FARequiresTwoFactor(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "2fa-send@example.com", "secret123")
+
+	// 未开两步验证：一封信都不发，直接 400 点名原因
+	err := svc.SendCode("2fa-send@example.com", PurposeLogin2FA, "")
+	if code, msg := httpMsg(err); code != 400 || !strings.Contains(msg, "未开启两步验证") {
+		t.Errorf("未开 2FA 发两步码应 400 且点名原因，得到 %d %q", code, msg)
+	}
+	// 白名单外的 purpose 照旧 400「参数不正确」
+	if code, msg := httpMsg(svc.SendCode("2fa-send@example.com", "login_2fa2", "")); code != 400 ||
+		!strings.Contains(msg, "参数不正确") {
+		t.Errorf("白名单外 purpose 应 400，得到 %d %q", code, msg)
+	}
+
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("取身份: %v", err)
+	}
+	setup, err := svc.SetupTOTP(c)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := svc.EnableTOTP(c, currentCode(t, setup.Secret)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	// 已开两步验证：发码成功，主题 = 【Auth】登录两步验证验证码（缺省品牌 Auth）
+	if err := svc.SendCode("2fa-send@example.com", PurposeLogin2FA, ""); err != nil {
+		t.Fatalf("发两步邮箱码: %v", err)
+	}
+	if mailer.to != "2fa-send@example.com" {
+		t.Errorf("两步码应发给本人，得到 %q", mailer.to)
+	}
+	if mailer.subject != "【Auth】登录两步验证验证码" {
+		t.Errorf("两步码主题应为「【Auth】登录两步验证验证码」，得到 %q", mailer.subject)
+	}
+	code := codeIn(t, mailer)
+	// purpose 分键：两步码不能在邮箱验证码登录路用（该路无行 → 「过期」）
+	if err := svc.otps.verify(PurposeLogin, "2fa-send@example.com", code); err == nil ||
+		!strings.Contains(err.Error(), "过期") {
+		t.Errorf("两步码不该在 login 用途可用，得到 %v", err)
+	}
+	// 本用途可验且用后即焚
+	if err := svc.otps.verify(PurposeLogin2FA, "2fa-send@example.com", code); err != nil {
+		t.Errorf("两步码应在 login_2fa 用途可用: %v", err)
+	}
+	if err := svc.otps.verify(PurposeLogin2FA, "2fa-send@example.com", code); err == nil {
+		t.Error("两步码是一次性的，用过之后不能复用")
 	}
 }
 

@@ -36,8 +36,9 @@ const (
 	// 路由层给 Set-Cookie 用——cookie 的读写在 HTTP 层，业务层不碰它。
 	WebCookieMaxAgeSeconds = 90 * 24 * 3600
 	// ReauthWindow 是「强认证（输密码 / 过 TOTP）」的有效窗：改密、改邮、绑解 2FA、
-	// 管理写操作都要求它在 15 分钟内（ASVS V7.5.1）。
-	ReauthWindow = 15 * time.Minute
+	// 管理写操作都要求它在 2 小时内（ASVS V7.5.1；窗口对齐 GitHub sudo mode 的
+	// 2 小时，且每次成功的敏感操作都会滑动续期——slideReauth）。
+	ReauthWindow = 2 * time.Hour
 )
 
 // MsgReauthRequired 是 reauth 窗过期时的固定文案。前端据此弹「重新验证」框
@@ -197,7 +198,7 @@ func (s *Service) MarkReauth(sid int64) error {
 	return nil
 }
 
-// RequireReauth 强认证窗（15 分钟）内的请求放行，否则 401 + 固定文案，
+// RequireReauth 强认证窗（2 小时）内的请求放行，否则 401 + 固定文案，
 // 前端弹重新验证框后调 /web/reauth 刷新。
 func (s *Service) RequireReauth(sid int64) error {
 	var reauth sql.NullInt64
@@ -215,15 +216,25 @@ func (s *Service) RequireReauth(sid int64) error {
 	return nil
 }
 
-// Reauth 完成一次强认证并刷新**本会话**的 reauth_at：密码或 TOTP 码二选一。
+// Reauth 完成一次强认证并刷新**本会话**的 reauth_at：密码 / 两步验证码 /
+// 恢复码三选一（哪个非空用哪个，密码优先）。
+//
+// 恢复码按**格式分流**（与安全页一框二选一同款判定，见 totp.go 的 recoveryShaped）：
+// 专门提交的 recoveryCode 字段直接走恢复码表；两步验证码框里粘了恢复码也能被认出来
+//（形态像恢复码的输入先按恢复码验），用户把码填进错通道也只报一次错。
+// 恢复码单次使用、用掉即废（consumeRecoveryCode 落 used=1 + recovery.consume 审计）。
 //
 // 密码路复用 checkPassword（与登录同一份凭据判定，含防枚举的恒时假比对），
 // 并按 uid 比对而不是邮箱——token 里的邮箱可能已是旧值，uid 才是会话的锚。
 // 成败都进审计：这是「持登录态重拿高危操作许可」的动作，被反复尝试值得看见。
-func (s *Service) Reauth(c Caller, password, totpCode string) (err error) {
+func (s *Service) Reauth(c Caller, password, totpCode, recoveryCode string) (err error) {
 	method := "totp"
-	if strings.TrimSpace(password) != "" {
+	switch {
+	case strings.TrimSpace(password) != "":
 		method = "password"
+	case strings.TrimSpace(recoveryCode) != "" || recoveryShaped(totpCode):
+		// 恢复码框里的输入一律按恢复码记账；验证码框里粘了恢复码同样分流过去
+		method = "recovery"
 	}
 	defer func() {
 		s.Audit(AuditEvent{
@@ -240,9 +251,18 @@ func (s *Service) Reauth(c Caller, password, totpCode string) (err error) {
 		}
 		if uid != c.UID {
 			// 邮箱对不上说明 token 身份与库不一致（改绑竞态等），按凭据错误处理
-			return unauthorized("密码不正确")
+			return unauthorized("密码不正确，请重新输入")
 		}
+	case strings.TrimSpace(recoveryCode) != "":
+		if !recoveryShaped(recoveryCode) {
+			return badRequest("恢复码格式不正确，请输入 16 位恢复码（形如 XXXX-XXXX-XXXX-XXXX）")
+		}
+		return s.reauthByRecovery(c, recoveryCode)
 	case strings.TrimSpace(totpCode) != "":
+		if recoveryShaped(totpCode) {
+			// 一框二选一：粘进验证码框的恢复码照样认（与安全页同款分流）
+			return s.reauthByRecovery(c, totpCode)
+		}
 		enabled, err := s.TOTPEnabled(c.UID)
 		if err != nil {
 			return err
@@ -255,10 +275,32 @@ func (s *Service) Reauth(c Caller, password, totpCode string) (err error) {
 			return err
 		}
 		if !ok {
-			return badRequest("验证码错误，请重新输入")
+			// 走到这里输入已排除恢复码形态（上面分流过），文案必然落在两步验证码一侧
+			return wrongCodeError(totpCode)
 		}
 	default:
-		return badRequest("请输入密码或验证码")
+		return badRequest("请输入密码、两步验证码或恢复码")
+	}
+	return s.MarkReauth(c.SID)
+}
+
+// reauthByRecovery 用一个恢复码完成强认证：必须已开两步验证（恢复码随启用签发、
+// 关闭即删，没开两步验证的账号不可能有恢复码），命中即作废该码并刷 reauth_at。
+func (s *Service) reauthByRecovery(c Caller, code string) error {
+	enabled, err := s.TOTPEnabled(c.UID)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return badRequest("两步验证尚未开启，请改用密码验证")
+	}
+	ok, err := s.consumeRecoveryCode(c.UID, c.Email, code, c.Meta)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// 重新验证场景的恢复码错：旧码多半用过，给「换一个」与「改用密码」两条出路
+		return badRequest(wrongCodeMsg(true, "或改用密码验证"))
 	}
 	return s.MarkReauth(c.SID)
 }

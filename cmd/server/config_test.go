@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-// configDispatchKeys 是端点认的六个 app_config 键，顺序即回执键名排序后的顺序
-//（keysOf 按字典序拼）：llmApiKey, llmBaseUrl, llmModel, fcmProjectId,
-// fcmServiceAccount, pushAdminToken —— 改契约必须同时改这里与 handler。
-const configAllKeys = "fcmProjectId,fcmServiceAccount,llmApiKey,llmBaseUrl,llmModel,pushAdminToken"
+// configDispatchKeys 是端点认的四个 app_config 键，顺序即回执键名排序后的顺序
+//（keysOf 按字典序拼）：llmApiKey, llmBaseUrl, llmModel, pushAdminToken ——
+// 改契约必须同时改这里与 handler。FCM 两键已退出本端点（见 config.go 头注释）。
+const configAllKeys = "llmApiKey,llmBaseUrl,llmModel,pushAdminToken"
 
 // seedConfigKeys 种 app_config（与 seedAIConfig 同款 upsert；config.Store 每个
 // routeEnv 新建，首轮读才填缓存，种在请求之前就一定读得到）。
@@ -51,7 +51,7 @@ func TestInternalConfigRouteGate(t *testing.T) {
 		t.Fatalf("带头对得上应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
 	if got := rec.Body.String(); got != "{}\n" && got != "{}" {
-		t.Errorf("六个键全缺时应回空对象，得到 %s", rec.Body.String())
+		t.Errorf("四个键全缺时应回空对象，得到 %s", rec.Body.String())
 	}
 
 	// 错头 → 401
@@ -89,7 +89,7 @@ func TestInternalConfigRouteGate(t *testing.T) {
 	}
 }
 
-// 白名单外的 app（含缺省空串）一律 400：借不到别家的 LLM key 与 FCM 凭据。
+// 白名单外的 app（含缺省空串）一律 400：借不到别家的 LLM key 与推送令牌。
 func TestInternalConfigRejectsUnknownApp(t *testing.T) {
 	e := newRouteEnv(t)
 	seedConfigKeys(t, e, map[string]string{"llm_api_key": "sk-should-not-leak"})
@@ -115,7 +115,7 @@ func TestInternalConfigOmitsMissingKeys(t *testing.T) {
 	seedConfigKeys(t, e, map[string]string{
 		"llm_model":        "gpt-x",
 		"push_admin_token": "push-tok-1",
-		// llm_api_key / llm_base_url / fcm_* 故意不种
+		// llm_api_key / llm_base_url 故意不种
 	})
 	rec := doConfig(t, e, `{"app":"expense-diary"}`, nil)
 	if rec.Code != http.StatusOK {
@@ -134,17 +134,15 @@ func TestInternalConfigOmitsMissingKeys(t *testing.T) {
 	}
 }
 
-// 值与库一致：六个键全种，回执逐键等于 **app_config 里的原值**（现读口径，
+// 值与库一致：四个键全种，回执逐键等于 **app_config 里的原值**（现读口径，
 // 不做任何改写/裁剪/脱敏——这个端点本来就是给同机调用方分发凭据的）。
 func TestInternalConfigValuesMatchDB(t *testing.T) {
 	e := newRouteEnv(t)
 	want := map[string]string{
-		"llm_api_key":         "llm-key-abc",
-		"llm_base_url":        "https://llm.example.com/v1",
-		"llm_model":           "model-x",
-		"fcm_project_id":      "proj-123",
-		"fcm_service_account": `{"type":"service_account"}`,
-		"push_admin_token":    "push-secret-7",
+		"llm_api_key":      "llm-key-abc",
+		"llm_base_url":     "https://llm.example.com/v1",
+		"llm_model":        "model-x",
+		"push_admin_token": "push-secret-7",
 	}
 	seedConfigKeys(t, e, want)
 
@@ -153,7 +151,7 @@ func TestInternalConfigValuesMatchDB(t *testing.T) {
 		t.Fatalf("应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
 	if got := keysOf(t, rec.Body.Bytes()); got != configAllKeys {
-		t.Errorf("六个键齐全时回执形状应为 %s，得到 %s", configAllKeys, got)
+		t.Errorf("四个键齐全时回执形状应为 %s，得到 %s", configAllKeys, got)
 	}
 	var resp map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -182,12 +180,10 @@ func TestInternalConfigValuesMatchDB(t *testing.T) {
 // jsonKeyFor 把 app_config 键映射到回执字段名（与 handler 一一对应）。
 func jsonKeyFor(key string) (string, bool) {
 	m := map[string]string{
-		"llm_api_key":         "llmApiKey",
-		"llm_base_url":        "llmBaseUrl",
-		"llm_model":           "llmModel",
-		"fcm_project_id":      "fcmProjectId",
-		"fcm_service_account": "fcmServiceAccount",
-		"push_admin_token":    "pushAdminToken",
+		"llm_api_key":      "llmApiKey",
+		"llm_base_url":     "llmBaseUrl",
+		"llm_model":        "llmModel",
+		"push_admin_token": "pushAdminToken",
 	}
 	v, ok := m[key]
 	return v, ok

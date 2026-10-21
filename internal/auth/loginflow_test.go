@@ -104,13 +104,13 @@ func TestWebLoginSecondStep(t *testing.T) {
 	// 错码计数：5 次内都是「验证码错误」，第 5 次那次把中间态烧掉
 	res := begin()
 	for i := 0; i < loginStateFails; i++ {
-		_, err := svc.WebLoginTOTP(res.LoginToken, "000000", "", meta)
+		_, err := svc.WebLoginTOTP(res.LoginToken, "000000", "", "", meta)
 		if err == nil || !strings.Contains(err.Error(), "验证码错误") {
 			t.Fatalf("第 %d 次错码应报验证码错误，得到 %v", i+1, err)
 		}
 	}
 	// 已烧毁：哪怕码是对的也回「过期」，逼用户回第一步重来
-	_, err = svc.WebLoginTOTP(res.LoginToken, currentCode(t, setup.Secret), "", meta)
+	_, err = svc.WebLoginTOTP(res.LoginToken, currentCode(t, setup.Secret), "", "", meta)
 	if err == nil || !strings.Contains(err.Error(), "过期") {
 		t.Errorf("烧毁后即使码对也应过期，得到 %v", err)
 	}
@@ -118,7 +118,7 @@ func TestWebLoginSecondStep(t *testing.T) {
 	// 真码 → 建会话（用没被用过的码：上一轮全部是错码，未消耗任何步进）
 	res2 := begin()
 	// 当下码可能与 enable 时同步进（被防重放挡），换下一个步进的码稳定可过
-	ok, err := svc.WebLoginTOTP(res2.LoginToken, codeAt(t, setup.Secret, 30*time.Second), "", meta)
+	ok, err := svc.WebLoginTOTP(res2.LoginToken, codeAt(t, setup.Secret, 30*time.Second), "", "", meta)
 	if err != nil || ok.Session == nil {
 		t.Fatalf("真码应放行: %+v err=%v", ok, err)
 	}
@@ -129,14 +129,14 @@ func TestWebLoginSecondStep(t *testing.T) {
 		t.Errorf("web 流程第二步也不该签 JWT，得到 %q", ok.JWT)
 	}
 	// 用后即焚：同一个中间态不能再换一次
-	if _, err := svc.WebLoginTOTP(res2.LoginToken, currentCode(t, setup.Secret), "", meta); err == nil {
+	if _, err := svc.WebLoginTOTP(res2.LoginToken, currentCode(t, setup.Secret), "", "", meta); err == nil {
 		t.Error("中间态必须单次使用")
 	}
 
 	// 恢复码路
 	res3 := begin()
 	// codes[1] 还没用过；codes[0] 在 disable 用例里没涉及，这里用最后一个
-	used, err := svc.WebLoginTOTP(res3.LoginToken, "", codes[len(codes)-1], meta)
+	used, err := svc.WebLoginTOTP(res3.LoginToken, "", codes[len(codes)-1], "", meta)
 	if err != nil || used.Session == nil {
 		t.Fatalf("恢复码应能完成登录: %+v err=%v", used, err)
 	}
@@ -170,7 +170,7 @@ func TestWebLoginTOTPFailureCarriesActor(t *testing.T) {
 		t.Fatalf("应进两步: %+v err=%v", res, err)
 	}
 	// 错码 → 失败审计应记 actor_uid 与掩码邮箱
-	if _, err := svc.WebLoginTOTP(res.LoginToken, "000000", "", meta); err == nil {
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "000000", "", "", meta); err == nil {
 		t.Fatal("错码应失败")
 	}
 	var (
@@ -190,7 +190,7 @@ func TestWebLoginTOTPFailureCarriesActor(t *testing.T) {
 		t.Errorf("失败审计 actor_email 应为掩码邮箱，得到 %q", email)
 	}
 	// 恢复码失败路同样归因
-	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "AAAA-BBBB-CCCC-DDDD", meta); err == nil {
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "AAAA-BBBB-CCCC-DDDD", "", meta); err == nil {
 		t.Fatal("乱造恢复码应失败")
 	}
 	if err := svc.pool.QueryRow(
@@ -251,7 +251,7 @@ func TestLoginStateMethodRecordsRecoveryUse(t *testing.T) {
 		t.Fatalf("应进两步: %+v err=%v", res, err)
 	}
 	// 先用一个错的恢复码：行留下（未烧毁），method 应已是 recovery
-	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "AAAA-BBBB-CCCC-DDDD", meta); err == nil {
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "AAAA-BBBB-CCCC-DDDD", "", meta); err == nil {
 		t.Fatal("乱造恢复码应失败")
 	}
 	var method string
@@ -268,7 +268,7 @@ func TestLoginStateMethodRecordsRecoveryUse(t *testing.T) {
 	if err != nil || res2.Status != "2fa_required" {
 		t.Fatalf("再进两步: %+v err=%v", res2, err)
 	}
-	if _, err := svc.WebLoginTOTP(res2.LoginToken, "000000", "", meta); err == nil {
+	if _, err := svc.WebLoginTOTP(res2.LoginToken, "000000", "", "", meta); err == nil {
 		t.Fatal("错码应失败")
 	}
 	if err := svc.pool.QueryRow(
@@ -284,7 +284,7 @@ func TestLoginStateMethodRecordsRecoveryUse(t *testing.T) {
 	if err != nil || res3.Status != "2fa_required" {
 		t.Fatalf("三进两步: %+v err=%v", res3, err)
 	}
-	if _, err := svc.WebLoginTOTP(res3.LoginToken, "", codes[len(codes)-1], meta); err != nil {
+	if _, err := svc.WebLoginTOTP(res3.LoginToken, "", codes[len(codes)-1], "", meta); err != nil {
 		t.Fatalf("恢复码应完成登录: %v", err)
 	}
 	var leftover int
@@ -348,3 +348,138 @@ func TestEnforceAppsSwitch(t *testing.T) {
 
 // errBoom 是「读配置键失败」的假实现，用 HTTPError 形态免得再引一个 errors 名字。
 var errBoom = &HTTPError{500, "boom"}
+
+// 两步验证第二步的邮箱验证码路（emailCode，purpose=login_2fa）：验过建会话、
+// 码绑同一 login state 的 uid/邮箱、用后即焚，错码计入 otp 层自己的文案与计数。
+func TestWebLoginEmailSecondFactor(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "web-2fa-email@example.com", "secret123")
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("取身份: %v", err)
+	}
+	setup, err := svc.SetupTOTP(c)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := svc.EnableTOTP(c, currentCode(t, setup.Secret)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	meta := SessionMeta{IP: "203.0.113.70", UserAgent: "Firefox"}
+	begin := func() *WebLoginResult {
+		t.Helper()
+		res, err := svc.WebLoginPassword("web-2fa-email@example.com", "secret123", meta, "")
+		if err != nil || res.Status != "2fa_required" {
+			t.Fatalf("应进两步: %+v err=%v", res, err)
+		}
+		return res
+	}
+
+	if err := svc.SendCode("web-2fa-email@example.com", PurposeLogin2FA, ""); err != nil {
+		t.Fatalf("发两步邮箱码: %v", err)
+	}
+	emailCode := codeIn(t, mailer)
+
+	// 错码：otp 层文案（「验证码错误」），且计入 login state 的共享错码计数
+	res := begin()
+	wrong := "000000"
+	if wrong == emailCode {
+		wrong = "000001"
+	}
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "", wrong, meta); err == nil ||
+		!strings.Contains(err.Error(), "验证码错误") {
+		t.Fatalf("邮箱码错码应报验证码错误，得到 %v", err)
+	}
+	var attempts int
+	if err := svc.pool.QueryRow("SELECT attempts FROM login_states WHERE token_hash = ?",
+		sha256Hex(res.LoginToken)).Scan(&attempts); err != nil {
+		t.Fatalf("查共享错码计数: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("邮箱码错码应计入 login state 的 attempts，得到 %d", attempts)
+	}
+	// 对码 → 建会话（web 流程：只签 cookie 会话，不出现 JWT）
+	ok, err := svc.WebLoginTOTP(res.LoginToken, "", "", emailCode, meta)
+	if err != nil || ok.Session == nil {
+		t.Fatalf("邮箱码应完成登录: %+v err=%v", ok, err)
+	}
+	if _, err := svc.ValidWebSession(ok.Session.Token); err != nil {
+		t.Errorf("邮箱码换出的会话应可校验: %v", err)
+	}
+	if ok.JWT != "" {
+		t.Errorf("web 流程不该签 JWT，得到 %q", ok.JWT)
+	}
+	// 用后即焚：同一个码不能再换一个中间态（整代已被 verify 烧掉 → 「过期」）
+	res2 := begin()
+	if _, err := svc.WebLoginTOTP(res2.LoginToken, "", "", emailCode, meta); err == nil ||
+		!strings.Contains(err.Error(), "过期") {
+		t.Errorf("用过的邮箱码不该复用，得到 %v", err)
+	}
+}
+
+// 三选一是三条通道、不是三份额度：4 次 TOTP 错码 + 1 次邮箱码错码凑满 5 次，
+// 中间态被烧掉——之后哪怕邮箱码是对的也回「登录请求已过期」。
+func TestEmailSecondFactorSharesLoginStateFails(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "web-2fa-share@example.com", "secret123")
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("取身份: %v", err)
+	}
+	setup, err := svc.SetupTOTP(c)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := svc.EnableTOTP(c, currentCode(t, setup.Secret)); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	meta := SessionMeta{IP: "203.0.113.71", UserAgent: "Firefox"}
+	if err := svc.SendCode("web-2fa-share@example.com", PurposeLogin2FA, ""); err != nil {
+		t.Fatalf("发两步邮箱码: %v", err)
+	}
+	emailCode := codeIn(t, mailer)
+	wrong := "000000"
+	if wrong == emailCode {
+		wrong = "000001"
+	}
+
+	res, err := svc.WebLoginPassword("web-2fa-share@example.com", "secret123", meta, "")
+	if err != nil || res.Status != "2fa_required" {
+		t.Fatalf("应进两步: %+v err=%v", res, err)
+	}
+	// 前 4 次走 TOTP 错码通道
+	for i := 0; i < loginStateFails-1; i++ {
+		if _, err := svc.WebLoginTOTP(res.LoginToken, wrong, "", "", meta); err == nil {
+			t.Fatalf("第 %d 次 TOTP 错码不该通过", i+1)
+		}
+	}
+	// 第 5 次走邮箱码错码通道 → 烧毁中间态
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "", wrong, meta); err == nil {
+		t.Fatal("邮箱码错码不该通过")
+	}
+	if _, err := svc.WebLoginTOTP(res.LoginToken, "", "", emailCode, meta); err == nil ||
+		!strings.Contains(err.Error(), "登录请求已过期") {
+		t.Errorf("烧毁后哪怕邮箱码对也应「登录请求已过期」，得到 %v", err)
+	}
+}
+
+// emailCode 路的 2FA 前置闸：中间态还在但账号已没有启用中的两步验证（第一步之后
+// 被关闭的窗口）——回 400「该账号未开启两步验证」，不白验码、指回密码登录。
+func TestWebLoginEmailCodeRequiresTwoFactor(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "web-2fa-none@example.com", "secret123")
+	c, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("取身份: %v", err)
+	}
+	// 没开 2FA 的账号正常拿不到中间态，这里直接造一张——把 5 分钟窗口内
+	// 2FA 被关闭的竞态摆出来
+	token, err := svc.beginLoginState(c.UID, "")
+	if err != nil {
+		t.Fatalf("造中间态: %v", err)
+	}
+	_, err = svc.WebLoginTOTP(token, "", "", "123456", SessionMeta{IP: "203.0.113.72"})
+	if code, msg := httpMsg(err); code != 400 || !strings.Contains(msg, "未开启两步验证") {
+		t.Errorf("未开 2FA 的邮箱码路应 400 点名原因，得到 %d %q", code, msg)
+	}
+}

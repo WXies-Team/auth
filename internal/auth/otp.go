@@ -24,9 +24,9 @@ const (
 	otpMaxTries   = 5
 	otpDigits     = 6
 	// recipientDailyCap：单个收件邮箱跨用途的每日总闸。取 15——正常用户一天最多
-	// 注册+找回+登录+改密+改邮各一两次，15 远高于真实用量、又把轰炸面压到可忽略。
-	// 五条发码路各自 10 条/日、IP 层 5/分挡不住分布式来源，合计约 40~50 封/日/目标
-	// 邮箱的轰炸面由它兜底。
+	// 注册+找回+登录+两步验证+改密+改邮各一两次，15 远高于真实用量、又把轰炸面压到
+	// 可忽略。六条发码路各自 10 条/日、IP 层 5/分挡不住分布式来源，合计约 50~60 封
+	// /日/目标邮箱的轰炸面由它兜底。
 	recipientDailyCap = 15
 	// otpRetention：验证码行的保留时长。超过 7 天的行不参与任何闸门判定
 	//（每日计数只看当天），纯粹是隐私残留，发码时顺手清。
@@ -35,15 +35,21 @@ const (
 
 // 验证码用途；文案与校验目标都按它分流。
 //
-// register/reset/login 走**无登录态**的 /auth/send-code（白名单，非白名单直接 400，
-// 客户端只认 CodePurpose 的三值）；change 只经 authed 的 /auth/send-change-code 签发、
+// register/reset/login/login_2fa 走**无登录态**的 /auth/send-code（白名单，非白名单
+// 直接 400；日记客户端与 web 登录第二步都认 CodePurpose 的四值，login_2fa 是两步
+// 验证第二步的邮箱码（web 与日记 App 对称可用），老客户端不传照常工作）；change 只经 authed 的 /auth/send-change-code 签发、
 // email_change 只经 authed 的 /auth/send-change-email-code 签发——收件人由 uid
-// 查库决定、客户端传不了，码才不会变成轰炸任意邮箱的工具。五条路共用同一套
-// 冷却、日限额与 5 分钟有效期；purpose 进查询维度，五者的码互不串用。
+// 查库决定、客户端传不了，码才不会变成轰炸任意邮箱的工具。六条路共用同一套
+// 冷却、日限额与 5 分钟有效期；purpose 进查询维度，六者的码互不串用。
+//
+// login_2fa（登录两步验证）与 login（邮箱验证码登录）刻意分开：两种码的语义、
+// 校验时机与错码文案都不同（前者是 2FA 第二因子，验它要绑 login state 并共享
+// 5 次烧毁计数），混在一个 purpose 里既串计数也串文案。
 const (
 	PurposeRegister    = "register"
 	PurposeReset       = "reset"
 	PurposeLogin       = "login"
+	PurposeLogin2FA    = "login_2fa"
 	PurposeChange      = "change"
 	PurposeChangeEmail = "email_change"
 )

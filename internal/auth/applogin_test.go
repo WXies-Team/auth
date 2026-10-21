@@ -82,14 +82,14 @@ func TestAppPasswordLoginIssuesJWT(t *testing.T) {
 	if !reauth.Valid {
 		t.Error("登录即强认证：App 会话必须打 reauth_at")
 	}
-	// 设备列表能看到这台（App 会话与网页会话同一张表）
-	list, err := svc.ListSessions(uid, res.SID)
+	// 设备列表能看到这台（App 会话与网页会话同一张表）；App bearer 视角只看本 app
+	list, err := svc.ListSessions(uid, res.SID, []string{"calorie-diary"})
 	if err != nil {
 		t.Fatalf("查设备列表: %v", err)
 	}
 	found := false
 	for _, it := range list {
-		if it.ID == res.SID && it.App == "calorie-diary" {
+		if it.ID == sidStr(res.SID) && it.App == "calorie-diary" {
 			found = true
 		}
 	}
@@ -146,7 +146,7 @@ func TestAppTwoStepCarriesAppThroughLoginState(t *testing.T) {
 		t.Errorf("login_states.app 应带住 expense-diary，得到 %q", got)
 	}
 	// 第二步（TOTP 码）→ JWT，aud 是第一步声明的那个应用
-	res, err := svc.WebLoginTOTP(step1.LoginToken, codeAt(t, setup.Secret, 30*time.Second), "", meta)
+	res, err := svc.WebLoginTOTP(step1.LoginToken, codeAt(t, setup.Secret, 30*time.Second), "", "", meta)
 	if err != nil || res.JWT == "" || res.Session != nil {
 		t.Fatalf("第二步应回 JWT: %+v err=%v", res, err)
 	}
@@ -164,7 +164,7 @@ func TestAppTwoStepCarriesAppThroughLoginState(t *testing.T) {
 		t.Errorf("App 会话应 app=expense-diary 且带 reauth_at，得到 %q / %v", rowApp, reauth.Valid)
 	}
 	// 用后即焚：中间态不能再换一次
-	if _, err := svc.WebLoginTOTP(step1.LoginToken, currentCode(t, setup.Secret), "", meta); err == nil {
+	if _, err := svc.WebLoginTOTP(step1.LoginToken, currentCode(t, setup.Secret), "", "", meta); err == nil {
 		t.Error("中间态必须单次使用")
 	}
 
@@ -176,7 +176,7 @@ func TestAppTwoStepCarriesAppThroughLoginState(t *testing.T) {
 	if got := stateApp(step2.LoginToken); got != "calorie-diary" {
 		t.Errorf("恢复码路的 login_states.app 应是 calorie-diary，得到 %q", got)
 	}
-	res2, err := svc.WebLoginTOTP(step2.LoginToken, "", codes[len(codes)-1], meta)
+	res2, err := svc.WebLoginTOTP(step2.LoginToken, "", codes[len(codes)-1], "", meta)
 	if err != nil || res2.JWT == "" {
 		t.Fatalf("恢复码应换出 JWT: %+v err=%v", res2, err)
 	}
@@ -207,7 +207,7 @@ func TestAppTwoStepCarriesAppThroughLoginState(t *testing.T) {
 	if _, err := svc.pool.Exec("UPDATE totp_factors SET last_used_timestep = 0 WHERE user_id = ?", c.UID); err != nil {
 		t.Fatalf("归零步进闸: %v", err)
 	}
-	res3, err := svc.WebLoginTOTP(step3.LoginToken, codeAt(t, setup.Secret, 30*time.Second), "", meta)
+	res3, err := svc.WebLoginTOTP(step3.LoginToken, codeAt(t, setup.Secret, 30*time.Second), "", "", meta)
 	if err != nil || res3.Session == nil || res3.JWT != "" {
 		t.Fatalf("web 流程第二步应回会话 token 且不签 JWT: %+v err=%v", res3, err)
 	}

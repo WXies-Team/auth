@@ -81,8 +81,9 @@ const accountURL = "https://auth.horatio.cn/web/console/account"
 // codeEmail 拼验证码信的主题与正文：品牌头 → 一句话说明 → 验证码卡 + 有效期
 // → 单 CTA → 提示卡 → error 红警示句 → 落款。
 //
-// action 只会是「注册 / 找回密码 / 修改密码 / 登录 / 修改邮箱」五个字面量之一
-//（由 purpose 分流，不来自用户输入），code 只含数字——两处都没有 HTML 注入面。
+// action 只会是「注册 / 找回密码 / 修改密码 / 登录 / 登录两步验证 / 修改邮箱」
+// 六个字面量之一（由 purpose 分流，不来自用户输入），code 只含数字——两处都没有
+// HTML 注入面。
 func codeEmail(b brand, action, code string) (subject, body string) {
 	subject = b.prefix + action + "验证码"
 	inner := brandEyebrow(b, "邮箱验证") + `            <h1 class="h1" style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:#000000;">` + action + `验证码</h1>

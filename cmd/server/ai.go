@@ -55,7 +55,7 @@ func decodeAIRequest(w http.ResponseWriter, r *http.Request, req *protocol.AIQuo
 		return false
 	}
 	if !auth.AppAllowed(req.App) || req.UID < 1000000 || req.UID > 9999999 {
-		writeError(w, http.StatusBadRequest, "参数不正确")
+		writeError(w, http.StatusBadRequest, "参数不正确，请检查 app 与 uid 字段后重试")
 		return false
 	}
 	return true
@@ -138,7 +138,7 @@ func internalAIConsume(quotaSvc *ai.Service) http.Handler {
 			return
 		}
 		if !auth.AppAllowed(req.App) || req.UID < 1000000 || req.UID > 9999999 || req.Weight < 1 {
-			writeError(w, http.StatusBadRequest, "参数不正确")
+			writeError(w, http.StatusBadRequest, "参数不正确，请检查 app、uid 与 weight 字段后重试")
 			return
 		}
 		if !aiLimitPerApp(w, r, req.App) {

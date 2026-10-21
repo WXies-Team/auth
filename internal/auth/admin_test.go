@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -96,7 +97,9 @@ func TestAdminSearchUsers(t *testing.T) {
 	}
 }
 
-// 角色变更：能升能降，但**不能降级自己**、非法角色拒绝、查无此 uid 回 404，且都进审计。
+// 角色变更（合并端点 POST /admin/users/{uid}/role 的业务层）：user↔admin 直改、
+// super 只有根 su 能授予/回收、不能改自己、非法角色拒绝、查无此 uid 回 404，
+// 且全部进审计（涉 super 落 admin.role.change，其余落 admin.user.role_change）。
 func TestAdminSetRole(t *testing.T) {
 	svc, mailer := newTestService(t)
 	actor := newPasskeyUser(t, svc, mailer, "admin-actor@example.com")
@@ -114,7 +117,7 @@ func TestAdminSetRole(t *testing.T) {
 	if err := svc.AdminSetRole(actor, target.UID, adminRoleUser); err != nil {
 		t.Fatalf("降目标为 user: %v", err)
 	}
-	// 降级自己：拒绝（否则一次误操作把所有人锁在门外）
+	// 降级自己：拒绝（否则一次误操作把所有人锁在门外）——任何目标角色都拒
 	if err := svc.AdminSetRole(actor, actor.UID, adminRoleUser); err == nil || !strings.Contains(err.Error(), "自己") {
 		t.Errorf("应拒绝降级自己，得到 %v", err)
 	}
@@ -150,6 +153,64 @@ func TestAdminSetRole(t *testing.T) {
 	}
 }
 
+// super 角色的收口规则（本批拍板）：只有根 su（RootSuperEmail）能授予/取消 super；
+// 其余 su 一律 403；根 su 的升降都落 admin.role.change 审计；降回 user 清授权行。
+func TestAdminSetRoleRootSuperOnly(t *testing.T) {
+	svc, mailer := newTestService(t)
+	root := seedAdminUser(t, svc, mailer, RootSuperEmail, adminRoleSuper)
+	other := seedAdminUser(t, svc, mailer, "setrole-super@example.com", adminRoleSuper)
+	target := newPasskeyUser(t, svc, mailer, "setrole-target@example.com")
+	if err := svc.AdminSetScope(root, target.UID, "calorie-diary", true); err != nil {
+		t.Fatalf("造 app-admin: %v", err)
+	}
+
+	// 非根 su 授 super → 403 且点名根管理员
+	if code, msg := httpMsg(svc.AdminSetRole(other, target.UID, adminRoleSuper)); code != 403 || !strings.Contains(msg, "根管理员") {
+		t.Errorf("非根 su 授 super 应 403，得到 %d %q", code, msg)
+	}
+	// 非根 su 取消他人的 super → 同样 403
+	if code, msg := httpMsg(svc.AdminSetRole(other, root.UID, adminRoleAdmin)); code != 403 || !strings.Contains(msg, "根管理员") {
+		t.Errorf("非根 su 取消 super 应 403，得到 %d %q", code, msg)
+	}
+	// 根 su 授 super → 200，且审计落 admin.role.change
+	if err := svc.AdminSetRole(root, target.UID, adminRoleSuper); err != nil {
+		t.Fatalf("根 su 授 super: %v", err)
+	}
+	if got, _ := svc.SessionRole(target.UID); got != adminRoleSuper {
+		t.Errorf("升后应为 super，得到 %q", got)
+	}
+	var changes int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE action = 'admin.role.change' AND result = 'ok' AND target_uid = ?", target.UID).
+		Scan(&changes); err != nil || changes == 0 {
+		t.Errorf("涉 super 的角色调整应落 admin.role.change，得到 %d err=%v", changes, err)
+	}
+	// 根 su 取消（降 admin）→ 200；已无授权行可清（super 本就不带 scope）
+	if err := svc.AdminSetRole(root, target.UID, adminRoleAdmin); err != nil {
+		t.Fatalf("根 su 降 super: %v", err)
+	}
+	// 非根 su 的涉 super 尝试也要留痕（fail 行落到 admin.role.change）
+	var fails int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM audit_logs WHERE action = 'admin.role.change' AND result = 'fail'").
+		Scan(&fails); err != nil || fails == 0 {
+		t.Errorf("被拒的 super 调整应记 fail，得到 %d err=%v", fails, err)
+	}
+	// 降 user 清 scopes（残留行不许在下次提权时复活）
+	if err := svc.AdminSetRole(root, target.UID, adminRoleUser); err != nil {
+		t.Fatalf("降 user: %v", err)
+	}
+	var left int
+	_ = svc.pool.QueryRow("SELECT COUNT(*) FROM admin_scopes WHERE uid = ?", target.UID).Scan(&left)
+	if left != 0 {
+		t.Errorf("降 user 应清空授权行，剩 %d", left)
+	}
+	// idempotent：已是目标角色时 200 且不写库
+	if err := svc.AdminSetRole(root, target.UID, adminRoleUser); err != nil {
+		t.Errorf("重复设为同角色应幂等成功: %v", err)
+	}
+}
+
 // 会话总览与两种吊销：按 uid 过滤、单吊幂等、整户踢干净后会话当场失效。
 func TestAdminSessionsAndRevocation(t *testing.T) {
 	svc, mailer := newTestService(t)
@@ -167,12 +228,12 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 		t.Fatalf("JWT 登录: %v", err)
 	}
 
-	all, total, err := svc.AdminListSessions(0, nil, 20, 0)
+	all, total, _, err := svc.AdminListSessions(0, nil, "", 20, 0)
 	if err != nil || total < 2 {
 		t.Fatalf("总览应至少 2 条，得到 total=%d err=%v", total, err)
 	}
 	// 三条：注册即登录那台（newPasskeyUser）+ 本用例建的 web + JWT 各一台
-	mine, _, err := svc.AdminListSessions(c.UID, nil, 20, 0)
+	mine, _, _, err := svc.AdminListSessions(c.UID, nil, "", 20, 0)
 	if err != nil || len(mine) != 3 {
 		t.Fatalf("按 uid 过滤应 3 条，得到 %d err=%v", len(mine), err)
 	}
@@ -207,7 +268,7 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 	if code, _ := httpMsg(jerr); code != 401 {
 		t.Errorf("被踢用户的 JWT 应 401，得到 %d", code)
 	}
-	rest, _, err := svc.AdminListSessions(c.UID, nil, 20, 0)
+	rest, _, _, err := svc.AdminListSessions(c.UID, nil, "", 20, 0)
 	if err != nil || len(rest) != 0 {
 		t.Errorf("踢干净后应 0 条，得到 %d err=%v", len(rest), err)
 	}
@@ -215,6 +276,76 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 	for _, want := range []string{"admin.session.revoke:ok", "admin.user.session_revoke:ok"} {
 		if list := auditList(t, svc); !hasEvent(list, want) {
 			t.Errorf("应有 %s，得到 %v", want, list)
+		}
+	}
+}
+
+// 会话总览的服务端搜索（A4#3）：query 是邮箱片段或精确 uid，过滤在 SQL 里做
+//（邮箱条件要 join users），total / totalUsers 按同一条件数——前端不再拿本页
+// 100 条会话自己过滤（那会漏掉本页之外的用户，页码也数不出用户数）。
+// 真库用例：无 TEST_MYSQL_DSN 时 Skip（与本包其它真库用例同策略），留给 CI。
+func TestAdminListSessionsQuery(t *testing.T) {
+	svc, mailer := newTestService(t)
+	a := newPasskeyUser(t, svc, mailer, "sessq-alpha@example.com")
+	b := newPasskeyUser(t, svc, mailer, "sessq-beta@example.com")
+	if _, err := svc.CreateWebSession(a.UID, SessionMeta{IP: "203.0.113.10", UserAgent: "Chrome"}); err != nil {
+		t.Fatalf("给 a 加第二台设备: %v", err)
+	}
+	if _, err := svc.CreateWebSession(b.UID, SessionMeta{IP: "203.0.113.11", UserAgent: "Safari"}); err != nil {
+		t.Fatalf("给 b 建会话: %v", err)
+	}
+
+	// 邮箱片段：只回 a 的会话（注册 1 + 新建 1 = 2 条），用户数 1
+	list, total, users, err := svc.AdminListSessions(0, nil, "sessq-alpha", 100, 0)
+	if err != nil {
+		t.Fatalf("按邮箱片段查会话: %v", err)
+	}
+	if total != 2 || users != 1 || len(list) != 2 {
+		t.Fatalf("片段过滤应 total=2 / totalUsers=1 / 2 行，得到 total=%d users=%d len=%d",
+			total, users, len(list))
+	}
+	for _, it := range list {
+		if it.UID != a.UID || !strings.Contains(it.Email, "sessq-alpha") {
+			t.Errorf("过滤结果混进了别人的行: %+v", it)
+		}
+	}
+
+	// 纯数字 query = uid 精确匹配（与 AdminSearchUsers 同一套全串校验分流）
+	byUID, totalByUID, usersByUID, err := svc.AdminListSessions(0, nil, strconv.FormatInt(a.UID, 10), 100, 0)
+	if err != nil || totalByUID != 2 || usersByUID != 1 || len(byUID) != 2 {
+		t.Errorf("按 uid 应同样回 a 的 2 条，得到 total=%d users=%d len=%d err=%v",
+			totalByUID, usersByUID, len(byUID), err)
+	}
+	// 带字母的混合串不能被按前缀解成 uid（否则会错命中 uid 恰好等于前缀的用户）
+	mixed, mixedTotal, _, err := svc.AdminListSessions(0, nil, strconv.FormatInt(a.UID, 10)+"x", 100, 0)
+	if err != nil || mixedTotal != 0 || len(mixed) != 0 {
+		t.Errorf("uid+字母的混合串应走邮箱 LIKE、查无此邮箱即 0 行，得到 total=%d len=%d err=%v",
+			mixedTotal, len(mixed), err)
+	}
+
+	// 无匹配：空回执且两个计数都为 0（页码文案不许拿旧值糊弄）
+	none, nTotal, nUsers, err := svc.AdminListSessions(0, nil, "sessq-nobody", 100, 0)
+	if err != nil || nTotal != 0 || nUsers != 0 || len(none) != 0 {
+		t.Errorf("查无匹配应全 0，得到 total=%d users=%d len=%d err=%v", nTotal, nUsers, len(none), err)
+	}
+
+	// 空 query = 全量口径不变：本用例至少 3 条（a 2 条 + b 1 条）、至少 2 位用户
+	all, allTotal, allUsers, err := svc.AdminListSessions(0, nil, "", 100, 0)
+	if err != nil || allTotal < 3 || allUsers < 2 || len(all) != allTotal {
+		t.Errorf("空 query 应回全量，得到 total=%d users=%d len=%d err=%v",
+			allTotal, allUsers, len(all), err)
+	}
+	// 与 apps 过滤叠加：query + scope 同时生效（app-admin 的数据边界不被搜索绕开）
+	if _, err := svc.Login("sessq-alpha@example.com", "secret123", "calorie-diary", testMeta); err != nil {
+		t.Fatalf("calorie 登录: %v", err)
+	}
+	cal, calTotal, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, "sessq-alpha", 100, 0)
+	if err != nil || calTotal == 0 {
+		t.Fatalf("query + app 过滤叠加应有行，得到 total=%d err=%v", calTotal, err)
+	}
+	for _, it := range cal {
+		if it.App != "calorie-diary" || it.UID != a.UID {
+			t.Errorf("叠加过滤后混进越权行: %+v", it)
 		}
 	}
 }
@@ -340,28 +471,39 @@ func TestAdminConfigMaskingAndWrite(t *testing.T) {
 	}
 }
 
-// AI 用量看板：空表如实空（不造数）、聚合与 Top10 截断、限额缺省 20/8/500/5000。
+// AI 用量看板：空表回补零整窗（不造数）、按天升序、today/yesterday/activeToday、
+// per-user 聚合与「区间用量降序 + share」、限额四档的默认值（defaultsUsed）与配齐取值。
 func TestAdminAIUsage(t *testing.T) {
 	svc, _ := newTestService(t)
+	now := time.Now()
 
-	// 空表：days 为空数组，页面据此显示「暂无记录」
-	empty, err := svc.AdminAIUsage(30, nil)
+	// 空表：days 仍是补零的整窗、users 空、today=0（页面据此显示「暂无记录」）
+	empty, err := svc.AdminAIUsage(7, nil)
 	if err != nil {
 		t.Fatalf("查空看板: %v", err)
 	}
-	if len(empty.Days) != 0 {
-		t.Errorf("空表应回空 days，得到 %+v", empty.Days)
+	if len(empty.Days) != 7 || empty.Today != 0 || empty.Yesterday != 0 || len(empty.Users) != 0 {
+		t.Fatalf("空表应为 7 天补零整窗 + 空 users，得到 days=%v users=%v", empty.Days, empty.Users)
 	}
-	// 限额四档：没配置时用与 quota.go 一致的默认值，configured=false
-	q := empty.Quota
-	if q.Configured || q.PerMinute != 20 || q.Concurrency != 8 ||
-		q.DailyPerUser != 500 || q.DailyGlobal != 5000 {
-		t.Errorf("限额缺省应为 20/8/500/5000 且标记未配置，得到 %+v", q)
+	for i, d := range empty.Days {
+		if d.Count != 0 {
+			t.Errorf("空表第 %d 天应为 0，得到 %+v", i, d)
+		}
+	}
+	if empty.Days[6].Date != now.Format("2006-01-02") || empty.Days[0].Date != now.AddDate(0, 0, -6).Format("2006-01-02") {
+		t.Errorf("days 应按日期升序铺满窗口、末位是今天，得到 %+v", empty.Days)
+	}
+	// 限额四档：没配置时 defaultsUsed=4，per-user 与 global 限额用默认 500 / 5000
+	if empty.DefaultsUsed != 4 {
+		t.Errorf("四档全走默认时 defaultsUsed 应为 4，得到 %d", empty.DefaultsUsed)
+	}
+	if empty.Global == nil || empty.Global.Limit != 5000 || empty.Global.Used != 0 {
+		t.Errorf("无 global 行时应回 limit=5000/used=0，得到 %+v", empty.Global)
 	}
 
-	// 造两天用量：总量累加、单日 Top10 截断
-	day1 := time.Now().Format("2006-01-02")
-	day2 := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	// 造两天用量：12 个用户今天各 3 次；另一个用户昨天 7 次
+	day1 := now.Format("2006-01-02")
+	day2 := now.AddDate(0, 0, -1).Format("2006-01-02")
 	if _, err := svc.pool.Exec("DELETE FROM ai_usage"); err != nil {
 		t.Fatalf("清用量表: %v", err)
 	}
@@ -382,24 +524,30 @@ func TestAdminAIUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查看板: %v", err)
 	}
-	if len(report.Days) != 2 {
-		t.Fatalf("应有两天数据，得到 %+v", report.Days)
+	if report.Today != 36 || report.Yesterday != 7 || report.ActiveToday != 12 {
+		t.Errorf("today/yesterday/activeToday 应 36/7/12，得到 %d/%d/%d",
+			report.Today, report.Yesterday, report.ActiveToday)
 	}
-	// 倒序：最新一天在前
-	if report.Days[0].Day != day1 {
-		t.Errorf("应按日期倒序，得到首日 %s", report.Days[0].Day)
+	// users 按区间用量降序：昨天 7 次的 2000 排第一（今天为 0 的用户 Today 排序在后）
+	if len(report.Users) != 13 {
+		t.Fatalf("应有 13 个用户，得到 %d", len(report.Users))
 	}
-	if report.Days[0].Total != 36 {
-		t.Errorf("day1 总量应 36，得到 %d", report.Days[0].Total)
+	top := report.Users[0]
+	if top.UID != 2000 || top.Range != 7 || top.Today != 0 || top.Share != math.Round(7.0/43.0*10000)/10000 {
+		t.Errorf("首行应是 uid=2000（range=7, share=7/43），得到 %+v", top)
 	}
-	if len(report.Days[0].ByUserTop) != 10 {
-		t.Errorf("单日 Top10 应截断到 10，得到 %d", len(report.Days[0].ByUserTop))
+	// 默认 per-user 限额 500
+	if top.LimitToday != 500 {
+		t.Errorf("默认 per-user 限额应 500，得到 %d", top.LimitToday)
 	}
-	if report.Days[1].Total != 7 {
-		t.Errorf("day2 总量应 7，得到 %d", report.Days[1].Total)
+	for _, u := range report.Users[1:] {
+		if u.Range != 3 || u.Today != 3 {
+			t.Errorf("12 个今日用户应各 range=3/today=3，得到 %+v", u)
+			break
+		}
 	}
 
-	// 配齐限额键 → configured=true 且用配置值
+	// 配齐限额键 → defaultsUsed=0 且用配置值
 	for _, kv := range [][2]string{
 		{"ai_rate_per_minute", "33"},
 		{"ai_concurrency", "9"},
@@ -419,10 +567,33 @@ func TestAdminAIUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("复查看板: %v", err)
 	}
-	qq := withQuota.Quota
-	if !qq.Configured || qq.PerMinute != 33 || qq.Concurrency != 9 ||
-		qq.DailyPerUser != 600 || qq.DailyGlobal != 6666 {
-		t.Errorf("配置后应回配置值，得到 %+v", qq)
+	if withQuota.DefaultsUsed != 0 || withQuota.Global == nil || withQuota.Global.Limit != 6666 {
+		t.Errorf("配齐后 defaultsUsed=0、global.limit=6666，得到 %+v", withQuota)
+	}
+	if withQuota.Users[0].LimitToday != 600 {
+		t.Errorf("配齐后 per-user 限额应 600，得到 %d", withQuota.Users[0].LimitToday)
+	}
+
+	// 钻取：单用户整窗 + today + limitToday；查无此 uid 404
+	detail, err := svc.AdminAIUsageUser(30, nil, 2000)
+	if err != nil {
+		t.Fatalf("钻取: %v", err)
+	}
+	if detail.UID != 2000 || detail.Today != 0 || len(detail.Days) != 30 || detail.LimitToday != 600 {
+		t.Errorf("钻取回执不对: %+v", detail)
+	}
+	var sawY bool
+	for _, d := range detail.Days {
+		if d.Date == day2 {
+			sawY = d.Count == 7
+		}
+	}
+	if !sawY {
+		t.Errorf("钻取的 days 应含昨日 7 次: %+v", detail.Days)
+	}
+	_, derr := svc.AdminAIUsageUser(30, nil, 999999999)
+	if code, _ := httpMsg(derr); code != 404 {
+		t.Errorf("查无 uid 应 404，得到 %d", code)
 	}
 }
 

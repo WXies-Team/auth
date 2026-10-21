@@ -34,15 +34,16 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 			h(c, w, r)
 		})))
 	}
-	// reauthed：在 authed 之上再要一道 15 分钟内的强认证（ASVS V7.5.1）。
-	// 401 + 固定文案，前端据此弹「重新验证」框后调 /web/reauth。
+	// reauthed：在 authed 之上再要一道 2 小时内的强认证（ASVS V7.5.1）。
+	// 401 + 固定文案，前端据此弹「重新验证」框后调 /web/reauth；成功的操作
+	// 顺带滑动续期 reauth_at（slideReauth 的 sudo mode 语义）。
 	reauthed := func(scope string, max int, h func(c auth.WebCaller, w http.ResponseWriter, r *http.Request)) http.Handler {
 		return authed(scope, max, func(c auth.WebCaller, w http.ResponseWriter, r *http.Request) {
 			if err := svc.RequireReauth(c.SID); err != nil {
 				writeResult(w, nil, err)
 				return
 			}
-			h(c, w, r)
+			slideReauth(svc, c.SID, w, func(w http.ResponseWriter) { h(c, w, r) })
 		})
 	}
 	// ---- 登录（无登录态，只有 Origin 同源校验：此时没有可搭的 cookie 顺风车）----
@@ -66,7 +67,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		})))))
 	mux.Handle("POST /web/login/totp", withLogging(originGuard(limitN("web-login-totp", 15,
 		jsonBody[protocol.WebLoginTOTPRequest](func(req *protocol.WebLoginTOTPRequest, w http.ResponseWriter, r *http.Request) {
-			res, err := svc.WebLoginTOTP(req.LoginToken, req.Code, req.RecoveryCode, sessMeta(r))
+			res, err := svc.WebLoginTOTP(req.LoginToken, req.Code, req.RecoveryCode, req.EmailCode, sessMeta(r))
 			if err != nil {
 				writeResult(w, nil, err)
 				return
@@ -108,7 +109,9 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 			if !decodeOr400(w, r, &req) {
 				return
 			}
-			if err := svc.Reauth(c.Caller, req.Password, req.TOTPCode); err != nil {
+			// 密码 / 两步验证码 / 恢复码三选一的分流在业务层（Reauth），与安全页的
+			//「一框二选一」同一套格式判定
+			if err := svc.Reauth(c.Caller, req.Password, req.TOTPCode, req.RecoveryCode); err != nil {
 				writeResult(w, nil, err)
 				return
 			}
@@ -116,8 +119,9 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		}))
 	mux.Handle("POST /web/logout", authed("web-logout", 10,
 		func(c auth.WebCaller, w http.ResponseWriter, _ *http.Request) {
-			// 只吊销本行（web 会话），不动 token_version：同账号的其它设备照常用
-			err := svc.RevokeSession(c.UID, c.SID)
+			// 只吊销本行（web 会话），不动 token_version：同账号的其它设备照常用。
+			// 自行登出不受会话作用域限制（踢的就是手上这把凭据指向的行）。
+			err := svc.RevokeSession(c.UID, c.SID, nil)
 			svc.Audit(auth.AuditEvent{
 				Action: auth.AuditLogout, OK: err == nil, ActorUID: &c.UID,
 				ActorEmail: c.Email, Meta: c.Meta,
@@ -328,10 +332,10 @@ func writeLoginResult(svc *auth.Service, w http.ResponseWriter, res *auth.WebLog
 //	（WebAuthDtos.kt 的 response: String），解一层再交库——不解的话库拿到带引号的
 //	字符串，解析直接 400，App 的 passkey 登录/注册全废。
 //
-// 解不动回 400「请求格式不正确」（与 decodeOr400 同一句），不留到库那层变 500。
+// 解不动回 400「请求格式不正确，请检查后重试」（与 decodeOr400 同一句），不留到库那层变 500。
 func credentialJSON(w http.ResponseWriter, raw json.RawMessage) ([]byte, bool) {
 	if len(raw) == 0 {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		writeError(w, http.StatusBadRequest, "请求格式不正确，请检查后重试")
 		return nil, false
 	}
 	if raw[0] != '"' {
@@ -339,7 +343,7 @@ func credentialJSON(w http.ResponseWriter, raw json.RawMessage) ([]byte, bool) {
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil || len(s) == 0 {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+		writeError(w, http.StatusBadRequest, "请求格式不正确，请检查后重试")
 		return nil, false
 	}
 	return []byte(s), true
@@ -428,12 +432,41 @@ func withEmail(email string) func(*auth.AuditEvent) {
 	return func(ev *auth.AuditEvent) { ev.ActorEmail = email }
 }
 
-// reauthThen 给**敏感写操作**补 15 分钟强认证窗，但只对凭 cookie 进来的会话生效。
+// statusWriter 记下 handler 实际写出的第一笔状态码（writeJSON 一律显式 WriteHeader，
+// 200/4xx/5xx 由此可判；嵌入 ResponseWriter，本包 handler 不用 Flusher/Hijacker）。
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// slideReauth 执行一个受 reauth 闸保护的敏感操作，**成功回执（<400）落笔后**把本
+// 会话 reauth_at 刷到现在：2 小时强认证窗的滑动续期（GitHub sudo mode 口径——
+// 「两次提示之间为 2 小时，期间任何敏感操作都会重置计时器」）。
+// 失败（≥400 / 没写出状态）不刷：刷了等于给爆破者续命，防重放与审计语义都不变。
+func slideReauth(svc *auth.Service, sid int64, w http.ResponseWriter, run func(http.ResponseWriter)) {
+	sw := &statusWriter{ResponseWriter: w}
+	run(sw)
+	if sw.status >= 200 && sw.status < 400 {
+		_ = svc.MarkReauth(sid)
+	}
+}
+
+// reauthThen 给**敏感写操作**补 2 小时强认证窗，但只对凭 cookie 进来的会话生效。
 //
 // 为什么区别对待：规格 A1.2 要求改密码/改邮箱前近期认证过，而这几个端点同时
 // 也是老客户端在用的——已发布的日记 App 没有 /web/reauth、也不该被这道新闸
 // 挡死（老客户端零破坏是硬约束）。Bearer 侧照旧只靠「原密码 / 验证码」本身，
-// cookie 侧则必须 reauth ≤15 分钟，前端 401 后会自动弹框重试。
+// cookie 侧则必须 reauth ≤2 小时，前端 401 后会自动弹框重试。
+//
+// 过闸且成功的操作经 slideReauth 滑动续期；Bearer 调用没吃这道闸，也就不刷——
+// 续期只属于「被强认证窗放行」的操作。
 func reauthThen(svc *auth.Service, h func(auth.Caller, http.ResponseWriter, *http.Request)) func(auth.Caller, http.ResponseWriter, *http.Request) {
 	return func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		if wc, ok := r.Context().Value(webCallerKey).(auth.WebCaller); ok && wc.ViaCookie {
@@ -441,6 +474,8 @@ func reauthThen(svc *auth.Service, h func(auth.Caller, http.ResponseWriter, *htt
 				writeResult(w, nil, err)
 				return
 			}
+			slideReauth(svc, wc.SID, w, func(w http.ResponseWriter) { h(c, w, r) })
+			return
 		}
 		h(c, w, r)
 	}
@@ -451,7 +486,7 @@ func reauthThen(svc *auth.Service, h func(auth.Caller, http.ResponseWriter, *htt
 func pathInt64(w http.ResponseWriter, raw string) (int64, bool) {
 	id, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, "参数不正确")
+		writeError(w, http.StatusBadRequest, "参数不正确，请检查 id 后重试")
 		return 0, false
 	}
 	return id, true

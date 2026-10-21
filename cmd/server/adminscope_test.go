@@ -329,11 +329,9 @@ func TestAdminScopeMatrix(t *testing.T) {
 		}{
 			{"users-list", "GET", "/admin/users", ""},
 			{"users-detail", "GET", "/admin/users/" + strconv.FormatInt(victim, 10), ""},
-			{"users-role", "PATCH", "/admin/users/" + strconv.FormatInt(victim, 10), `{"role":"admin"}`},
+			{"users-role", "POST", "/admin/users/" + strconv.FormatInt(victim, 10) + "/role", `{"role":"admin"}`},
 			{"users-kick", "POST", "/admin/users/" + strconv.FormatInt(victim, 10) + "/revoke-sessions", `{}`},
-			{"roles-list", "GET", "/admin/roles", ""},
 			{"roles-scope", "POST", "/admin/roles/" + strconv.FormatInt(victim, 10) + "/scope", `{"app":"calorie-diary","op":"grant"}`},
-			{"roles-role", "POST", "/admin/roles/" + strconv.FormatInt(victim, 10) + "/role", `{"role":"super"}`},
 			{"config-list", "GET", "/admin/config", ""},
 			{"config-write", "PUT", "/admin/config/llm_model", `{"value":"gpt-x"}`},
 		} {
@@ -379,23 +377,37 @@ func TestRolesEndpoints(t *testing.T) {
 		Scan(&grants); err != nil || grants == 0 {
 		t.Errorf("授予应落 admin.role.grant 审计，得到 %d err=%v", grants, err)
 	}
-	// GET /admin/roles 摘要带 scopes
-	rec = e.do(t, "GET", "/admin/roles?query=ro-target", "", superX.cookieOnly)
+	// 用户详情带 scopes、列表带 scopeCount（合并用户页的数据源，钉住 JSON 字段）
+	targetUID := strconv.FormatInt(target, 10)
+	rec = e.do(t, "GET", "/admin/users/"+targetUID, "", superX.cookieOnly)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("角色列表应 200，得到 %d", rec.Code)
+		t.Fatalf("用户详情应 200，得到 %d", rec.Code)
 	}
-	var page struct {
+	var detail struct {
+		Role   string   `json:"role"`
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("用户详情解析: %v (%s)", err, rec.Body.String())
+	}
+	if detail.Role != "admin" || len(detail.Scopes) != 1 || detail.Scopes[0] != "calorie-diary" {
+		t.Errorf("用户详情 role/scopes 不对: %+v", detail)
+	}
+	rec = e.do(t, "GET", "/admin/users?query=ro-target", "", superX.cookieOnly)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("用户列表应 200，得到 %d", rec.Code)
+	}
+	var upage struct {
 		Items []struct {
-			UID    int64    `json:"uid"`
-			Role   string   `json:"role"`
-			Scopes []string `json:"scopes"`
+			UID        int64 `json:"uid"`
+			ScopeCount int   `json:"scopeCount"`
 		} `json:"items"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil || len(page.Items) != 1 {
-		t.Fatalf("角色摘要解析: %v items=%d", err, len(page.Items))
+	if err := json.Unmarshal(rec.Body.Bytes(), &upage); err != nil || len(upage.Items) != 1 {
+		t.Fatalf("用户列表解析: %v items=%d", err, len(upage.Items))
 	}
-	if page.Items[0].Role != "admin" || len(page.Items[0].Scopes) != 1 || page.Items[0].Scopes[0] != "calorie-diary" {
-		t.Errorf("角色摘要不对: %+v", page.Items[0])
+	if upage.Items[0].ScopeCount != 1 {
+		t.Errorf("列表 scopeCount 应 1，得到 %d", upage.Items[0].ScopeCount)
 	}
 
 	// 收光最后一个授权：role 降回 user

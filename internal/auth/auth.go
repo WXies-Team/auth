@@ -692,10 +692,13 @@ func (s *Service) checkPassword(rawEmail, password string) (int64, int, error) {
 	return id, version, nil
 }
 
-// SendCode 发送「注册 / 找回密码 / 登录」验证码。purpose 走白名单。
+// SendCode 发送「注册 / 找回密码 / 登录 / 登录两步验证」验证码。purpose 走白名单。
 //
 // app 可选：给了就决定这封验证码邮件的品牌（空 = 中性品牌 Auth，留给将来的 web
 // 账号台），未知值 400——与登录等端点同口径，老客户端不传照常工作。
+//
+// login_2fa（登录第二步的邮箱码）只对**已开两步验证**的账号发：没开 2FA 的账号
+// 没有第二步，这封信只会让收件人困惑（发码侧就挡住，也省一次投信）。
 //
 // **不额外做防枚举是有意的**：注册侧本就对所有请求回「该邮箱已注册」（既有行为），
 // 同一信息在找回侧保持沉默换不来任何防护，只换来「等 60 秒却收不到信」的困惑。
@@ -710,7 +713,8 @@ func (s *Service) SendCode(rawEmail, purpose, app string) error {
 	if err := validateEmail(email); err != nil {
 		return err
 	}
-	if purpose != PurposeRegister && purpose != PurposeReset && purpose != PurposeLogin {
+	if purpose != PurposeRegister && purpose != PurposeReset &&
+		purpose != PurposeLogin && purpose != PurposeLogin2FA {
 		return badRequest("参数不正确")
 	}
 	if s.mailer == nil {
@@ -730,12 +734,31 @@ func (s *Service) SendCode(rawEmail, purpose, app string) error {
 	if purpose == PurposeLogin && !exists {
 		return badRequest("邮箱未注册，请先注册")
 	}
+	if purpose == PurposeLogin2FA {
+		if !exists {
+			return badRequest("邮箱未注册，请先注册")
+		}
+		var uid int64
+		if err := s.pool.QueryRowContext(context.Background(),
+			"SELECT id FROM users WHERE email = ?", email).Scan(&uid); err != nil {
+			return fmt.Errorf("查用户: %w", err)
+		}
+		enabled, err := s.TOTPEnabled(uid)
+		if err != nil {
+			return err
+		}
+		if !enabled {
+			return badRequest("该账号未开启两步验证")
+		}
+	}
 	action := "注册"
 	switch purpose {
 	case PurposeReset:
 		action = "找回密码"
 	case PurposeLogin:
 		action = "登录"
+	case PurposeLogin2FA:
+		action = "登录两步验证"
 	}
 	return s.sendOTP(purpose, email, action, app)
 }
@@ -904,7 +927,8 @@ func (s *Service) Logout(userID int64) error {
 		"UPDATE users SET token_version = token_version + 1 WHERE id = ?", userID); err != nil {
 		return fmt.Errorf("吊销 token: %w", err)
 	}
-	if err := revokeUserSessions(ctx, tx, userID, 0); err != nil {
+	// 登出/改密吊销的是**这个账号的全部会话**：不设 app 边界（apps=nil），跨项目一并下线
+	if err := revokeUserSessions(ctx, tx, userID, 0, nil); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -949,7 +973,7 @@ func (s *Service) setPasswordAndRevoke(userID int64, newHash string, keepSID int
 		newHash, userID); err != nil {
 		return fmt.Errorf("改密: %w", err)
 	}
-	if err := revokeUserSessions(ctx, tx, userID, keepSID); err != nil {
+	if err := revokeUserSessions(ctx, tx, userID, keepSID, nil); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

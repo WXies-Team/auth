@@ -137,41 +137,87 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	}))
 
 	// ---- 已登录设备（会话管理）----
-	// 三个端点都走 authed + 按 uid 限流。列表单独一个 scope：设备页多刷几次
-	// 不该把「踢人」的额度挤掉（同 scope 会共用 uid 那一个桶）。
-	mux.Handle("GET /api/sessions", authedLimited("sessions", 30, func(c auth.Caller, w http.ResponseWriter, _ *http.Request) {
-		list, err := authSvc.ListSessions(c.UID, c.SID)
-		writeResult(w, list, err)
-	}))
-	// 踢单台：别人会话与不存在的 id 同回 404（不给存在性探针），幂等 200；
-	// 踢掉当前 sid 也放行——客户端自己处理本地登出。
-	mux.Handle("DELETE /api/sessions/{id}", authedLimited("session-kick", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	// 会话作用域（本批拍板）：**cookie 调用者可见可管全部 app 的会话**（网页控制台
+	// 展示的是「这个账号的全部设备」），**Bearer（JWT 的 aud / web 会话 token 的
+	// app）只限自己 app 的会话**——项目客户端不该看见、更不该能踢其它项目的会话。
+	// 越界与查无此行同回 404（不泄露存在性），口径见 internal/auth/session.go。
+	sessionApps := func(c auth.Caller, r *http.Request) []string {
+		if wc, ok := r.Context().Value(webCallerKey).(auth.WebCaller); ok && wc.ViaCookie {
+			return nil // cookie：全部 app
+		}
+		return []string{c.App}
+	}
+	// 限流口径不变：列表单独一个 scope（设备页多刷几次不该把「踢人」的额度挤掉），
+	// 踢人与批量退出共用 session-kick 的 uid 桶。
+	mux.Handle("GET /api/sessions", authedLimited("sessions", 30, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		list, err := authSvc.ListSessions(c.UID, c.SID, sessionApps(c, r))
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "参数不正确")
+			writeResult(w, nil, err)
 			return
 		}
-		revErr := authSvc.RevokeSession(c.UID, id)
+		// 对象信封 {sessions:[...]}：客户端（网页 JS 与两个日记 App 的
+		// SessionsResponse）按具名字段解析，裸数组在 Kotlin 端反序列化必失败。
+		writeJSON(w, http.StatusOK, struct {
+			Sessions []protocol.SessionInfo `json:"sessions"`
+		}{Sessions: list})
+	}))
+	// 踢单台：别人会话、超出可见范围与不存在的 id 同回 404（不给存在性探针），
+	// 幂等 200；踢掉当前 sid 也放行——客户端自己处理本地登出。
+	mux.Handle("DELETE /api/sessions/{id}", authedLimited("session-kick", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil || id <= 0 {
+			writeError(w, http.StatusBadRequest, "参数不正确，请检查会话 id 后重试")
+			return
+		}
+		revErr := authSvc.RevokeSession(c.UID, id, sessionApps(c, r))
 		auditRoute(authSvc, auth.AuditSessionKick, &c, r, map[string]string{
 			"session": strconv.FormatInt(id, 10),
 			"scope":   "one",
 		}, revErr)
 		writeResult(w, map[string]bool{"ok": true}, revErr)
 	}))
-	// 退出其它设备：只动会话层（不 bump token_version），当前 token 照用。
-	// 网页（cookie）调用再要一道 15 分钟强认证窗（reauthThen，ASVS V7.5.1）——
+	// 批量退出（网页端「退出该设备的全部会话」）：body {ids:[...]}，id 与列表回执
+	// 同形（**十进制字符串**，前端原样回传即可）。整批先校验归属与可见范围，任一
+	// 不合法整体 404；限流复用 session-kick 的 uid 桶；网页（cookie）调用者再吃一道
+	// 2 小时强认证窗——与「退出其它设备」同类的批量高危动作（ASVS V7.5.1）。
+	mux.Handle("POST /api/sessions/revoke-many", authedLimited("session-kick", 10, reauthThen(authSvc, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			IDs []string `json:"ids"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		ids := make([]int64, 0, len(req.IDs))
+		for _, raw := range req.IDs {
+			id, perr := strconv.ParseInt(raw, 10, 64)
+			if perr != nil || id <= 0 {
+				writeError(w, http.StatusBadRequest, "参数不正确，请检查会话 id 后重试")
+				return
+			}
+			ids = append(ids, id)
+		}
+		count, revErr := authSvc.RevokeSessions(c.UID, ids, sessionApps(c, r))
+		// 审计带上实际踢掉的台数（与 revoke-others 同款取证口径）
+		auditRoute(authSvc, auth.AuditSessionKick, &c, r, map[string]string{
+			"scope": "many",
+			"count": strconv.Itoa(count),
+		}, revErr)
+		writeResult(w, map[string]bool{"ok": true}, revErr)
+	})))
+	// 退出其它设备：只动会话层（不 bump token_version），当前 token 照用；作用域同上。
+	// 网页（cookie）调用再要一道 2 小时强认证窗（reauthThen，ASVS V7.5.1）——
 	// 这是批量踢人的高危动作；Bearer 老客户端不受影响（reauthThen 只对 ViaCookie 生效）。
 	mux.Handle("POST /api/sessions/revoke-others", authedLimited("session-revoke-others", 10, reauthThen(authSvc, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
 		// 审计带上本次实际踢掉的台数（先数后踢）：批量动作的取证要看「踢了几台」。
 		count := 0
-		if list, lerr := authSvc.ListSessions(c.UID, c.SID); lerr == nil {
+		if list, lerr := authSvc.ListSessions(c.UID, c.SID, sessionApps(c, r)); lerr == nil {
 			for _, it := range list {
 				if !it.Current {
 					count++
 				}
 			}
 		}
-		revErr := authSvc.RevokeOtherSessions(c.UID, c.SID)
+		revErr := authSvc.RevokeOtherSessions(c.UID, c.SID, sessionApps(c, r))
 		auditRoute(authSvc, auth.AuditSessionKick, &c, r, map[string]string{
 			"scope": "others",
 			"count": strconv.Itoa(count),

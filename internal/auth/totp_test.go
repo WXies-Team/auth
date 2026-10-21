@@ -206,7 +206,8 @@ func TestRecoveryCodesSingleUseAndRegeneration(t *testing.T) {
 	}
 }
 
-// 关闭两步验证：恢复码可解（丢了手机的收尾通道），关掉后因子与恢复码一起删。
+// 关闭两步验证：恢复码可解（丢了手机的收尾通道），关掉后因子与恢复码一起删；
+// **其它设备保持登录**（关闭 2FA 是配置变更不是凭证变更，不吊销任何会话）。
 func TestDisableTOTPWithRecoveryCode(t *testing.T) {
 	svc, mailer := newTestService(t)
 	c := newTOTPUser(t, svc, mailer, "totp-disable@example.com")
@@ -219,6 +220,11 @@ func TestDisableTOTPWithRecoveryCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
+	// 另一台设备：关闭两步验证后必须还活着
+	other, err := svc.CreateWebSession(c.UID, SessionMeta{IP: "198.51.100.60", UserAgent: "OtherPhone/1.0"})
+	if err != nil {
+		t.Fatalf("造另一台设备: %v", err)
+	}
 	if err := svc.DisableTOTP(c, codes[3]); err != nil {
 		t.Fatalf("用恢复码关闭: %v", err)
 	}
@@ -229,6 +235,15 @@ func TestDisableTOTPWithRecoveryCode(t *testing.T) {
 	var n int
 	if err := svc.pool.QueryRow("SELECT COUNT(*) FROM recovery_codes WHERE user_id = ?", c.UID).Scan(&n); err != nil || n != 0 {
 		t.Errorf("恢复码应随解绑清空，得到 n=%d err=%v", n, err)
+	}
+	// 不再吊销其它会话：另一台设备的会话行未被踢、凭据仍可校验
+	if _, err := svc.ValidWebSession(other.Token); err != nil {
+		t.Errorf("关闭两步验证不该登出其它设备: %v", err)
+	}
+	var alive int
+	if err := svc.pool.QueryRow(
+		"SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NULL", c.UID).Scan(&alive); err != nil || alive != 2 {
+		t.Errorf("关闭后两条会话（注册那条 + 另一台设备）都该活着，得到 %d (err=%v)", alive, err)
 	}
 	// 已关闭就别再关（幂等性提示，不是静默成功）
 	if err := svc.DisableTOTP(c, codes[0]); err == nil {

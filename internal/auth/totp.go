@@ -258,14 +258,14 @@ func (s *Service) EnableTOTP(c Caller, code string) (codes []string, err error) 
 		}
 	}()
 	if strings.TrimSpace(code) == "" {
-		return nil, badRequest("请输入验证码")
+		return nil, badRequest("请输入两步验证码")
 	}
 	f, err := s.loadFactor(c.UID)
 	if err != nil {
 		return nil, err
 	}
 	if f == nil {
-		return nil, badRequest("请先开始两步验证设置")
+		return nil, badRequest("还没有待验证的两步验证码，请先扫码开始设置")
 	}
 	target := f.Secret
 	if f.Pending != "" {
@@ -277,7 +277,8 @@ func (s *Service) EnableTOTP(c Caller, code string) (codes []string, err error) 
 	//「同一窗口内登录过再启用」误杀。验过立刻把命中步进记上，enable 码自己不能重放。
 	step, ok := s.verifyTOTPAt(target, code, 0)
 	if !ok {
-		return nil, badRequest("验证码错误，请重新输入")
+		// 启用只收两步验证码（恢复码在这一步没有意义），不看形态
+		return nil, badRequest(wrongCodeMsg(false, ""))
 	}
 
 	// 启用 = 换代：pending 顶掉旧 secret（没有 pending 就是首次启用）
@@ -322,8 +323,13 @@ func (s *Service) EnableTOTP(c Caller, code string) (codes []string, err error) 
 }
 
 // DisableTOTP 关闭两步验证：当前 TOTP 码或恢复码任一可解（TOTP 手机丢了就靠
-// 恢复码收尾，堵死「丢了手机+没恢复码」之外的任何死锁）。解绑同时删恢复码，
-// 并吊销其它会话——因子变了，别让旧设备继续挂着（ASVS 7.4.3）。
+// 恢复码收尾，堵死「丢了手机+没恢复码」之外的任何死锁）。解绑同时删恢复码
+//（恢复码属 2FA 配置的一部分，随关闭一起作废）。
+//
+// **不吊销其它会话、不动 token_version**（GitHub 口径：关闭 2FA 的后果只有失去
+// 组织访问，不登出其它设备；通行做法=关闭只删 2FA 配置本身）。旧行为是
+// RevokeOtherSessions 踢掉除本机外的全部会话——关闭 2FA 是配置变更，不是凭证变更，
+// 已登录设备照常在线；要踢人有设备页的「退出」。审计事件保持不变（totp.disable）。
 func (s *Service) DisableTOTP(c Caller, code string) (err error) {
 	defer func() {
 		s.Audit(AuditEvent{
@@ -332,14 +338,14 @@ func (s *Service) DisableTOTP(c Caller, code string) (err error) {
 		})
 	}()
 	if strings.TrimSpace(code) == "" {
-		return badRequest("请输入验证码")
+		return badRequest("请输入两步验证码或恢复码")
 	}
 	f, err := s.loadFactor(c.UID)
 	if err != nil {
 		return err
 	}
 	if f == nil || !f.Enabled {
-		return badRequest("两步验证尚未开启")
+		return badRequest("两步验证尚未开启，请先在安全页开启两步验证")
 	}
 	used, err := s.consumeRecoveryCode(c.UID, c.Email, code, c.Meta)
 	if err != nil {
@@ -348,7 +354,7 @@ func (s *Service) DisableTOTP(c Caller, code string) (err error) {
 	if !used {
 		step, ok := s.verifyTOTPAt(f.Secret, code, f.LastUsedStep)
 		if !ok {
-			return badRequest("验证码错误，请重新输入")
+			return wrongCodeError(code)
 		}
 		// 记下命中步进：解绑用过的码，不能再拿来换发恢复码
 		if _, err := s.pool.ExecContext(context.Background(),
@@ -372,7 +378,9 @@ func (s *Service) DisableTOTP(c Caller, code string) (err error) {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交关闭: %w", err)
 	}
-	return s.RevokeOtherSessions(c.UID, c.SID)
+	// 到此为止：只删了 2FA 配置（因子 + 恢复码），会话一律不动——关闭 2FA 不登出
+	// 其它设备（见函数注释）。
+	return nil
 }
 
 // RegenerateRecoveryCodes 换发恢复码：验 TOTP 或任一旧恢复码，整组换新、旧组即废。
@@ -388,14 +396,14 @@ func (s *Service) RegenerateRecoveryCodes(c Caller, code string) (codes []string
 		}
 	}()
 	if strings.TrimSpace(code) == "" {
-		return nil, badRequest("请输入验证码")
+		return nil, badRequest("请输入两步验证码或恢复码")
 	}
 	f, err := s.loadFactor(c.UID)
 	if err != nil {
 		return nil, err
 	}
 	if f == nil || !f.Enabled {
-		return nil, badRequest("两步验证尚未开启")
+		return nil, badRequest("两步验证尚未开启，请先在安全页开启两步验证")
 	}
 	used, err := s.consumeRecoveryCode(c.UID, c.Email, code, c.Meta)
 	if err != nil {
@@ -404,7 +412,7 @@ func (s *Service) RegenerateRecoveryCodes(c Caller, code string) (codes []string
 	if !used {
 		step, ok := s.verifyTOTPAt(f.Secret, code, f.LastUsedStep)
 		if !ok {
-			return nil, badRequest("验证码错误，请重新输入")
+			return nil, wrongCodeError(code)
 		}
 		if _, err := s.pool.ExecContext(context.Background(),
 			"UPDATE totp_factors SET last_used_timestep = ? WHERE user_id = ?", step, c.UID); err != nil {
@@ -575,6 +583,34 @@ func generateRecoveryCodes() ([]string, error) {
 		out = append(out, b.String())
 	}
 	return out, nil
+}
+
+// recoveryShaped 判定输入**形态上**像恢复码（16 位 Crockford 字符表，允许连字符与
+// 空白分隔，去分隔后长度不对即否）。安全页的关闭 / 换发与重新验证（/web/reauth）
+// 都靠它做「一框二选一」的格式分流：像恢复码的先走恢复码表，不像的按两步验证码验。
+func recoveryShaped(code string) bool { return normalizeRecoveryCode(code) != "" }
+
+// wrongCodeMsg 是错码文案的**唯一出处**：recovery 决定指哪种码的方向，tail 是
+// 场景出路（重新验证场景补「或改用密码验证」），空串不加。调用方按自己的语义给
+// recovery：一框二选一的入口看输入形态（wrongCodeError），登录第二步看实耗因子，
+// 重新验证的恢复码路带 tail。
+func wrongCodeMsg(recovery bool, tail string) string {
+	msg := "两步验证码错误，请重新输入"
+	if recovery {
+		// 像恢复码的输入多半是拿用过的码再试，报错要指对方向
+		msg = "恢复码不正确或已使用，请换一个恢复码"
+	}
+	if tail != "" {
+		msg += "，" + tail
+	}
+	return msg
+}
+
+// wrongCodeError 按格式分流给一句对得上的错码文案：像恢复码的输入报「恢复码不正确
+// 或已使用」（多半是拿用过的码再试），纯 6 位码报「两步验证码错误」——两种码共用
+// 一个输入框时，报错必须指对方向。形态判定与文案本身都在 wrongCodeMsg 一处收口。
+func wrongCodeError(code string) error {
+	return badRequest(wrongCodeMsg(recoveryShaped(code), ""))
 }
 
 // normalizeRecoveryCode 去掉分隔符与空白、转大写；形态不对回空串。

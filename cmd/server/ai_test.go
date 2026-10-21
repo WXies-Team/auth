@@ -99,13 +99,15 @@ func TestAIRouteCheckConsumeRelease(t *testing.T) {
 	if userCount != out.DailyUser || globalCount != out.DailyGlobal {
 		t.Errorf("库内计数应与回执一致：%d/%d vs %d/%d", userCount, globalCount, out.DailyUser, out.DailyGlobal)
 	}
-	// 管理后台看板读同一张表同一口径（AdminAIUsage 走 day >= 今天）
+	// 管理后台看板读同一张表同一口径：today=scope='user' 的当日合计，
+	// 全站合计走 global 行（与 consume 回执同源同数）
 	report, err := e.svc.AdminAIUsage(1, nil)
 	if err != nil {
 		t.Fatalf("查看板: %v", err)
 	}
-	if len(report.Days) != 1 || report.Days[0].Total != userCount+globalCount {
-		t.Errorf("看板今日总量应 %d，得到 %+v", userCount+globalCount, report.Days)
+	if report.Today != userCount || report.Global == nil || report.Global.Used != globalCount {
+		t.Errorf("看板今日个人/全站合计应 %d/%d，得到 today=%d global=%+v",
+			userCount, globalCount, report.Today, report.Global)
 	}
 }
 

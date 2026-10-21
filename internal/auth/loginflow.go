@@ -12,7 +12,7 @@ import (
 // Web 登录编排的两段式（规格 A1.2 / A2.3）：
 //
 //	密码验过 → 账号开了 2FA 就只发一张 5 分钟的**单次中间态**（login_states），
-//	拿它换 TOTP/恢复码，验过才建会话；没开 2FA 直接建会话。
+//	拿它换 TOTP/恢复码/邮箱验证码，验过才建会话；没开 2FA 直接建会话。
 //	邮箱验证码登录**不叠** TOTP——邮件通道本身就是持有因子（ASVS V6.3.6）。
 //
 // C 批起每条路再分两支（分岔点只有 completeLogin 与中间态的 app 列）：
@@ -44,7 +44,7 @@ type WebLoginResult struct {
 	Status     string
 	LoginToken string
 	Methods    []string
-	// usedMethod 是第二步实际用掉的因子（totp / recovery），给审计落 detail.method 用；
+	// usedMethod 是第二步实际用掉的因子（totp / recovery / email_code），给审计落 detail.method 用；
 	// 不进响应体——客户端不需要知道自己刚输的是哪种码。
 	usedMethod string
 }
@@ -109,7 +109,7 @@ func (s *Service) completeLogin(uid int64, email, app string, meta SessionMeta) 
 		if err != nil {
 			return nil, err
 		}
-		// 密码/验证码/因子刚验过 = 强认证：给新会话记 reauth_at，接下来 15 分钟内的
+		// 密码/验证码/因子刚验过 = 强认证：给新会话记 reauth_at，接下来 2 小时内的
 		// 敏感操作（改密改邮、绑解两步验证、进管理后台）不必再逼用户输一遍。
 		_ = s.MarkReauth(ws.SID)
 		return &WebLoginResult{UID: uid, Email: email, Session: ws, SID: ws.SID}, nil
@@ -209,19 +209,30 @@ func (s *Service) WebLoginEmailCode(rawEmail, code string, meta SessionMeta) (re
 	return &WebLoginResult{UID: uid, Email: email, Session: ws, SID: ws.SID}, nil
 }
 
-// WebLoginTOTP 登录第二步：TOTP 码或恢复码任一验过即落会话。
+// WebLoginTOTP 登录第二步：TOTP 码 / 恢复码 / 邮箱验证码任一验过即落会话。
 //
 // **app 不在请求里**：第一步声明的目标应用随 login_states 带下来（列 app，
 // NOT NULL DEFAULT 'web'），第二步据此决定发 web 会话还是业务 JWT——客户端只交
 // loginToken，两步之间换不了目标应用。
 //
+// 因子分流 recoveryCode > emailCode > code：前两个是专用字段（非空即选定该因子），
+// code 是兜底的 TOTP 位——客户端一次只交一个因子的值，同时给多个按此优先级取用。
+//
+// 邮箱码（emailCode，purpose=login_2fa）绑**同一 login state 的 uid/邮箱**，
+// otp store 的冷却/每日限额/5 错烧码一条不放松（验证码强度弱于 TOTP，闸门只会更紧，
+// 口径同 Entra External ID / Okta 的 email authentication factor）；它的错码与
+// TOTP/恢复码**共享 login state 的 5 次烧毁计数**——三选一是三条通道、不是三份额度。
+//
 // 错码记进 login_state 的 attempts，错 5 次整条烧毁（与邮箱验证码同口径）——
 // 中间态是「已知密码」的凭证，必须比普通表单更抗爆破。
-func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta SessionMeta) (res *WebLoginResult, err error) {
+func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode, emailCode string, meta SessionMeta) (res *WebLoginResult, err error) {
 	// method 在进分支前就定下来：失败那次也要说清用户输的是哪种码
 	method := "totp"
-	if strings.TrimSpace(recoveryCode) != "" {
+	switch {
+	case strings.TrimSpace(recoveryCode) != "":
 		method = "recovery"
+	case strings.TrimSpace(emailCode) != "":
+		method = "email_code"
 	}
 	// actor 在中间态揭开后即回填：失败路径（错码/乱码爆破第二步）同样要能
 	// 归因到 uid 与掩码邮箱——旧实现失败时 res=nil，审计 actor 全空
@@ -256,17 +267,40 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 	}
 	actorEmail = maskEmail(email)
 	var ok bool
-	if rc := strings.TrimSpace(recoveryCode); rc != "" {
+	switch {
+	case strings.TrimSpace(recoveryCode) != "":
 		// n7：实耗恢复码时中间态的 method 如实改账 'recovery'——beginLoginState
 		// 恒写 'totp'，失败重试留下的行、审计回联都该能看出用户当时用的哪种码
 		if err := s.setLoginStateMethod(loginToken, "recovery"); err != nil {
 			return nil, err
 		}
-		ok, err = s.consumeRecoveryCode(st.uid, email, rc, meta)
+		ok, err = s.consumeRecoveryCode(st.uid, email, strings.TrimSpace(recoveryCode), meta)
 		if err != nil {
 			return nil, err
 		}
-	} else {
+	case strings.TrimSpace(emailCode) != "":
+		// 两步验证在第一步之后被关掉的窗口：没有第二步可走，指回密码登录
+		//（中间态还在，直接报会变成永远过不去的死路）
+		enabled, terr := s.TOTPEnabled(st.uid)
+		if terr != nil {
+			return nil, terr
+		}
+		if !enabled {
+			return nil, badRequest("该账号未开启两步验证，请换用密码登录")
+		}
+		if err := s.setLoginStateMethod(loginToken, "email_code"); err != nil {
+			return nil, err
+		}
+		// otp 层回自己的文案（错码/过期/请先获取）并管逐码计数；错码另计入
+		// login state 的共享烧毁计数——三选一是三条通道、不是三份额度
+		if verr := s.otps.verify(PurposeLogin2FA, email, strings.TrimSpace(emailCode)); verr != nil {
+			if ferr := s.failLoginState(loginToken); ferr != nil {
+				return nil, ferr
+			}
+			return nil, verr
+		}
+		ok = true
+	default:
 		ok, err = s.VerifyTOTPCode(st.uid, strings.TrimSpace(code))
 		if err != nil {
 			return nil, err
@@ -277,14 +311,15 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode string, meta Sessi
 		if err := s.failLoginState(loginToken); err != nil {
 			return nil, err
 		}
-		return nil, badRequest("验证码错误，请重新输入")
+		// 文案按实耗的因子分流：恢复码错了说恢复码，两步验证码错了说验证码
+		return nil, badRequest(wrongCodeMsg(method == "recovery", ""))
 	}
 	s.burnLoginState(loginToken)
 	res, err = s.completeLogin(st.uid, email, st.app, meta)
 	if err != nil {
 		return nil, err
 	}
-	res.usedMethod = method // 过了 TOTP/恢复码这一关就是强认证（reauth_at 在 completeLogin 里打）
+	res.usedMethod = method // 过了 TOTP/恢复码/邮箱码任一关就是强认证（reauth_at 在 completeLogin 里打）
 	return res, nil
 }
 
@@ -395,9 +430,9 @@ func (s *Service) burnLoginState(token string) {
 		"DELETE FROM login_states WHERE token_hash = ?", sha256Hex(token))
 }
 
-// setLoginStateMethod 如实回写第二步实耗的因子（totp / recovery）。
-// beginLoginState 恒写 'totp'（密码路只有 TOTP 一种预告因子），恢复码真的被
-// 提交时改账——失败重试留下的行据此能看出爆破走的是哪条通道（n7）。
+// setLoginStateMethod 如实回写第二步实耗的因子（totp / recovery / email_code）。
+// beginLoginState 恒写 'totp'（密码路只有 TOTP 一种预告因子），恢复码与邮箱码
+// 真的被提交时改账——失败重试留下的行据此能看出爆破走的是哪条通道（n7）。
 func (s *Service) setLoginStateMethod(token, method string) error {
 	if _, err := s.pool.ExecContext(context.Background(),
 		"UPDATE login_states SET method = ? WHERE token_hash = ?", method, sha256Hex(token)); err != nil {

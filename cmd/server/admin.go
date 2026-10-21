@@ -13,7 +13,8 @@ import (
 //	① 只收 cookie（Bearer 不给后台钥匙——日记 App 侧的 token 被盗不牵连后台）；
 //	② role ∈ {admin, super}，**每请求现查 users 行**（撤销资格必须当场生效）；
 //	③ 强制 MFA：没绑 TOTP/passkey 的管理员进不来（OWASP MFA CS）；
-//	④ reauth ≤15 分钟（ASVS V7.5.1），401 后前端弹重新验证框。
+//	④ reauth ≤2 小时（ASVS V7.5.1），401 后前端弹重新验证框；成功的管理操作
+//	   经 slideReauth 滑动续期 reauth_at（GitHub sudo mode 口径）。
 //
 // 过完四道闸再叠 W2 的 scope 收权（adminCtx）：
 //
@@ -35,7 +36,7 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		return withLogging(withUID(svc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c := r.Context().Value(webCallerKey).(auth.WebCaller)
 			if !c.ViaCookie {
-				writeError(w, http.StatusUnauthorized, "管理后台请在网页端登录")
+				writeError(w, http.StatusUnauthorized, "管理后台只认网页登录态，请在控制台用密码或 Passkey 登录")
 				return
 			}
 			role, err := svc.SessionRole(c.UID)
@@ -44,7 +45,7 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return
 			}
 			if !auth.IsAdminRole(role) {
-				writeError(w, http.StatusForbidden, "没有管理权限")
+				writeError(w, http.StatusForbidden, "你不是管理后台成员，请联系平台管理员开通")
 				return
 			}
 			mfa, err := svc.HasMFA(c.UID)
@@ -53,7 +54,7 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return
 			}
 			if !mfa {
-				writeError(w, http.StatusForbidden, "管理后台要求先绑定两步验证或 Passkey")
+				writeError(w, http.StatusForbidden, "管理后台要求先绑定两步验证或 Passkey，请到「两步验证」页绑定后再试")
 				return
 			}
 			if err := svc.RequireReauth(c.SID); err != nil {
@@ -72,14 +73,14 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 					return
 				}
 			}
-			h(ac, w, r)
+			slideReauth(svc, c.SID, w, func(w http.ResponseWriter) { h(ac, w, r) })
 		})))
 	}
 	// requireSuper 挡掉 app-admin 对 super 专属端点的访问（用户目录/角色/注销/
 	// 配置中心都是平台级数据）。放行即 true。
 	requireSuper := func(w http.ResponseWriter, ac adminCtx) bool {
 		if !ac.super {
-			writeError(w, http.StatusForbidden, "此功能仅平台管理员可用")
+			writeError(w, http.StatusForbidden, "此功能仅平台管理员可用，请联系平台管理员操作")
 			return false
 		}
 		return true
@@ -95,13 +96,13 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return nil, true
 			}
 			if !auth.AppAllowed(want) {
-				writeError(w, http.StatusForbidden, "未知应用")
+				writeError(w, http.StatusForbidden, "未知项目，请重新选择后重试")
 				return nil, false
 			}
 			return []string{want}, true
 		}
 		if len(ac.apps) == 0 {
-			writeError(w, http.StatusForbidden, "尚未授予任何应用的管理权限，请联系平台管理员")
+			writeError(w, http.StatusForbidden, "尚未授予任何项目的管理权限，请联系平台管理员开通")
 			return nil, false
 		}
 		if want == "" {
@@ -112,7 +113,7 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return []string{want}, true
 			}
 		}
-		writeError(w, http.StatusForbidden, "没有该应用的管理权限")
+		writeError(w, http.StatusForbidden, "没有该项目的管理权限，请联系平台管理员开通")
 		return nil, false
 	}
 
@@ -144,9 +145,12 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		}
 		writeJSON(w, http.StatusOK, detail)
 	}))
-	// 角色调整走老端点的只有 user↔admin（W2 起 super 的授予/回收收进 /admin/roles/{uid}/role，
-	// 那里有「最后一个 super」守卫；本端点见 AdminSetRole 的三条守卫注释）
-	mux.Handle("PATCH /admin/users/{uid}", admin("admin-role", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+	// POST /admin/users/{uid}/role {role:user|admin|super}：**唯一**的角色调整端点
+	//（本批把 PATCH /admin/users/{uid} 与 POST /admin/roles/{uid}/role 合并到这里，
+	// 旧端点已删——内部前端无外部兼容负担）。授权规则与守卫都在业务层
+	//（AdminSetRole）：只有根 su 能授予/回收 super、不能改自己、最后一个 super
+	// 不可降级；审计沿用 admin.role.change / admin.user.role_change 两个事件名。
+	mux.Handle("POST /admin/users/{uid}/role", admin("admin-role-write", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
 		if !requireSuper(w, ac) {
 			return
 		}
@@ -181,20 +185,6 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}))
 
-	// ---- 角色管理（super only，W2 新端点） ----
-	// GET /admin/roles?query= 用户 + role + scopes 摘要（角色管理页的数据源）。
-	mux.Handle("GET /admin/roles", admin("admin-roles", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
-		if !requireSuper(w, ac) {
-			return
-		}
-		q := r.URL.Query()
-		list, total, err := svc.AdminListRoles(q.Get("query"), queryInt(q.Get("limit")), queryInt(q.Get("offset")))
-		if err != nil {
-			writeResult(w, nil, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, page{Items: list, Total: total})
-	}))
 	// POST /admin/roles/{uid}/scope {app, op:grant|revoke}：授予/回收 app-admin。
 	// grant 隐含把 role 提为 admin；revoke 到 0 行时 role 降回 user（定案见
 	// AdminSetScope 注释）。业务层落 admin.role.grant / admin.role.revoke 审计。
@@ -220,33 +210,10 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		case "revoke":
 			err = svc.AdminSetScope(ac.caller.Caller, uid, req.App, false)
 		default:
-			writeError(w, http.StatusBadRequest, "op 只能是 grant 或 revoke")
+			writeError(w, http.StatusBadRequest, "op 只能是 grant 或 revoke，请检查后重试")
 			return
 		}
 		if err != nil {
-			writeResult(w, nil, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-	}))
-	// POST /admin/roles/{uid}/role {role}：仅 super↔admin 间调整；不能自贬
-	//（也不能动自己），最后一个 super 不可降级——防把平台锁死。业务层落
-	// admin.role.change 审计。
-	mux.Handle("POST /admin/roles/{uid}/role", admin("admin-role-write", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
-		if !requireSuper(w, ac) {
-			return
-		}
-		uid, ok := pathInt64(w, r.PathValue("uid"))
-		if !ok {
-			return
-		}
-		var req struct {
-			Role string `json:"role"`
-		}
-		if !decodeOr400(w, r, &req) {
-			return
-		}
-		if err := svc.AdminChangeRole(ac.caller.Caller, uid, req.Role); err != nil {
 			writeResult(w, nil, err)
 			return
 		}
@@ -260,12 +227,13 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			return
 		}
 		q := r.URL.Query()
-		list, total, err := svc.AdminListSessions(queryInt64(q.Get("uid")), apps, queryInt(q.Get("limit")), queryInt(q.Get("offset")))
+		list, total, totalUsers, err := svc.AdminListSessions(queryInt64(q.Get("uid")), apps,
+			q.Get("query"), queryInt(q.Get("limit")), queryInt(q.Get("offset")))
 		if err != nil {
 			writeResult(w, nil, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, page{Items: list, Total: total})
+		writeJSON(w, http.StatusOK, sessionPage{Items: list, Total: total, TotalUsers: totalUsers})
 	}))
 	mux.Handle("DELETE /admin/sessions/{id}", admin("admin-session-kick", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
 		id, ok := pathInt64(w, r.PathValue("id"))
@@ -340,13 +308,32 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hotWithinSeconds": 10})
 	}))
 
-	// ---- AI 用量看板（scoped：app-admin 只见自己 app 用户的用量） ----
+	// ---- AI 用量看板（scoped：app-admin 只见授权项目用户集的用量、global 行隐藏）----
+	// 不带 uid = 总览；带 ?uid= = 钻取单用户（app-admin 只能钻授权项目内的用户，
+	// 越界与查无此 uid 同回 404，不给存在性探针）。限额修改仍走
+	// PUT /admin/config/{ai_*}（super only，app-admin 只读）——本端点没有写能力。
 	mux.Handle("GET /admin/ai-usage", admin("admin-ai-usage", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
 		apps, ok := effectiveApps(w, ac, r)
 		if !ok {
 			return
 		}
-		report, err := svc.AdminAIUsage(queryInt(r.URL.Query().Get("days")), apps)
+		q := r.URL.Query()
+		days := queryInt(q.Get("days"))
+		if raw := q.Get("uid"); raw != "" {
+			uid, perr := strconv.ParseInt(raw, 10, 64)
+			if perr != nil || uid <= 0 {
+				writeError(w, http.StatusBadRequest, "参数不正确，请检查 uid 后重试")
+				return
+			}
+			detail, err := svc.AdminAIUsageUser(days, apps, uid)
+			if err != nil {
+				writeResult(w, nil, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+			return
+		}
+		report, err := svc.AdminAIUsage(days, apps)
 		if err != nil {
 			writeResult(w, nil, err)
 			return
@@ -360,6 +347,15 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 type page struct {
 	Items any `json:"items"`
 	Total int `json:"total"`
+}
+
+// sessionPage 是 GET /admin/sessions 的回执（比 page 多一个用户计数）：
+// total 是会话条数（分页 offset 按会话走），totalUsers 是同条件下去重后的用户数——
+// 会话总览的表格一行一位用户，页码文案「第 N 页 · 共 M 位用户」按它说。
+type sessionPage struct {
+	Items      any `json:"items"`
+	Total      int `json:"total"`
+	TotalUsers int `json:"totalUsers"`
 }
 
 // queryInt / queryInt64 解查询参数：缺省与非法值都按「没给」处理（0 = 不限 / 用默认），
