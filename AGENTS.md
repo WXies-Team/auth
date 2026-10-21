@@ -5,7 +5,8 @@
 
 ## At a glance
 
-Generic account service (register / login / 2FA / passkey / sessions) that any project joins
+Generic account service (register / login / 2FA / passkey / sessions + account lifecycle:
+invites, bans, 7-day delete grace, web-app OAuth) that any project joins
 **by registry** — auth exists for accounts, not for any particular app; app names appear only
 as registry entries (allowedApps / brand / hooks) and session labels. Go + MySQL, package root
 `github.com/WXies-Team/auth` (module at **repo root**, no server/ subdir). UIDs are 7-digit
@@ -23,6 +24,8 @@ fail ⇒ auto-rollback), nginx (BT-panel vhost) terminates TLS.
 | Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` (this repo was照抄自 that family); divergences commented in place |
 | OTP / 2FA factors | `internal/auth/otp.go`, `loginflow.go`, `totp.go` + `otp_codes`/`login_states` comments in `internal/db/schema.sql` |
 | Sessions / devices | `internal/auth/session.go` (sid 63-bit snowflake ⇒ **JSON string**, JS-safe; kick = session layer only) |
+| Account lifecycle (ban / grace-delete / invites / bulk) | `internal/auth/{gate,adminctl,pendingdelete,invite,bulk}.go` — gate order & sweeper semantics commented in place |
+| Web-app OAuth (BFF) | `internal/auth/oauth.go` + `cmd/server/oauth.go`; authorize tx & codes are **in-memory single-instance** state |
 | User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` — sole source of truth; diaries' `profiles` 三列已迁入并清理 |
 | AI rate limits / usage (per-uid) | `internal/ai/quota.go` (three gates, 口径 pinned in package comment) + `cmd/server/ai.go` |
 | User-visible email copy | `internal/auth/email.go` brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**), one shared shell |
@@ -34,12 +37,18 @@ fail ⇒ auto-rollback), nginx (BT-panel vhost) terminates TLS.
 go build ./...        # compile gate
 go test ./...         # DB cases need TEST_MYSQL_DSN (dedicated schema, never prod) else Skip
 go vet ./...          # must stay clean
+go run ./scripts/genicons        # regenerate favicon/brand assets; -check = disk==generator
 ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
+# Optional real-DB run (isolated mysqld only, NEVER prod; -p 1 — the two test packages
+# share one schema):
+TEST_MYSQL_DSN='root@tcp(127.0.0.1:<port>)/<schema>?charset=utf8mb4&parseTime=true&loc=Local' \
+  go test -count=1 -p 1 ./internal/... ./cmd/...
 ```
 
-DB cases are accepted to Skip locally and in CI (no dedicated test DB by decision); the
-delivery gate is CI build/test + deploy-time `/health` with auto-rollback — verify on prod
-with the test account instead of standing up a test database.
+DB cases still Skip by default (no dedicated test DB by decision), but the whole suite was
+verified green against a real DB (2026-10-21, isolated mysqld) — use the DSN recipe before
+touching lifecycle/OTP code instead of trusting Skip-silence. The delivery gate remains CI
+build/test + deploy-time `/health` with auto-rollback.
 
 ## Boundaries
 
@@ -51,35 +60,11 @@ with the test account instead of standing up a test database.
 
 ## Onboarding a new app (接入 auth 流程)
 
-Each step has a done-criterion; finish all six, then `go build ./... && go vet ./... && go test ./...` must pass.
-
-1. **Protocol** — define the app-facing DTOs in `internal/protocol/protocol.go` (fields
-   stay一字不差 with the diary family's `AuthDtos.kt` convention; our only extra field is
-   `app`). Done when `TestProtocolMatchesDiaryAuthDtos` covers the new block.
-2. **Registry** — add the slug to `allowedApps` (`internal/auth/scope.go`, also the JWT `aud`
-   whitelist) and `knownApps` (`internal/ui/ui.go`, display name); add an email brand row in
-   `internal/auth/email.go`. Done when `TestBrandForSelection` passes (brand ↔ whitelist drift
-   fails it).
-3. **Config** — nothing generic to store: FCM/push credentials belong in the **app's own
-   database** (`app_config` there; never in auth — auth can only hold shared keys:
-   `llm_*`, `push_admin_token`). Set `hook_<app>` in prod `app_config` before the app ships
-   (a missing key silently orphans that app's rows on account deletion). Done when `/health`
-   reports and a test delete skips/succeeds for the new app.
-4. **Client** — point the app at `https://auth.horatio.cn` + send `app` on every call; set a
-   parseable User-Agent `<slug>/<version> (Android; <model>)` (auth shows it as the device
-   name; unknown UA degrades to 未知设备); register WebAuthn origins in
-   `webauthn_opaque_origins` with **all 4 encoding variants per cert hash** (see pitfalls);
-   decode `/internal/verify` `uid` as int64, never float64. Done when login → 2FA → session
-   appears correctly in the web console.
-5. **Session scope** — bearer (JWT `aud`) callers only ever see/revoke their own app's
-   sessions; the web cookie sees all. The app ships a session page against
-   `GET /api/sessions` (`{sessions:[...]}`, id = string) + `DELETE /api/sessions/{id}` +
-   `POST /api/sessions/revoke-others`. Done when the app lists only its own rows.
-6. **2FA parity** — three factors are supported: TOTP (`code`), email OTP (`emailCode`,
-   purpose `login_2fa`), recovery code (`recoveryCode`); `POST /auth/send-code` purpose must
-   be in the server whitelist and in the diary-side enum test
-   (`TestDiaryCodePurposeMatchesServerWhitelist`). Done when a login succeeds via each factor
-   the app offers.
+The full eight-step guide lives in `~/.config/opencode/AUTH-ONBOARDING.md` (global, shared
+by every project that joins auth)—read it before onboarding any app or changing the flow.
+It is the single source of truth; do not inline the steps here. **If this repo changes the
+onboarding flow (endpoint, registry, session/2FA/OAuth step), update that global guide in
+the same PR**—a stale guide ships wrong integrations.
 
 ## Work conventions
 
@@ -94,7 +79,11 @@ Each step has a done-criterion; finish all six, then `go build ./... && go vet .
 4. **OTP**: 6-digit, 5-min expiry, 60s cooldown, 10/day per (email,purpose), 5 wrong tries
    invalidate, cross-purpose recipient cap 15/day; "burn" sets `used=1`, never deletes rows
    mid-day (deletion loses daily counts). Purposes: `register` / `login` / `reset` /
-   `change` / `email_change` / `login_2fa` (the 2FA email code, keyed separately from `login`).
+   `change` / `email_change` / `login_2fa` / `delete` (deletion confirm).
+   `otp_codes` carries `uid` (0 = anonymous issuance): authed flows record the account;
+   admin email change burns **by uid** (keying by email can't reach an in-flight code whose
+   email is the user's *requested* target), and `email_change` verification checks uid
+   ownership.
 5. **2FA login step**: `POST /web/login/totp` takes `code` | `recoveryCode` | `emailCode`
    (priority recovery > email > code). Disabling 2FA deletes only the 2FA config (factors +
    recovery codes) — it **never** logs out other devices (GitHub parity).
@@ -111,16 +100,44 @@ Each step has a done-criterion; finish all six, then `go build ./... && go vet .
    non-GET request carrying it must send `X-CSRF-Token` — including legacy `/auth/*`,
    `/api/sessions*` (cookie support there is what makes the web pages work). Bearer callers
    skip CSRF. `/admin/*` is cookie-only, re-checks `users.role` per request, and requires MFA
-   bound + `reauth_at` within 2 h (`ReauthWindow`; the window **slides** — successful
+   bound + `reauth_at` within 2 h (`ReauthWindow`; the window **slides only on non-GET
+    success** — GET/HEAD/OPTIONS never slide, else a hijacked cookie keeps sudo alive by
+    polling; successful
    `reauthThen` / `reauthed` / admin-gate ops refresh via `slideReauth`, failures never do;
    `POST /web/reauth` also refreshes). UI auto-retries on the fixed 401
    `需要重新验证身份，请输入密码或验证码`.
 9. **Roles**: `user | admin | super`. Effective app-admin = role `admin` + ≥1 `admin_scopes`
    row (grant implicit-promotes to admin; revoke-to-zero demotes to `user`). Only the root su
-   (constant `RootSuperEmail = horatioxs@outlook.com`) may grant/revoke `super`; other sus
+   (constant `RootSuperEmail = horatioxs@outlook.com`, resolved to a **uid** at startup so
+   root can rebind their email without losing root) may grant/revoke `super`; other sus
    manage user|admin only. Sole role endpoint: `POST /admin/users/{uid}/role`; scope grants:
    `POST /admin/roles/{uid}/scope`. Never re-introduce an email allow-list in `app_config`
    (spec A1.3 rejected it).
+10. **Account lifecycle & login gate**: the gate order is credentials → ban (`user_bans`,
+    `app='*'` = global, 限时到期惰性判+删行) → project allow-list (`project_policy` /
+    `project_access`; 放行 = su ∨ 名单 ∨ 该项目 admin_scopes) → 注销 pending → mustChange.
+    Bans / membership removal revoke the affected app's sessions immediately. Admin matrix:
+    su → anyone; app-admin → only targets with an active session in one of their scoped
+    apps; the root-super target is actionable by root alone (root matched by **uid**).
+11. **Deletion is a 7-day grace**: `users.pending_delete_at`; the request only sets the
+    column + revokes all sessions + mails a signed cancel link — **hooks run only when the
+    sweeper fires** (`RunPendingDeleteSweeper`, 1 h ticker + startup pass, `purgeAccount`
+    reuses the original pipeline). Logging in inside the window cancels it and the receipt
+    carries `deletePendingCancelled`.
+12. **Login receipts & verify**: every token-issuing login receipt carries
+    `mustChangePassword` / `deletePendingCancelled`; `Verify` reads **email from DB, never
+    the claim** (admin email change doesn't bump `token_version`, so claims go stale);
+    `/auth/change-password` re-issues the caller's credential (Bearer → `token`, web →
+    Set-Cookie) and accepts an empty `oldPassword` when `password_must_change=1` and the
+    session is inside the reauth window. **A new login path MUST call
+    `notifyNewLoginDevice`** — the three 收口 points are `completeLogin`, `/auth/login`,
+    the OAuth exchange.
+13. **Emails**: `internal/mail` sends multipart/alternative (text/plain + html); the brand
+    registry owns prefix/name/primaryHex/logoPath; logos are hosted `/brand/<slug>-v1.png`
+    (swap = new versioned filename via genicons + logoPath in the same PR, never overwrite
+    a live URL). The auth brand glyph is Lucide `shield`, single-sourced in genicons for
+    favicon trio + email logo. Every `Audit*` constant must have a same-value `<option>` in
+    `admin-audit.html` (`TestAuditFilterOptionsMatchAuditConstants` pins both directions).
 
 ## Known pitfalls
 
@@ -169,3 +186,17 @@ Each step has a done-criterion; finish all six, then `go build ./... && go vet .
 - UI elements whose CSS sets `display` (`.btn`, `.badge`, `.row`) ignore the HTML `hidden`
   **attribute** (author display wins over UA `[hidden]`) — toggle them with the `.hidden`
   class (`!important`) instead.
+- Schema batch 2026-10 adds tables `user_bans` `project_policy` `project_access`
+  `user_invites` `oauth_clients`, columns `users.{password_must_change,pending_delete_at,
+  login_notify}` and `otp_codes.uid` — **every new table must join both test cleanup
+  lists** (`internal/auth/auth_test.go`, `cmd/server/routes_test.go`) or real-DB cases leak
+  rows across each other.
+- OAuth authorize transactions and codes live in **process memory** (single-instance, same
+  assumption as the rate limiter): a restart voids them — integrators restart the flow,
+  never replay a code.
+- New-device login notify is best-effort (failure = slog only, never blocks login);
+  `users.login_notify` defaults ON and `PUT /api/profile` only writes it when the field is
+  explicitly present (`*bool`) — the Apps' full-profile saves can't clobber the web toggle.
+- Recovery codes are Crockford alphanumeric `XXXX-XXXX-XXXX-XXXX`: any input that accepts
+  them (web or Apps) must NOT use a numeric-only keyboard — letters can't be typed and
+  some IMEs disable paste under numeric/password keyboards.
