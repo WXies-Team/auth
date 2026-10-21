@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/WXies-Team/auth/internal/auth"
@@ -33,7 +37,10 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		super  bool
 		apps   []string // app-admin 的授权清单；super 为 nil（数据端点不限）
 	}
-	admin := func(scope string, h func(c adminCtx, w http.ResponseWriter, r *http.Request)) http.Handler {
+	// adminN 是过完四道闸的请求包装（cookie + role + MFA + reauth），max 为本
+	// scope 的每分钟额度。默认口径 60/分/uid（admin 薄壳）；逐行渲染的取图口对
+	// 60 太紧（会话总览一页 100 行，后 40 张头像会掉 429 回退色块），单独放宽。
+	adminN := func(scope string, max int, h func(c adminCtx, w http.ResponseWriter, r *http.Request)) http.Handler {
 		return withLogging(withUID(svc, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c := r.Context().Value(webCallerKey).(auth.WebCaller)
 			if !c.ViaCookie {
@@ -62,7 +69,7 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 				writeResult(w, nil, err)
 				return
 			}
-			if !limiter.allow(scope+":"+strconv.FormatInt(c.UID, 10), 60, time.Minute) {
+			if !limiter.allow(scope+":"+strconv.FormatInt(c.UID, 10), max, time.Minute) {
 				w.Header().Set("Retry-After", "60")
 				writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 				return
@@ -77,6 +84,10 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			// GET 读操作不滑动续期（W7-1）：滑动只属于真正改状态的写操作
 			slideReauth(svc, c.SID, r.Method, w, func(w http.ResponseWriter) { h(ac, w, r) })
 		})))
+	}
+	// admin 是默认额度（60/分/uid）的薄壳：绝大多数管理端点走它。
+	admin := func(scope string, h func(c adminCtx, w http.ResponseWriter, r *http.Request)) http.Handler {
+		return adminN(scope, 60, h)
 	}
 	// requireSuper 挡掉 app-admin 对 super 专属端点的访问（用户目录/角色/注销/
 	// 配置中心都是平台级数据）。放行即 true。
@@ -151,6 +162,52 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
+	}))
+	// ---- W3 头像真图：GET /admin/users/{uid}/avatar ----
+	// 档案里的 avatarImage 是**裸 base64**（无 data: 前缀，validateProfile 只收标准
+	// 字母表带 padding），这里解码回图片字节原样回。Content-Type 按字节嗅探
+	//（DetectContentType），不猜扩展名；无图 / 解不动 / 嗅不出 image/* 一律 404 ——
+	// 前端 <img> 的 onerror 据此回退「色块 + 首字」（回退方向是图 → 占位符）。
+	// 弱缓存：max-age=300 + ETag=sha256(字节)，条件请求回 304（头像换新走
+	// PUT /api/profile，5 分钟陈旧可接受；一页 20~100 行重复进页面不该每次拖字节）。
+	// 权限挂 admin 总闸（cookie + role + MFA + reauth）+ 300/分/uid 限流：头像对
+	// 全体管理员可见——会话总览的 app-admin 也要渲染自己范围内的用户头像，不设
+	// super 专属（super 专属的是用户目录/详情等平台级数据端点）。
+	mux.Handle("GET /admin/users/{uid}/avatar", adminN("admin-avatar", 300, func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		uid, ok := pathInt64(w, r.PathValue("uid"))
+		if !ok {
+			return
+		}
+		prof, err := svc.GetProfile(uid)
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		if prof == nil || prof.AvatarImage == nil || *prof.AvatarImage == "" {
+			http.NotFound(w, r)
+			return
+		}
+		raw, err := base64.StdEncoding.DecodeString(*prof.AvatarImage)
+		if err != nil || len(raw) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		ctype := http.DetectContentType(raw)
+		if !strings.HasPrefix(ctype, "image/") {
+			http.NotFound(w, r)
+			return
+		}
+		sum := sha256.Sum256(raw)
+		etag := `"` + hex.EncodeToString(sum[:]) + `"`
+		if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", ctype)
+		w.Header().Set("Cache-Control", "max-age=300")
+		w.Header().Set("ETag", etag)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write(raw)
 	}))
 	// POST /admin/users/{uid}/role {role:user|admin|super}：**唯一**的角色调整端点
 	//（本批把 PATCH /admin/users/{uid} 与 POST /admin/roles/{uid}/role 合并到这里，
