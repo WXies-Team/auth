@@ -10,7 +10,7 @@
 | 端点 | 说明 |
 |---|---|
 | `POST /auth/register` | 注册（验证码必填，注册即登录） |
-| `POST /auth/send-code` | 发注册 / 找回密码 / 登录验证码（可选 `app` 决定邮件品牌，缺省 = Auth） |
+| `POST /auth/send-code` | 发注册 / 找回密码 / 登录 / 登录两步验证验证码（purpose 白名单四值，可选 `app` 决定邮件品牌，缺省 = Auth） |
 | `POST /auth/reset-password` | 验证码找回密码 |
 | `POST /auth/login` | 密码登录 |
 | `POST /auth/login-code` | 邮箱验证码登录 |
@@ -50,11 +50,11 @@ Web 端点（**全部新增路径，老端点形状不变**；写操作需 `X-CS
 |---|---|
 | `POST /web/login/password` | 密码登录；已开两步验证时回 `{status:"2fa_required",loginToken,methods}` |
 | `POST /web/login/email-code` | 邮箱验证码登录（不叠两步验证） |
-| `POST /web/login/totp` | 两步验证第二步：`{loginToken}` + TOTP 码或恢复码 → `{token,email}` |
+| `POST /web/login/totp` | 两步验证第二步：`{loginToken}` + TOTP 码 / 恢复码 / 邮箱验证码（`emailCode`，可选）→ `{token,email}` |
 | `POST /web/session` | 当前身份：`{uid,email,role,csrfToken,totpEnabled,passkeyCount,passwordSet}` |
-| `POST /web/reauth` | 重新验证（密码或 TOTP 码），刷 15 分钟强认证窗 |
+| `POST /web/reauth` | 重新验证（密码 / TOTP 码 / 恢复码），刷 2 小时强认证窗（敏感操作成功即滑动续期） |
 | `POST /web/logout` | 登出本行会话，回 `Clear-Site-Data` 并清 cookie |
-| `POST /webauthn/register/options`、`/finish` | Passkey 注册仪式（finish 需 15 分钟内强认证） |
+| `POST /webauthn/register/options`、`/finish` | Passkey 注册仪式（finish 需 2 小时内强认证） |
 | `POST /webauthn/login/options`、`/finish` | discoverable Passkey 登录，回执与 `AuthResponse` 同形 |
 | `GET /api/passkeys`、`PATCH`/`DELETE /api/passkeys/{id}` | Passkey 列表 / 改名 / 删除 |
 | `GET /api/totp` | 两步验证状态 `{enabled,createdAt}` |
@@ -67,7 +67,7 @@ Web 端点（**全部新增路径，老端点形状不变**；写操作需 `X-CS
 
 登录态是 `__Host-auth_web` cookie（HttpOnly + Secure + SameSite=Strict，库里只存 sha256），
 配套一枚可读的 CSRF cookie——**所有非 GET 的 cookie 请求必须带 `X-CSRF-Token`**；
-`/admin/*` 只收 cookie、逐请求现查角色、要求已绑 MFA 且 15 分钟内强认证过。
+`/admin/*` 只收 cookie、逐请求现查角色、要求已绑 MFA 且 2 小时内强认证过。
 Bearer（日记 App）照旧走 `/auth/*`，三条凭据路互不串用。
 
 登录 / 注册 / 验证码登录的请求体带 `app`（`calorie-diary` / `expense-diary` 白名单），
@@ -106,7 +106,8 @@ ci/build-server.sh    # 测试 + 打包 dist/server.tar（CI 部署用的同一�
 
 **管理员自举**：`users.role` 默认 `user`，首个管理员部署时手工执行一次
 `UPDATE users SET role = 'admin' WHERE email = '<你的邮箱>';`（也进审计的正常路径）。
-后台要求该账号先绑两步验证或 Passkey，之后每次管理操作都要 15 分钟内强认证过。
+后台要求该账号先绑两步验证或 Passkey，之后每次管理操作都要 2 小时内强认证过
+（管理操作成功即重置这 2 小时计时器）。
 
 ## 部署
 
