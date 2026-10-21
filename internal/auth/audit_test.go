@@ -1,6 +1,14 @@
 package auth
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +267,121 @@ func TestAuditQueryFilters(t *testing.T) {
 	_, none, err := svc.QueryAudit(AuditQuery{Actor: 999999999999999999})
 	if err != nil || none != 0 {
 		t.Errorf("查无 actor 应 0 行，得到 %d err=%v", none, err)
+	}
+}
+
+// ---- 审计筛选下拉 ↔ 事件常量的对拍（纯测试，无 DB）----
+
+// auditTemplateSelect 取管理台审计筛选 #audit-action 的 <select> 段原文。下拉在
+// internal/ui 的模板里，而 ui 保叶子包不 import auth（auth 也不 import ui）——两侧
+// 都看不到对方的 Go 标识符，走文件对拍（同 scripts/genicons/gen_test.go 的
+// os.ReadFile 模式）。
+func auditTemplateSelect(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "ui", "templates", "admin-audit.html"))
+	if err != nil {
+		t.Fatalf("读审计页模板: %v", err)
+	}
+	sel := regexp.MustCompile(`(?s)<select id="audit-action">.*?</select>`).Find(raw)
+	if sel == nil {
+		t.Fatal("admin-audit.html 缺 #audit-action 下拉")
+	}
+	return string(sel)
+}
+
+// auditSourceActions 从 audit.go 源码收集 Audit* 前缀的字符串常量——事件全集。Go 枚举
+// 不了常量，从 AST 取才不会漏掉后加的事件；AuditLogin 落库前按 OK 分流成
+// login.success / login.fail（见 Service.Audit），对拍时把裸 "login" 换成那两个值。
+func auditSourceActions(t *testing.T) map[string]bool {
+	t.Helper()
+	src, err := os.ReadFile("audit.go")
+	if err != nil {
+		t.Fatalf("读 audit.go: %v", err)
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "audit.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("解析 audit.go: %v", err)
+	}
+	out := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		d, ok := n.(*ast.GenDecl)
+		if !ok || d.Tok != token.CONST {
+			return true
+		}
+		for _, spec := range d.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "Audit") || i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				if val, err := strconv.Unquote(lit.Value); err == nil && val != "" {
+					out[val] = true
+				}
+			}
+		}
+		return true
+	})
+	if !out[AuditLogin] {
+		t.Fatalf("audit.go 里没解析到 %s 常量——对拍源失效", AuditLogin)
+	}
+	delete(out, AuditLogin)
+	out["login.success"], out["login.fail"] = true, true
+	return out
+}
+
+// auditTemplateActions 是下拉的 option 值域（空值「全部」除外）。
+func auditTemplateActions(sel string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range regexp.MustCompile(`value="([^"]*)"`).FindAllStringSubmatch(sel, -1) {
+		if m[1] != "" {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// FX6a 必修2：审计筛选下拉与 audit.go 事件常量**双向逐字对拍**——常量缺 option，那类
+// 事件就在管理台筛不出来（曾漏 user.invite_resend / user.invite_revoke /
+// admin.oauth_client.write 三个）；下拉多出常量里没有的死值也算红（永远查不到行的
+// 假选项）。新增 Audit* 事件忘记同步下拉，这里即红。
+func TestAuditFilterOptionsMatchAuditConstants(t *testing.T) {
+	want := auditSourceActions(t)
+	sel := auditTemplateSelect(t)
+	got := auditTemplateActions(sel)
+	var missing, extra []string
+	for a := range want {
+		if !got[a] {
+			missing = append(missing, a)
+		}
+	}
+	for a := range got {
+		if !want[a] {
+			extra = append(extra, a)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	if len(missing) > 0 {
+		t.Errorf("下拉缺这些事件的 option: %v", missing)
+	}
+	if len(extra) > 0 {
+		t.Errorf("下拉有这些事件常量里没有的死 option: %v", extra)
+	}
+	// 本批补的三个：value 英文、label 中文（value 由上面的值域对拍钉住，这里钉 label）
+	for _, wantLabel := range []string{
+		`value="user.invite_resend">重发邀请</option>`,
+		`value="user.invite_revoke">撤销邀请</option>`,
+		`value="admin.oauth_client.write">接入配置</option>`,
+	} {
+		if !strings.Contains(sel, wantLabel) {
+			t.Errorf("下拉缺 %s", wantLabel)
+		}
 	}
 }

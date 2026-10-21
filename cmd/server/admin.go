@@ -13,8 +13,9 @@ import (
 //	① 只收 cookie（Bearer 不给后台钥匙——日记 App 侧的 token 被盗不牵连后台）；
 //	② role ∈ {admin, super}，**每请求现查 users 行**（撤销资格必须当场生效）；
 //	③ 强制 MFA：没绑 TOTP/passkey 的管理员进不来（OWASP MFA CS）；
-//	④ reauth ≤2 小时（ASVS V7.5.1），401 后前端弹重新验证框；成功的管理操作
-//	   经 slideReauth 滑动续期 reauth_at（GitHub sudo mode 口径）。
+//	④ reauth ≤2 小时（ASVS V7.5.1），401 后前端弹重新验证框；成功的**非 GET**
+//	   管理操作经 slideReauth 滑动续期 reauth_at（GitHub sudo mode 口径；GET 读
+//	   操作不续期，W7-1）。
 //
 // 过完四道闸再叠 W2 的 scope 收权（adminCtx）：
 //
@@ -73,7 +74,8 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 					return
 				}
 			}
-			slideReauth(svc, c.SID, w, func(w http.ResponseWriter) { h(ac, w, r) })
+			// GET 读操作不滑动续期（W7-1）：滑动只属于真正改状态的写操作
+			slideReauth(svc, c.SID, r.Method, w, func(w http.ResponseWriter) { h(ac, w, r) })
 		})))
 	}
 	// requireSuper 挡掉 app-admin 对 super 专属端点的访问（用户目录/角色/注销/
@@ -84,6 +86,11 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			return false
 		}
 		return true
+	}
+	// adminScope 把路由层现查的授权现场透传给业务层（super 恒 nil apps，app-admin
+	// 带本请求现查的清单——撤销 scope 当场生效）。
+	adminScope := func(ac adminCtx) auth.AdminScope {
+		return auth.AdminScope{Super: ac.super, Apps: ac.apps}
 	}
 	// effectiveApps 解析数据端点的 app 范围（?app= 与 scope 的交集判定）：
 	//   - super：?app= 空 = 全量（nil）；给了且合法 = 单 app 过滤；名单外 403；
@@ -185,6 +192,63 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}))
 
+	// ---- B9 邀请建号（su 与 app-admin 都可进：项目边界在业务层 adminTargetScope 判，
+	// 与封禁/重置密码同一套 400/403 口径） ----
+	// POST /admin/users/invite {email, app?} → {ok, expiresAt}：token 只存 sha256、
+	// 24h 过期，邀请信尽力而为（投递失败不翻 500，可在列表重发）。
+	// 审计 user.invite 在业务层记——路由层不再补（与其它管理动作同惯例）。
+	mux.Handle("POST /admin/users/invite", admin("admin-invite", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email string `json:"email"`
+			App   string `json:"app"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		expiresAt, err := svc.AdminCreateInvite(ac.caller.Caller, adminScope(ac), req.Email, req.App)
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expiresAt": expiresAt})
+	}))
+	// GET /admin/users/invites?query=：四态是读时派生（accepted/revoked/expired/pending），
+	// 不落库；su 全量、app-admin 仅其授权项目（零 scope admin 回空列表）。
+	mux.Handle("GET /admin/users/invites", admin("admin-invite", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		list, err := svc.AdminListInvites(adminScope(ac), r.URL.Query().Get("query"))
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, struct {
+			Invites []auth.AdminInvite `json:"invites"`
+		}{Invites: list})
+	}))
+	// 重发（换新 token + 续 24h，旧链接即刻失效；已接受/已撤销 → 400）。
+	mux.Handle("POST /admin/users/invite/{id}/resend", admin("admin-invite", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		id, ok := pathInt64(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		if err := svc.AdminResendInvite(ac.caller.Caller, adminScope(ac), id); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+	// 撤销（幂等：已撤销再撤回 ok；已接受 → 400）。
+	mux.Handle("POST /admin/users/invite/{id}/revoke", admin("admin-invite", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		id, ok := pathInt64(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		if err := svc.AdminRevokeInvite(ac.caller.Caller, adminScope(ac), id); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+
 	// POST /admin/roles/{uid}/scope {app, op:grant|revoke}：授予/回收 app-admin。
 	// grant 隐含把 role 提为 admin；revoke 到 0 行时 role 降回 user（定案见
 	// AdminSetScope 注释）。业务层落 admin.role.grant / admin.role.revoke 审计。
@@ -218,6 +282,221 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+
+	// ---- W1 管理员重置密码（super 与 app-admin 都可进，权限在业务层按 W1 口径判） ----
+	// body {mode:"generate"|"manual", password?, forceChange, notify, reason?} →
+	// 200 {temporaryPassword}。临时密码只在回执出现一次（不落日志、不进审计）；
+	// 审计 password.reset 在业务层记。
+	mux.Handle("POST /admin/users/{uid}/password", admin("admin-password-reset", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		uid, ok := pathInt64(w, r.PathValue("uid"))
+		if !ok {
+			return
+		}
+		var req struct {
+			Mode        string `json:"mode"`
+			Password    string `json:"password"`
+			ForceChange bool   `json:"forceChange"`
+			Notify      bool   `json:"notify"`
+			Reason      string `json:"reason"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		tmp, err := svc.AdminResetPassword(ac.caller.Caller, adminScope(ac), uid, auth.AdminPasswordReset{
+			Mode: req.Mode, Password: req.Password, ForceChange: req.ForceChange,
+			Notify: req.Notify, Reason: req.Reason,
+		})
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"temporaryPassword": tmp})
+	}))
+
+	// ---- W1 管理员更换邮箱（B5）：权限矩阵与密码重置逐字同款（su 对任何人 /
+	// root 目标仅根本人 / app-admin 目标须在任一其授权项目下有活跃会话，判定都在
+	// 业务层 AdminChangeEmail）。body {email, reason?} → {ok:true}。不 bump
+	// token_version（uid 是权威标识，会话全保留）；新旧邮箱必收管理员措辞的通知信。
+	// 审计 user.email_change 在业务层记。
+	mux.Handle("POST /admin/users/{uid}/email", admin("admin-email-change", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		uid, ok := pathInt64(w, r.PathValue("uid"))
+		if !ok {
+			return
+		}
+		var req struct {
+			Email  string `json:"email"`
+			Reason string `json:"reason"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminChangeEmail(ac.caller.Caller, adminScope(ac), uid, auth.AdminEmailChange{
+			Email: req.Email, Reason: req.Reason,
+		}); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+
+	// ---- W3 管理员重置资料（B5）：body {avatar, nickname}（至少一项）→ {ok:true}。
+	// 只清 user_profile 的列（头像图+色 / 昵称），不动凭证不吊销会话；审计
+	// user.profile_reset 在业务层记。
+	mux.Handle("POST /admin/users/{uid}/profile-reset", admin("admin-profile-reset", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		uid, ok := pathInt64(w, r.PathValue("uid"))
+		if !ok {
+			return
+		}
+		var req struct {
+			Avatar   bool `json:"avatar"`
+			Nickname bool `json:"nickname"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminResetProfile(ac.caller.Caller, adminScope(ac), uid, auth.AdminProfileReset{
+			Avatar: req.Avatar, Nickname: req.Nickname,
+		}); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+
+	// ---- W2 封禁 / 解除（super 管 '*' 与任意项目；app-admin 只管授权项目、禁 '*'） ----
+	mux.Handle("POST /admin/users/{uid}/ban", admin("admin-ban", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		uid, ok := pathInt64(w, r.PathValue("uid"))
+		if !ok {
+			return
+		}
+		var req struct {
+			App    string `json:"app"`
+			Until  int64  `json:"until"`
+			Reason string `json:"reason"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminBan(ac.caller.Caller, adminScope(ac), uid, auth.AdminBanInput{
+			App: req.App, Until: req.Until, Reason: req.Reason,
+		}); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+	mux.Handle("DELETE /admin/users/{uid}/ban", admin("admin-ban", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		uid, ok := pathInt64(w, r.PathValue("uid"))
+		if !ok {
+			return
+		}
+		var req struct {
+			App string `json:"app"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminUnban(ac.caller.Caller, adminScope(ac), uid, req.App, ""); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+
+	// ---- B9 批量操作：一次配置套用到所选用户，逐用户与单发同语义（权限矩阵在
+	// 业务层逐项跑，越权项落成单条失败而不是整批 403） ----
+	// body {kind: password_reset|ban|unban, uids:[...], app?, until?, reason?} →
+	// BulkResult（批次号 + 汇总 + 逐项成败）。批量重置的临时密码**不进回执**，
+	// 只随逐用户通知邮件走（凭证卫生）；审计 admin.bulk_action 在业务层记。
+	mux.Handle("POST /admin/users/bulk", admin("admin-bulk", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Kind   string  `json:"kind"`
+			UIDs   []int64 `json:"uids"`
+			App    string  `json:"app"`
+			Until  int64   `json:"until"`
+			Reason string  `json:"reason"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		res, err := svc.AdminBulk(ac.caller.Caller, adminScope(ac), req.Kind, req.UIDs,
+			auth.AdminBanInput{App: req.App, Until: req.Until, Reason: req.Reason})
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	}))
+
+	// ---- W5 项目登录白名单（super 管全部项目；app-admin 只管授权项目） ----
+	mux.Handle("GET /admin/projects", admin("admin-projects", func(ac adminCtx, w http.ResponseWriter, _ *http.Request) {
+		list, err := svc.AdminListProjects(adminScope(ac))
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, struct {
+			Projects []auth.AdminProject `json:"projects"`
+		}{Projects: list})
+	}))
+	mux.Handle("POST /admin/projects/{app}/access", admin("admin-projects-write", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email string `json:"email"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminGrantAccess(ac.caller.Caller, adminScope(ac), r.PathValue("app"), req.Email); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+	mux.Handle("DELETE /admin/projects/{app}/access", admin("admin-projects-write", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email string `json:"email"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminRevokeAccess(ac.caller.Caller, adminScope(ac), r.PathValue("app"), req.Email); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+	mux.Handle("POST /admin/projects/{app}/restrict", admin("admin-projects-write", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Restricted bool `json:"restricted"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		if err := svc.AdminSetRestricted(ac.caller.Caller, adminScope(ac), r.PathValue("app"), req.Restricted); err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}))
+	// B4 OAuth 客户端登记：开通/更新回跳地址（首调自动生成 client_id），
+	// rotateSecret=true 时换新 secret 并一次性回执（旧 secret 即刻失效）。
+	// 权限在业务层（su 全部项目 / app-admin 仅 scopes 内项目）。
+	mux.Handle("POST /admin/projects/{app}/oauth", admin("admin-projects-write", func(ac adminCtx, w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RedirectUris []string `json:"redirectUris"`
+			RotateSecret bool     `json:"rotateSecret"`
+		}
+		if !decodeOr400(w, r, &req) {
+			return
+		}
+		res, err := svc.AdminConfigureOAuth(ac.caller.Caller, adminScope(ac), r.PathValue("app"),
+			auth.AdminOAuthInput{RedirectUris: req.RedirectUris, RotateSecret: req.RotateSecret})
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 	}))
 
 	// ---- 会话总览（scoped：app-admin 只见/只踢自己 app 的会话） ----

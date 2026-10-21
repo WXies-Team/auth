@@ -52,6 +52,42 @@ const (
 	// AuditInternalEnsure 存量用户并入（POST /internal/users/ensure）：actor 是
 	// hook_token 的持有方（迁移脚本，无用户身份 → 匿名事件），detail 记批量数。
 	AuditInternalEnsure = "internal.ensure"
+	// W1/W2/W3 批新增的八个事件名（B1 合并批次契约，**字符串逐字**——管理台审计
+	// 筛选下拉按这批值渲染，改一个字筛选就空；全集对拍见 TestAuditFilterOptions-
+	// MatchAuditConstants 与下面的同步义务注释）。password.reset 沿用上面已有的常量
+	//（找回密码与管理员重置共用同一事件，靠 detail 与 actor 区分）。
+	AuditUserBan             = "user.ban"
+	AuditUserUnban           = "user.unban"
+	AuditProjectAccessGrant  = "project.access_grant"
+	AuditProjectAccessRevoke = "project.access_revoke"
+	AuditProjectRestrictOn   = "project.restrict_on"
+	AuditProjectRestrictOff  = "project.restrict_off"
+	AuditDeleteRequested     = "account.delete_requested"
+	AuditDeleteCancelled     = "account.delete_cancelled"
+	// B4 OAuth：管理端开通/更新客户端登记（detail 只带 app 与 rotateSecret 位，
+	// secret 与 client_secret 一律不进审计）。
+	AuditOAuthClientWrite = "admin.oauth_client.write"
+	// 管理员更换邮箱 / 重置资料（B5）：detail 各自只带规定的键（新旧邮箱+reason /
+	// 清了哪几项），邮箱一律掩码——审计表本身不能变成泄密面。
+	AuditUserEmailChange  = "user.email_change"
+	AuditUserProfileReset = "user.profile_reset"
+	// B9 邀请建号四事件：创建 / 重发 / 撤销 / 接受。detail 只带掩码邮箱与 app
+	//（invite.go 逐处给出），邀请 token 与密码一律不进审计。
+	AuditUserInvite      = "user.invite"
+	AuditUserInviteResend = "user.invite_resend"
+	AuditUserInviteRevoke = "user.invite_revoke"
+	AuditUserInviteAccept = "user.invite_accept"
+	// B9 批量操作总账：detail 带 kind / batch_id / count / succeeded / failed；
+	// 每个用户的明细事件（password.reset / user.ban / user.unban）带同一个
+	// batch_id——审计页按它把「这是哪一批」关联还原出来。
+	AuditAdminBulk = "admin.bulk_action"
+
+	// 同步义务（全集口径）：**每个 Audit* 事件常量都必须在
+	// internal/ui/templates/admin-audit.html 的 #audit-action 下拉里有逐字同名
+	// option**（管理台按 action 筛选，漏一个该事件就筛不出来——B9 的
+	// user.invite_resend / user.invite_revoke 与 B4 的 admin.oauth_client.write
+	// 曾整批漏掉）。双向对拍（下拉多死值、常量缺 option 都算红）由 audit_test.go 的
+	// TestAuditFilterOptionsMatchAuditConstants 钉住，加常量忘加 option 即红。
 
 	// auditRetention：审计行保留 90 天。更久的对个人账号服务没有决策价值，
 	// 只剩隐私暴露面（ASVS V16.1 要求定义保留期）。

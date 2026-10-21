@@ -47,17 +47,23 @@ func profileDefault() *protocol.ProfileResponse { return &protocol.ProfileRespon
 // avatar_image 的空串与 NULL 一律归一成 nil：日记侧「空串 = 无头像」，两侧任何一种
 // 存法都要回同一个 JSON 形状（null），否则客户端拿 "" 与拿 null 会分叉处理。
 func (s *Service) GetProfile(userID int64) (*protocol.ProfileResponse, error) {
+	notify, err := s.loginNotify(userID)
+	if err != nil {
+		return nil, err
+	}
 	var (
 		nickname string
 		color    int
 		avatar   sql.NullString
 		updated  int64
 	)
-	err := s.pool.QueryRowContext(context.Background(),
+	err = s.pool.QueryRowContext(context.Background(),
 		"SELECT nickname, avatar_color, avatar_image, updated_at FROM user_profile WHERE user_id = ?",
 		userID).Scan(&nickname, &color, &avatar, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		return profileDefault(), nil
+		resp := profileDefault()
+		resp.LoginNotify = notify
+		return resp, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("查用户档案: %w", err)
@@ -67,13 +73,31 @@ func (s *Service) GetProfile(userID int64) (*protocol.ProfileResponse, error) {
 		AvatarColor: color,
 		AvatarImage: nonEmpty(avatar),
 		UpdatedAt:   updated,
+		LoginNotify: notify,
 	}, nil
 }
 
-// UpdateProfile 全量替换三字段并置 updated_at=now，回写后的档案。
+// loginNotify 读 users.login_notify（1=开，W1 新设备登录提醒）。查无此行（账号刚被
+// 注销的竞态）按默认 true：档案接口对已登录调用者不该 404，开关值宁可给默认也别拦读。
+func (s *Service) loginNotify(userID int64) (bool, error) {
+	var v int
+	err := s.pool.QueryRowContext(context.Background(),
+		"SELECT login_notify FROM users WHERE id = ?", userID).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("查登录提醒开关: %w", err)
+	}
+	return v != 0, nil
+}
+
+// UpdateProfile 全量替换档案三字段并置 updated_at=now，回写后的档案。
+// LoginNotify 是例外（W1）：**缺省不改值**，显式传才更新 users.login_notify
+//（见 protocol.ProfileUpdateRequest）——App 的全量档案提交不带它。
 //
 // 审计成败都记（profile.update）：detail 只放**字段名与长度类元信息**
-//（nickname 字符数、avatarImage 字符数/是否携带、被拒的字段名），
+//（nickname 字符数、avatarImage 字符数/是否携带、被拒的字段名、login_notify 显式值），
 // **绝不放昵称内容与头像数据**——audit_logs 本身不能成为泄密面。
 func (s *Service) UpdateProfile(c Caller, req protocol.ProfileUpdateRequest) (resp *protocol.ProfileResponse, err error) {
 	detail := map[string]string{
@@ -115,11 +139,28 @@ func (s *Service) UpdateProfile(c Caller, req protocol.ProfileUpdateRequest) (re
 		nickname, req.AvatarColor, image, updated); err != nil {
 		return nil, fmt.Errorf("写用户档案: %w", err)
 	}
+	// login_notify 在 users 表（不在档案行）：显式传才动，缺省读现值回执
+	var notify bool
+	if req.LoginNotify != nil {
+		notify = *req.LoginNotify
+		detail["login_notify"] = strconv.FormatBool(notify)
+		var v int
+		if notify {
+			v = 1
+		}
+		if _, err = s.pool.ExecContext(context.Background(),
+			"UPDATE users SET login_notify = ? WHERE id = ?", v, c.UID); err != nil {
+			return nil, fmt.Errorf("写登录提醒开关: %w", err)
+		}
+	} else if notify, err = s.loginNotify(c.UID); err != nil {
+		return nil, err
+	}
 	return &protocol.ProfileResponse{
 		Nickname:    nickname,
 		AvatarColor: req.AvatarColor,
 		AvatarImage: avatar,
 		UpdatedAt:   updated,
+		LoginNotify: notify,
 	}, nil
 }
 

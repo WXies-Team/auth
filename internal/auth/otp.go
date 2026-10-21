@@ -35,12 +35,13 @@ const (
 
 // 验证码用途；文案与校验目标都按它分流。
 //
-// register/reset/login/login_2fa 走**无登录态**的 /auth/send-code（白名单，非白名单
-// 直接 400；日记客户端与 web 登录第二步都认 CodePurpose 的四值，login_2fa 是两步
-// 验证第二步的邮箱码（web 与日记 App 对称可用），老客户端不传照常工作）；change 只经 authed 的 /auth/send-change-code 签发、
+// register/reset/login/login_2fa/delete 走**无登录态**的 /auth/send-code（白名单，
+// 非白名单直接 400；日记客户端与 web 登录第二步都认 CodePurpose 的常量集，
+// login_2fa 是两步验证第二步的邮箱码（web 与日记 App 对称可用），delete 是注销申请
+// 的确认码（W3：老客户端不传照常工作））；change 只经 authed 的 /auth/send-change-code 签发、
 // email_change 只经 authed 的 /auth/send-change-email-code 签发——收件人由 uid
-// 查库决定、客户端传不了，码才不会变成轰炸任意邮箱的工具。六条路共用同一套
-// 冷却、日限额与 5 分钟有效期；purpose 进查询维度，六者的码互不串用。
+// 查库决定、客户端传不了，码才不会变成轰炸任意邮箱的工具。七条路共用同一套
+// 冷却、日限额与 5 分钟有效期；purpose 进查询维度，七者的码互不串用。
 //
 // login_2fa（登录两步验证）与 login（邮箱验证码登录）刻意分开：两种码的语义、
 // 校验时机与错码文案都不同（前者是 2FA 第二因子，验它要绑 login state 并共享
@@ -52,6 +53,9 @@ const (
 	PurposeLogin2FA    = "login_2fa"
 	PurposeChange      = "change"
 	PurposeChangeEmail = "email_change"
+	// PurposeDelete 是注销申请的确认码（W3 七天宽限期的入口闸）：6 位/5 分钟/
+	// 既有冷却与日限，不加任何特殊 TTL——宽限期本身记在 users.pending_delete_at 上。
+	PurposeDelete = "delete"
 )
 
 // otpStore 把验证码落在 otp_codes 表。单实例假设与限流层一致（进程内滑动窗口
@@ -89,6 +93,11 @@ func dayStart(now time.Time) int64 {
 
 // issue 生成并落库一条验证码。冷却与日限额在这里挡，**发信之前**就挡。
 //
+// uid 是发码时的账号归属：0 = 匿名发码（register/reset/login/login_2fa/delete，
+// /auth/send-code 无登录态），非 0 = 登录态发码（change / email_change）。它进
+// otp_codes.uid 列：验码按它做归属校验（只看自己那代的码），管理员换邮也按它
+// 烧在途的自助改邮码（见 AdminChangeEmail 的防覆盖竞态）。
+//
 // 三条闸的读与 INSERT 之间包一把**按邮箱的 MySQL 命名锁**（GET_LOCK）：同邮箱的
 // 并发发码在此串行化，冷却/日限额不会被同批并发穿透。
 // 没用事务 + SELECT … FOR UPDATE 做这件事：该邮箱还没发过码时（发码的主场景）
@@ -96,7 +105,7 @@ func dayStart(now time.Time) int64 {
 // 首发并发就是一把死锁；GET_LOCK 是会话级互斥，没有这个坑。
 // 锁只护 issue 自身的读-判-写窗口；verify/revoke 的烧代只会把闸门变松（作废代
 // 本就立刻释放冷却），不需要同一把锁。
-func (s *otpStore) issue(purpose, email string) (string, error) {
+func (s *otpStore) issue(uid int64, purpose, email string) (string, error) {
 	code, err := randomCode()
 	if err != nil {
 		return "", err
@@ -108,7 +117,7 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 	// 清理要走 pool（可能需要池里空出的新连接），占着锁等池就是拿「锁等连接、
 	// 连接等锁」把自己挂死（并发测试实测过：8 条池连接全被占满时清理语句
 	// 永远等不到连接，持锁者释放不了锁）。
-	code, err = s.issueLocked(purpose, email, code, now, ctx)
+	code, err = s.issueLocked(uid, purpose, email, code, now, ctx)
 	if err != nil {
 		return "", err
 	}
@@ -126,7 +135,7 @@ func (s *otpStore) issue(purpose, email string) (string, error) {
 
 // issueLocked 是 issue 的持锁段：全程只用一条钉住的连接（GET_LOCK 挂在会话上，
 // 中途换连接锁就丢了），闸门判定与 INSERT 都在这条连接上；返回前锁必已释放。
-func (s *otpStore) issueLocked(purpose, email, code string, now time.Time, ctx context.Context) (string, error) {
+func (s *otpStore) issueLocked(uid int64, purpose, email, code string, now time.Time, ctx context.Context) (string, error) {
 	conn, err := s.pool.Conn(ctx)
 	if err != nil {
 		return "", fmt.Errorf("取数据库连接: %w", err)
@@ -179,9 +188,9 @@ func (s *otpStore) issueLocked(purpose, email, code string, now time.Time, ctx c
 	}
 
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO otp_codes (email, purpose, code_hash, expires_at, attempts, used, created_at, last_sent_at)
-		 VALUES (?, ?, ?, ?, 0, 0, ?, ?)`,
-		email, purpose, sha256Hex(code), now.Add(otpTTL).UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+		`INSERT INTO otp_codes (email, purpose, code_hash, expires_at, attempts, used, created_at, last_sent_at, uid)
+		 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+		email, purpose, sha256Hex(code), now.Add(otpTTL).UnixMilli(), now.UnixMilli(), now.UnixMilli(), uid); err != nil {
 		return "", fmt.Errorf("落库验证码: %w", err)
 	}
 	return code, nil
@@ -191,10 +200,15 @@ func (s *otpStore) issueLocked(purpose, email, code string, now time.Time, ctx c
 // 没发过/过期/试错太多 → 一句「过期」，输错 → 「验证码错误」，避免把
 //「还有几次机会」这类可被利用的信息说出去。
 //
+// uid 是**发码时写入的归属**（见 issue）：查询与烧代都按 uid 收口——发码时是 0
+// 就验 0（匿名五用途），是真实 uid 就验同一 uid（change / email_change）。这是
+// 归属校验：两个账号可以同时申请改成同一个空闲地址，A 不能拿 B 那代的码；码只
+// 对发出它的那一代生效，查无行与错 uid 同报「过期」，不泄露归属信息。
+//
 // 整段包进事务并给命中的码行加锁（FOR UPDATE）：试错次数的读-判-写之间不再有
 // 并发窗口——同码的并发提交在这里串行化，「错 5 次作废」不会被同批并发穿透，
 // 用后即焚的烧代对并发提交也只放行一次。
-func (s *otpStore) verify(purpose, email, code string) error {
+func (s *otpStore) verify(uid int64, purpose, email, code string) error {
 	if len(code) == 0 {
 		return badRequest("请先获取验证码")
 	}
@@ -214,19 +228,19 @@ func (s *otpStore) verify(purpose, email, code string) error {
 		attempts  int
 	)
 	err = tx.QueryRowContext(ctx,
-		"SELECT id, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND purpose = ? AND used = 0 ORDER BY id DESC LIMIT 1 FOR UPDATE",
-		email, purpose).Scan(&id, &stored, &expiresAt, &attempts)
+		"SELECT id, code_hash, expires_at, attempts FROM otp_codes WHERE email = ? AND purpose = ? AND uid = ? AND used = 0 ORDER BY id DESC LIMIT 1 FOR UPDATE",
+		email, purpose, uid).Scan(&id, &stored, &expiresAt, &attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return badRequest("验证码已过期，请重新获取")
 	}
 	if err != nil {
 		return fmt.Errorf("查验证码: %w", err)
 	}
-	// 作废整代（同 email+purpose 的全部活跃行）：库里同代可能有多行（发过多次），
+	// 作废整代（同 email+purpose+uid 的全部活跃行）：库里同代可能有多行（发过多次），
 	// 只废最新一行挡不住拿旧码来试——旧内存实现一个 key 只有一条，语义天然如此
 	burnGeneration := func() {
 		_, _ = tx.ExecContext(ctx,
-			"UPDATE otp_codes SET used = 1 WHERE email = ? AND purpose = ? AND used = 0", email, purpose)
+			"UPDATE otp_codes SET used = 1 WHERE email = ? AND purpose = ? AND uid = ? AND used = 0", email, purpose, uid)
 	}
 	if now.UnixMilli() > expiresAt || attempts >= otpMaxTries {
 		burnGeneration()
@@ -246,10 +260,11 @@ func (s *otpStore) verify(purpose, email, code string) error {
 }
 
 // revoke 作废刚生成的码——只在「码已生成但信没发出去」时用，否则用户要白等
-// 60 秒冷却。清理失败只记在返回值之外无从表达：撤销是尽力而为，最坏是多等 60 秒。
-func (s *otpStore) revoke(purpose, email string) {
+// 60 秒冷却。uid 同 issue：只废发出时归属该账号的那代，不误伤同地址别人的在途码。
+// 清理失败只记在返回值之外无从表达：撤销是尽力而为，最坏是多等 60 秒。
+func (s *otpStore) revoke(uid int64, purpose, email string) {
 	_, _ = s.pool.ExecContext(context.Background(),
-		"UPDATE otp_codes SET used = 1 WHERE email = ? AND purpose = ? AND used = 0", email, purpose)
+		"UPDATE otp_codes SET used = 1 WHERE email = ? AND purpose = ? AND uid = ? AND used = 0", email, purpose, uid)
 }
 
 // randomCode 用 crypto/rand 取 [0,1000000) 再左补零成 6 位（不能用 math/rand：码可被

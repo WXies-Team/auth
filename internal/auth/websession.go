@@ -69,6 +69,13 @@ func randomToken(n int) (string, error) {
 // 与两条老登录路的差别只有「多存两列 hash」：id 仍是雪花、device 仍走 shortDevice、
 // 踢人与 revoked_at 闸完全复用——网页登录的这行会出现在 App 的设备页里，可被踢。
 func (s *Service) CreateWebSession(userID int64, meta SessionMeta) (*WebSession, error) {
+	return s.createWebSessionOn(s.pool, userID, meta)
+}
+
+// createWebSessionOn 在给定执行器上建 web 会话。**接受邀请用事务执行器**：用户行、
+// 邀请消费与会话行必须同批提交（与 Register 的 createSessionOn 同款理由——分开写
+// 会留下「已建号但拿不到登录态」的半截状态）。
+func (s *Service) createWebSessionOn(ex execer, userID int64, meta SessionMeta) (*WebSession, error) {
 	token, err := randomToken(webTokenBytes)
 	if err != nil {
 		return nil, err
@@ -79,7 +86,7 @@ func (s *Service) CreateWebSession(userID int64, meta SessionMeta) (*WebSession,
 	}
 	now := time.Now()
 	sid := s.ids.Generate().Int64()
-	if _, err := s.pool.ExecContext(context.Background(),
+	if _, err := ex.ExecContext(context.Background(),
 		`INSERT INTO sessions (id, user_id, app, device, ip, user_agent, created_at, last_seen_at, web_token_hash, web_csrf_hash)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		sid, userID, webAppLabel, truncateRunes(shortDevice(meta.UserAgent), 191),

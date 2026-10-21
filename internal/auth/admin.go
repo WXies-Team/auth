@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
 	"sort"
@@ -35,9 +36,17 @@ const (
 // RootSuperEmail 是**根平台管理员**的钉死邮箱。super 的授予与回收只认这一个身份
 //（见 AdminSetRole）——改这个值等于移交根权限，**改需慎重**：动它之前确认新邮箱
 // 的持有者身份，且库里至少还有一个有效 super。
+//
+// **W7-2 定案：root 判定按 uid**——启动时把 RootSuperEmail 解析成 uid 缓存
+//（resolveRootSuper），此后 root 换绑邮箱不再失权；解析未成功（空库 / 查询失败，
+// 失败打 Error 日志）才回退邮箱比对。回退态是兜底而非常态。
 const RootSuperEmail = "horatioxs@outlook.com"
 
 // AdminUser 是后台用户列表/详情的一行。
+//
+// B5 资料三件套的回执口径（载荷权衡）：列表带 nickname / avatarColor / hasAvatar——
+// avatarImage 解码上限 700KB ≈ 95 万字符，进列表会让一页 20 行爆掉十几个 MB；
+// 抽屉详情（AdminUserDetail）才带全量 avatarImage。
 type AdminUser struct {
 	UID          int64  `json:"uid"`
 	Email        string `json:"email"`
@@ -48,30 +57,52 @@ type AdminUser struct {
 	// ScopeCount 是该用户持有的应用授权行数（admin_scopes）：普通用户恒 0，
 	// app-admin 一眼能看出他管几个项目。按 uid IN 批量回填，不做 N+1。
 	ScopeCount int `json:"scopeCount"`
+	// Nickname / AvatarColor 与 internal/auth/profile.go 的 Profile 同名同形；
+	// HasAvatar = avatar_image 非空（列表据此渲染「色块+首字」回退，不传图本身）。
+	Nickname    string `json:"nickname"`
+	AvatarColor int    `json:"avatarColor"`
+	HasAvatar   bool   `json:"hasAvatar"`
 }
 
 // AdminUserDetail 是用户详情：加凭证摘要、应用授权清单与活跃会话，够管理员判断
 //「要不要踢、该不该给权限」，不回任何口令散列。
+// Bans 是 W2 封禁清单（契约 6 追加字段）：恒为数组（无封禁回 []，不回 null）。
+// AvatarImage 是 B5 的全量头像（详情页 48px 头像用；空串 = 无头像，与列表的
+// hasAvatar 同一事实的两种粒度）。
 type AdminUserDetail struct {
 	AdminUser
 	HasPassword bool                   `json:"hasPassword"`
 	Scopes      []string               `json:"scopes"`
 	Sessions    []protocol.SessionInfo `json:"sessions"`
 	Passkeys    []PasskeyInfo          `json:"passkeys"`
+	Bans        []BanInfo              `json:"bans"`
+	AvatarImage string                 `json:"avatarImage"`
+}
+
+// BanInfo 是 user_bans 一行的回执形态（GET /admin/users/{uid}.bans）。
+// Until 是解除时刻毫秒：**0 = 永久封禁**。Reason 是管理员填写的原因（可能空串）。
+type BanInfo struct {
+	App    string `json:"app"`
+	Until  int64  `json:"until"`
+	Reason string `json:"reason"`
 }
 
 // AdminSession 是全站会话总览的一行（比用户自己的设备列表多出 uid/email）。
 // ID 同 SessionInfo：**十进制字符串**输出（63 位雪花过不了浏览器 JSON.parse 的
 // 53 位精度，路径里的会话 id 也按字符串传）。
+// Nickname / AvatarColor（B5）：会话总览聚合行带昵称展示（无昵称前端回退邮箱，
+// 无档案行回零值）；头像图不进会话行——同样出于载荷考虑（列表行只带色不带图）。
 type AdminSession struct {
-	ID         string `json:"id"`
-	UID        int64  `json:"uid"`
-	Email      string `json:"email"`
-	App        string `json:"app"`
-	Device     string `json:"device"`
-	IP         string `json:"ip"`
-	CreatedAt  int64  `json:"createdAt"`
-	LastSeenAt int64  `json:"lastSeenAt"`
+	ID          string `json:"id"`
+	UID         int64  `json:"uid"`
+	Email       string `json:"email"`
+	App         string `json:"app"`
+	Device      string `json:"device"`
+	IP          string `json:"ip"`
+	CreatedAt   int64  `json:"createdAt"`
+	LastSeenAt  int64  `json:"lastSeenAt"`
+	Nickname    string `json:"nickname"`
+	AvatarColor int    `json:"avatarColor"`
 }
 
 // ConfigItem 是配置中心的一条：secret 只回 configured + 末 4 位 hint，
@@ -269,6 +300,43 @@ func (s *Service) fillUserSummaries(users []AdminUser) error {
 	for i := range users {
 		users[i].ScopeCount = scopeCounts[users[i].UID]
 	}
+
+	// 资料三件套（B5）：nickname / avatarColor / hasAvatar 批量回填。avatarImage
+	// 只取「有没有」（avatar_image IS NOT NULL AND <> ''）——列表不背 95 万字符的图。
+	rows4, err := s.pool.QueryContext(context.Background(),
+		"SELECT user_id, nickname, avatar_color,"+
+			" (avatar_image IS NOT NULL AND avatar_image <> '') FROM user_profile WHERE user_id IN ("+strings.Join(placeholders, ",")+")",
+		ids...)
+	if err != nil {
+		return fmt.Errorf("查用户档案: %w", err)
+	}
+	defer func() { _ = rows4.Close() }()
+	type profileRow struct {
+		nickname string
+		color    int
+		hasImage bool
+	}
+	profiles := map[int64]profileRow{}
+	for rows4.Next() {
+		var uid int64
+		var p profileRow
+		var hasImg int
+		if err := rows4.Scan(&uid, &p.nickname, &p.color, &hasImg); err != nil {
+			return fmt.Errorf("读用户档案行: %w", err)
+		}
+		p.hasImage = hasImg == 1
+		profiles[uid] = p
+	}
+	if err := rows4.Err(); err != nil {
+		return err
+	}
+	for i := range users {
+		if p, ok := profiles[users[i].UID]; ok {
+			users[i].Nickname = p.nickname
+			users[i].AvatarColor = p.color
+			users[i].HasAvatar = p.hasImage
+		}
+	}
 	return nil
 }
 
@@ -293,6 +361,14 @@ func (s *Service) AdminUserDetail(uid int64) (*AdminUserDetail, error) {
 		return nil, err
 	}
 	detail := &AdminUserDetail{AdminUser: batch[0], HasPassword: password.Valid && strings.TrimSpace(password.String) != ""}
+	// 全量头像（B5，详情页 48px 头像）：无头像 / 无档案行回空串
+	prof, perr := s.GetProfile(uid)
+	if perr != nil {
+		return nil, perr
+	}
+	if prof.AvatarImage != nil {
+		detail.AvatarImage = *prof.AvatarImage
+	}
 
 	// 应用授权清单（app slug 数组）：与列表页的 scopeCount 同源，详情页给全量
 	scopes, err := s.AdminScopes(uid)
@@ -319,7 +395,49 @@ func (s *Service) AdminUserDetail(uid int64) (*AdminUserDetail, error) {
 		return nil, err
 	}
 	detail.Passkeys = passkeys
+	// 封禁清单（W2）：详情页要能一眼看出「这个账号还能不能进、为什么」
+	bans, err := s.AdminUserBans(uid)
+	if err != nil {
+		return nil, err
+	}
+	detail.Bans = bans
 	return detail, nil
+}
+
+// AdminUserBans 列一个用户的生效封禁（恒非 nil 数组）。读到过期的限时行按
+// denyIfBanned 同款口径**惰性删**——判定与展示不会对同一行各说各话。
+func (s *Service) AdminUserBans(uid int64) ([]BanInfo, error) {
+	out := make([]BanInfo, 0, 2)
+	rows, err := s.pool.QueryContext(context.Background(),
+		"SELECT app, until_ms, reason FROM user_bans WHERE uid = ?", uid)
+	if err != nil {
+		return nil, fmt.Errorf("查封禁: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	now := time.Now().UnixMilli()
+	var stale []string
+	for rows.Next() {
+		var b BanInfo
+		if err := rows.Scan(&b.App, &b.Until, &b.Reason); err != nil {
+			return nil, fmt.Errorf("读封禁行: %w", err)
+		}
+		if b.Until > 0 && now > b.Until {
+			stale = append(stale, b.App) // 先记下，rows 读完再删（别占着连接等另一条连接）
+			continue
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历封禁行: %w", err)
+	}
+	_ = rows.Close()
+	for _, app := range stale {
+		if _, derr := s.pool.ExecContext(context.Background(),
+			"DELETE FROM user_bans WHERE uid = ? AND app = ?", uid, app); derr != nil {
+			slog.Warn("清理过期封禁行失败（不进列表即可）", "uid", uid, "app", app, "err", derr)
+		}
+	}
+	return out, nil
 }
 
 // AdminSetRole 是**唯一**的角色调整入口（POST /admin/users/{uid}/role，本批把
@@ -365,7 +483,7 @@ func (s *Service) AdminSetRole(actor Caller, targetUID int64, role string) (err 
 	// 且审计落到 admin.role.change 这个「平台角色调整」事件上
 	if role == adminRoleSuper || IsSuperRole(current) {
 		action = AuditRoleChange
-		if !isRootSuper(actor) {
+		if !s.isRootSuper(actor) {
 			return &HTTPError{403, "只有根管理员可以授予或取消 super 角色"}
 		}
 	}
@@ -396,10 +514,50 @@ func (s *Service) AdminSetRole(actor Caller, targetUID int64, role string) (err 
 	return nil
 }
 
-// isRootSuper 判定操作者是不是根 su：比对当前邮箱（大小写归一）。管理端点只收
-// cookie 会话，邮箱每次请求从 users 表现查——不存在「JWT 里的旧邮箱」误判的窗口。
-func isRootSuper(actor Caller) bool {
+// isRootSuper 判定操作者是不是根 su（W7-2：**按 uid 判定**）。
+//
+// uid 在启动时由 resolveRootSuper 解析缓存：root 换绑邮箱不再失权。缓存为空
+//（空库首启 / 查询失败，失败已打 Error 日志）回退邮箱比对——管理端点只收 cookie
+// 会话、邮箱每次请求从 users 表现查，回退态与旧实现同口径。
+// 惰性补解析：启动时根账号还没入库的形态（测试先建服务后建号、首装后补号）
+// 在第一次判定时补齐，此后走 uid 路。
+func (s *Service) isRootSuper(actor Caller) bool {
+	if s.rootUID.Load() == 0 {
+		s.resolveRootSuper()
+	}
+	if root := s.rootUID.Load(); root != 0 {
+		return actor.UID == root
+	}
 	return strings.EqualFold(strings.TrimSpace(actor.Email), RootSuperEmail)
+}
+
+// isRootAccount 判定**目标账号**是不是根 su（W1/W2 的收口）：目标 uid 命中缓存的
+// 根 uid 即根（换绑邮箱后仍算）；缓存为空才回退钉死邮箱比对。
+func (s *Service) isRootAccount(uid int64, email string) bool {
+	if root := s.rootUID.Load(); root != 0 {
+		return uid == root
+	}
+	return strings.EqualFold(strings.TrimSpace(email), RootSuperEmail)
+}
+
+// resolveRootSuper 解析 RootSuperEmail → uid 并缓存（NewService 启动时跑一次，
+// isRootSuper 惰性补跑）。查不到行 / 查询失败都算**解析失败**：回退邮箱比对并打
+// Error 日志（W7-2 原文）——回退态下 root 换绑邮箱会失权，这不是能悄悄吃的降级。
+// 读写走 atomic：惰性补解析可能来自并发请求。
+func (s *Service) resolveRootSuper() {
+	var id int64
+	err := s.pool.QueryRowContext(context.Background(),
+		"SELECT id FROM users WHERE email = ?", normalizeEmail(RootSuperEmail)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		// 空库首启 / 测试先建服务后建号：回退态，直到根账号入库后的下一次判定补上
+		slog.Error("根管理员账号未入库，root 判定暂按邮箱比对", "email", RootSuperEmail)
+		return
+	}
+	if err != nil {
+		slog.Error("解析根管理员 uid 失败，root 判定回退邮箱比对", "err", err)
+		return
+	}
+	s.rootUID.Store(id)
 }
 
 // ---- 会话总览 ----
@@ -437,8 +595,11 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query string, limi
 			args = append(args, "%"+q+"%")
 		}
 	}
-	// count 与 list 必须吃同一个 from：query 的邮箱条件在 users 侧，少了 join 数不对
-	from := " FROM sessions s JOIN users u ON u.id = s.user_id" + cond
+	// count 与 list 必须吃同一个 from：query 的邮箱条件在 users 侧，少了 join 数不对。
+	// user_profile 是 LEFT JOIN（无档案行的账号照样出现在会话总览），主键一对一
+	// 不改变行数——两个 COUNT 的口径不受影响。
+	from := " FROM sessions s JOIN users u ON u.id = s.user_id" +
+		" LEFT JOIN user_profile p ON p.user_id = s.user_id" + cond
 	var total, totalUsers int
 	if err := s.pool.QueryRowContext(context.Background(),
 		"SELECT COUNT(*)"+from, args...).Scan(&total); err != nil {
@@ -450,7 +611,8 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query string, limi
 	}
 	listArgs := append(append([]any{}, args...), limit, offset)
 	rows, err := s.pool.QueryContext(context.Background(),
-		"SELECT s.id, s.user_id, u.email, s.app, s.device, s.ip, s.created_at, s.last_seen_at"+
+		"SELECT s.id, s.user_id, u.email, s.app, s.device, s.ip, s.created_at, s.last_seen_at,"+
+			" COALESCE(p.nickname, ''), COALESCE(p.avatar_color, 0)"+
 			from+" ORDER BY s.last_seen_at DESC, s.id DESC LIMIT ? OFFSET ?", listArgs...)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("查会话: %w", err)
@@ -461,7 +623,7 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query string, limi
 		var it AdminSession
 		var id int64
 		if err := rows.Scan(&id, &it.UID, &it.Email, &it.App, &it.Device, &it.IP,
-			&it.CreatedAt, &it.LastSeenAt); err != nil {
+			&it.CreatedAt, &it.LastSeenAt, &it.Nickname, &it.AvatarColor); err != nil {
 			return nil, 0, 0, fmt.Errorf("读会话行: %w", err)
 		}
 		it.ID = strconv.FormatInt(id, 10)

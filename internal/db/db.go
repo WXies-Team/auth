@@ -154,6 +154,23 @@ var extraColumns = []columnDef{
 	// 决定发 web 会话还是业务 JWT。DEFAULT 'web' 让存量行与 web 流程共用一个取值。
 	{"login_states", "app",
 		"ALTER TABLE login_states ADD COLUMN app VARCHAR(32) NOT NULL DEFAULT 'web'"},
+	// W3 注销七天宽限：0=正常，非0=注销申请时刻毫秒（到期由清扫 goroutine 执行）。
+	{"users", "pending_delete_at",
+		"ALTER TABLE users ADD COLUMN pending_delete_at BIGINT NOT NULL DEFAULT 0"},
+	// W4 强制改密：管理员重置时按 forceChange 置 1，自助改密清 0；
+	// 登录回执按它回填 mustChangePassword。
+	{"users", "password_must_change",
+		"ALTER TABLE users ADD COLUMN password_must_change TINYINT NOT NULL DEFAULT 0"},
+	// W1 新设备登录提醒：默认开（1），GET/PUT /api/profile 的 loginNotify 读写；
+	// 登录成功建会话后按它决定是否发提醒信（见 internal/auth 的 loginnotify）。
+	{"users", "login_notify",
+		"ALTER TABLE users ADD COLUMN login_notify TINYINT NOT NULL DEFAULT 1"},
+	// FX5：验证码行记发码时的账号归属。0=匿名发码（register/reset/login/login_2fa/
+	// delete），非0=登录态发码（change/email_change）。验码按 uid 归属校验、
+	// 管理员换邮按 uid 烧在途改邮码（防覆盖竞态）。索引跟列一起建（与
+	// sessions.web_token_hash 同款「列+索引一条 DDL」）。
+	{"otp_codes", "uid",
+		"ALTER TABLE otp_codes ADD COLUMN uid BIGINT NOT NULL DEFAULT 0, ADD KEY idx_otp_uid (uid, purpose)"},
 }
 
 // ensureColumn 幂等地补一列：先查 information_schema，没有才执行 DDL。

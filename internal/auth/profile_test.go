@@ -242,3 +242,60 @@ func TestProfileRowRemovedOnDeleteAccount(t *testing.T) {
 		t.Errorf("注销后 user_profile 应被删空，残留 %d 行", n)
 	}
 }
+
+// loginNotify（W1 新设备登录提醒开关）：默认开；显式 PUT 才改值，缺省 PUT 不动
+//（App 的全量档案提交不带该字段，绝不能把提醒关掉）；GET 回执恒带当前值。
+func TestProfileLoginNotifyRoundTrip(t *testing.T) {
+	svc, mailer := newTestService(t)
+	reg := registerViaCode(t, svc, mailer, "profile-notify@example.com", "secret123")
+	caller, err := svc.ValidUserID("Bearer " + reg.Token)
+	if err != nil {
+		t.Fatalf("校验失败: %v", err)
+	}
+
+	// 默认开（users.login_notify DEFAULT 1），且从未写过档案也拿得到开关值
+	got, err := svc.GetProfile(caller.UID)
+	if err != nil {
+		t.Fatalf("读档案: %v", err)
+	}
+	if !got.LoginNotify {
+		t.Error("loginNotify 默认应为 true")
+	}
+
+	// 显式关：回执 false、GET 回读 false，档案三字段照常写
+	off := false
+	req := putReq("关提醒", 1, nil)
+	req.LoginNotify = &off
+	resp, err := svc.UpdateProfile(caller, req)
+	if err != nil {
+		t.Fatalf("关提醒: %v", err)
+	}
+	if resp.LoginNotify {
+		t.Error("PUT 回执的 loginNotify 应为 false")
+	}
+	if got, err = svc.GetProfile(caller.UID); err != nil || got.LoginNotify {
+		t.Errorf("关掉后 GET 应回 false（err=%v），得到 %v", err, got.LoginNotify)
+	}
+
+	// 缺省 PUT（App 的全量档案提交形态，不带 loginNotify）：开关保持 false 不被重置
+	if _, err := svc.UpdateProfile(caller, putReq("再改名", 2, nil)); err != nil {
+		t.Fatalf("缺省 PUT: %v", err)
+	}
+	if got, err = svc.GetProfile(caller.UID); err != nil || got.LoginNotify {
+		t.Errorf("缺省 PUT 不该动开关，应保持 false（err=%v），得到 %v", err, got.LoginNotify)
+	}
+	if got.Nickname != "再改名" {
+		t.Errorf("档案字段照常全量替换，昵称应为 再改名，得到 %q", got.Nickname)
+	}
+
+	// 再开：true 往返
+	on := true
+	req = putReq("再改名", 2, nil)
+	req.LoginNotify = &on
+	if resp, err = svc.UpdateProfile(caller, req); err != nil || !resp.LoginNotify {
+		t.Fatalf("开提醒失败（err=%v），回执 %v", err, resp)
+	}
+	if got, err = svc.GetProfile(caller.UID); err != nil || !got.LoginNotify {
+		t.Errorf("开启后 GET 应回 true（err=%v），得到 %v", err, got.LoginNotify)
+	}
+}

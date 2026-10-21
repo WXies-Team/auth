@@ -9,12 +9,15 @@ import (
 //
 // 来源：HoratioShaw/calorie-diary
 // shared/src/commonMain/kotlin/cn/horatio/caloriediary/shared/dto/AuthDtos.kt，
-// 2026-10-19 快照。日记仓是**私有仓**（gh api repos/HoratioShaw/calorie-diary
+// 2026-10-19 快照；**B1 合并批次（2026-10-21）按跨仓契约扩展**：AuthResponse 追加
+// mustChangePassword / deletePendingCancelled（无 omitempty），DeleteAccountRequest
+// 改 {email, code}——日记侧同批同步快照，漂移会被本测试当场抓住。
+// 日记仓是**私有仓**（gh api repos/HoratioShaw/calorie-diary
 // 确认 private=true），本仓 CI 的凭据跨仓读不到真文件，checkout 对拍走不通——
-// 只能钉快照：日记侧改字段需来这里同步更新，漂移会被本测试当场抓住，比无约束强。
+// 只能钉快照：日记侧改字段需来这里同步更新。
 var diaryAuthDTOSnapshot = map[string][]string{
 	"AuthRequest":                {"email", "password", "code", "app"},
-	"AuthResponse":               {"token", "email"},
+	"AuthResponse":               {"token", "email", "mustChangePassword", "deletePendingCancelled"},
 	"SendCodeRequest":            {"email", "purpose", "app"},
 	"ResetPasswordRequest":       {"email", "code", "password"},
 	"LoginCodeRequest":           {"email", "code", "app"},
@@ -22,7 +25,7 @@ var diaryAuthDTOSnapshot = map[string][]string{
 	"ChangeEmailRequest":         {"password", "email", "code"},
 	"ChangePasswordRequest":      {"oldPassword", "newPassword"},
 	"ChangePasswordCodeRequest":  {"code", "password"},
-	"DeleteAccountRequest":       {"password"},
+	"DeleteAccountRequest":       {"email", "code"},
 }
 
 // protocolAuthDTOs 把快照里的类名对到本包的结构体（同名对应，不做别名映射）。

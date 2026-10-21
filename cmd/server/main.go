@@ -144,6 +144,9 @@ func main() {
 	//（健康检查轮询有 30s 窗口，15s 收尾足够且不至于拖慢部署）。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// W3 到期注销清扫：启动立即跑一遍、之后每小时一轮（进程内 goroutine，
+	// 单实例假设与进程内限流一致），随优雅关闭信号一起退出
+	go authSvc.RunPendingDeleteSweeper(ctx)
 	go func() {
 		<-ctx.Done()
 		slog.Info("收到退出信号，等待在途请求完成")

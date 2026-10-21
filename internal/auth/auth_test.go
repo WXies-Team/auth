@@ -29,16 +29,16 @@ var testMeta = SessionMeta{IP: "127.0.0.1", UserAgent: "GoTest/1.0 (auth test)"}
 // 这条链要验到——所以从正文里把码抠出来继续走注册。from 记下发件人显示名（品牌），
 // 「正文品牌与 From 同源」这条链靠它验。sent 留全量（改邮箱要断言新旧两封通知信都在，
 // 只留最后一封看不到旧邮箱那封）。
-type mailRec struct{ to, from, subject, html string }
+type mailRec struct{ to, from, subject, html, text string }
 
 type recordMailer struct {
-	to, from, subject, html string
-	sent                    []mailRec
+	to, from, subject, html, text string
+	sent                          []mailRec
 }
 
-func (m *recordMailer) Send(_ context.Context, from, to, subject, html string) error {
-	m.from, m.to, m.subject, m.html = from, to, subject, html
-	m.sent = append(m.sent, mailRec{to, from, subject, html})
+func (m *recordMailer) Send(_ context.Context, from, to, subject, html, text string) error {
+	m.from, m.to, m.subject, m.html, m.text = from, to, subject, html, text
+	m.sent = append(m.sent, mailRec{to, from, subject, html, text})
 	return nil
 }
 
@@ -62,7 +62,7 @@ func newTestService(t *testing.T) (*Service, *recordMailer) {
 	// user_id 存行，残留会让下一轮断言读到上一轮的 passkey / 挑战 / 中间态。
 	for _, table := range []string{"users", "otp_codes", "sessions", "passkeys", "totp_factors",
 		"recovery_codes", "webauthn_challenges", "login_states", "audit_logs", "ai_usage", "user_profile",
-		"admin_scopes"} {
+		"admin_scopes", "user_bans", "project_policy", "project_access", "oauth_clients", "user_invites"} {
 		if _, err := pool.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("清空 %s: %v", table, err)
 		}
@@ -110,6 +110,21 @@ func codeIn(t *testing.T, m *recordMailer) string {
 		t.Fatalf("邮件正文里找不到 6 位验证码: %s", m.html)
 	}
 	return code[1]
+}
+
+// lastMailMatching 回主题包含 substr 的**最后一封**信（找不到即 Fatalf）。
+// B8 起登录路径会发「新设备登录提醒」：重置吊销会话后的登录、注销杀会话后的登录
+// 都会被提醒信顶掉 recordMailer 的「最后一封」位——凡是断言「某封信发出了/内容含
+// X」的用例都按主题过滤取信，别再依赖时序。禁止在生产代码里把提醒默认关掉。
+func (m *recordMailer) lastMailMatching(t *testing.T, subjectSubstr string) mailRec {
+	t.Helper()
+	for i := len(m.sent) - 1; i >= 0; i-- {
+		if strings.Contains(m.sent[i].subject, subjectSubstr) {
+			return m.sent[i]
+		}
+	}
+	t.Fatalf("没找到主题含 %q 的邮件（共发了 %d 封）", subjectSubstr, len(m.sent))
+	return mailRec{}
 }
 
 func httpMsg(err error) (int, string) {
@@ -521,7 +536,7 @@ func TestDeleteAccountRemovesData(t *testing.T) {
 		t.Fatalf("校验失败: %v", err)
 	}
 	// 造几行验证码记录（发码流程正常会留下的东西）
-	if _, err := svc.otps.issue(PurposeLogin, "del@example.com"); err != nil {
+	if _, err := svc.otps.issue(0, PurposeLogin, "del@example.com"); err != nil {
 		t.Fatalf("造 otp 数据失败: %v", err)
 	}
 
@@ -580,7 +595,7 @@ func TestDeleteAccountClearsWebData(t *testing.T) {
 	if _, _, err := svc.BeginPasskeyLogin(); err != nil {
 		t.Fatalf("落仪式中间态: %v", err)
 	}
-	if _, err := svc.otps.issue(PurposeLogin, "del-web@example.com"); err != nil {
+	if _, err := svc.otps.issue(0, PurposeLogin, "del-web@example.com"); err != nil {
 		t.Fatalf("落验证码: %v", err)
 	}
 	// m14 的前置数据：该 uid 的个人用量行 + global 行（注销只许清前者）
@@ -749,7 +764,7 @@ func TestRegisterFailureAfterVerifyAllowsImmediateResend(t *testing.T) {
 
 type failMailer struct{}
 
-func (failMailer) Send(context.Context, string, string, string, string) error {
+func (failMailer) Send(context.Context, string, string, string, string, string) error {
 	return errors.New("graph boom")
 }
 
@@ -914,20 +929,30 @@ func TestChangeEmailFlow(t *testing.T) {
 	}
 }
 
-// 日记侧 CodePurpose 的四值（AuthDtos.kt 的 CodePurpose 常量，2026-10-21 从三值扩为
-// 四值加 LOGIN_2FA；字段快照对拍见 protocol.TestProtocolMatchesDiaryAuthDtos——那份
-// 快照只钉十类数据类的字段、不含本常量对象，所以四个常量值在此单独钉）必须与服务端
-// 发码白名单同值——漂了客户端发的 purpose 会直接吃 400。
+// 日记侧 CodePurpose 的常量集（AuthDtos.kt 的 CodePurpose 常量，2026-10-21 从三值扩为
+// 四值加 LOGIN_2FA；B1 合并批次再加 DELETE 注销确认码；字段快照对拍见
+// protocol.TestProtocolMatchesDiaryAuthDtos——那份快照只钉十类数据类的字段、不含本
+// 常量对象，所以常量值在此单独钉）必须与服务端发码白名单同值——漂了客户端发的
+// purpose 会直接吃 400。
 func TestDiaryCodePurposeMatchesServerWhitelist(t *testing.T) {
-	pinned := map[string]string{"REGISTER": "register", "RESET": "reset", "LOGIN": "login", "LOGIN_2FA": "login_2fa"}
+	pinned := map[string]string{
+		"REGISTER": "register", "RESET": "reset", "LOGIN": "login",
+		"LOGIN_2FA": "login_2fa", "DELETE": "delete",
+	}
 	got := map[string]string{
 		"REGISTER": PurposeRegister, "RESET": PurposeReset,
 		"LOGIN": PurposeLogin, "LOGIN_2FA": PurposeLogin2FA,
+		"DELETE": PurposeDelete,
 	}
 	for k, want := range pinned {
 		if got[k] != want {
 			t.Errorf("CodePurpose.%s 应为 %q，得到 %q", k, want, got[k])
 		}
+	}
+	// 服务端 /auth/send-code 白名单必须真的收 delete：常量对上了、白名单没开，
+	// 客户端照样吃 400（SendCode 的判定点在 auth.go）
+	if err := validateCodePurpose(PurposeDelete); err != nil {
+		t.Errorf("purpose=%q 应在发码白名单内: %v", PurposeDelete, err)
 	}
 }
 
@@ -972,15 +997,15 @@ func TestSendCodeLogin2FARequiresTwoFactor(t *testing.T) {
 	}
 	code := codeIn(t, mailer)
 	// purpose 分键：两步码不能在邮箱验证码登录路用（该路无行 → 「过期」）
-	if err := svc.otps.verify(PurposeLogin, "2fa-send@example.com", code); err == nil ||
+	if err := svc.otps.verify(0, PurposeLogin, "2fa-send@example.com", code); err == nil ||
 		!strings.Contains(err.Error(), "过期") {
 		t.Errorf("两步码不该在 login 用途可用，得到 %v", err)
 	}
 	// 本用途可验且用后即焚
-	if err := svc.otps.verify(PurposeLogin2FA, "2fa-send@example.com", code); err != nil {
+	if err := svc.otps.verify(0, PurposeLogin2FA, "2fa-send@example.com", code); err != nil {
 		t.Errorf("两步码应在 login_2fa 用途可用: %v", err)
 	}
-	if err := svc.otps.verify(PurposeLogin2FA, "2fa-send@example.com", code); err == nil {
+	if err := svc.otps.verify(0, PurposeLogin2FA, "2fa-send@example.com", code); err == nil {
 		t.Error("两步码是一次性的，用过之后不能复用")
 	}
 }

@@ -3,8 +3,7 @@ package auth
 import (
 	"strings"
 	"testing"
-
-	"github.com/WXies-Team/auth/internal/mail"
+	"time"
 )
 
 // 品牌注册表的取值：两个 App 各回各的串；缺省与未知一律中性品牌 Auth。
@@ -62,7 +61,7 @@ func TestBrandEmailStrings(t *testing.T) {
 	for _, c := range cases {
 		b := brandFor(c.app)
 
-		subject, body := codeEmail(b, "注册", "123456")
+		subject, body, text := codeEmail(b, "注册", "123456")
 		if subject != c.subject {
 			t.Errorf("app=%q 主题应为 %q，得到 %q", c.app, c.subject, subject)
 		}
@@ -71,16 +70,22 @@ func TestBrandEmailStrings(t *testing.T) {
 				t.Errorf("app=%q 正文缺 %q", c.app, want)
 			}
 		}
+		// 纯文本降级与 HTML 同源同要素（multipart/alternative 的 text/plain 部件）
+		for _, want := range []string{c.warning, c.footer, "123456", "此邮件不可回复"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("app=%q 纯文本版缺 %q", c.app, want)
+			}
+		}
 
 		// 改绑通知两封：新邮箱那封的属格散文按品牌换，旧邮箱那封主题同源
-		newSubject, newBody := changeEmailNoticeEmail(b, true, "old@example.com", "new@example.com")
+		newSubject, newBody, _ := changeEmailNoticeEmail(b, true, "old@example.com", "new@example.com")
 		if want := b.prefix + "新邮箱已绑定"; newSubject != want {
 			t.Errorf("app=%q 新邮箱信主题应为 %q，得到 %q", c.app, want, newSubject)
 		}
 		if !strings.Contains(newBody, c.genitive) {
 			t.Errorf("app=%q 新邮箱信缺属格 %q", c.app, c.genitive)
 		}
-		oldSubject, _ := changeEmailNoticeEmail(b, false, "old@example.com", "new@example.com")
+		oldSubject, _, _ := changeEmailNoticeEmail(b, false, "old@example.com", "new@example.com")
 		if want := b.prefix + "绑定邮箱已更换"; oldSubject != want {
 			t.Errorf("app=%q 旧邮箱信主题应为 %q，得到 %q", c.app, want, oldSubject)
 		}
@@ -90,33 +95,122 @@ func TestBrandEmailStrings(t *testing.T) {
 	}
 }
 
-// 三品牌头部的内嵌图 cid 必须与 mail 包的内嵌注册表同名（cid = PNG 文件名 + "-icon"），
-// 且每封信都真的引用它：对不上就会发出**裂图**——发件箱里看不出来，只有收件人看得见。
-func TestBrandEmailInlineIconCID(t *testing.T) {
-	seen := map[string]string{} // cid → app，抓「三品牌共用一枚图」的偷懒
+// 三品牌头部的托管 logo：src 是 https://auth.horatio.cn/brand/<slug>-v1.png、带
+// alt 与显式宽高、外层 td 刷品牌主色（裂图时露出的也是品牌色块），且每封信都真的
+// 引用它——对不上就会发出**裂图**，logoPath 与静态路由/生成器三方同口径。
+func TestBrandEmailLogoURL(t *testing.T) {
+	seen := map[string]string{} // logoPath → app，抓「三品牌共用一张图」的偷懒
 	for _, app := range []string{"calorie-diary", "expense-diary", ""} {
 		b := brandFor(app)
-		if b.icon == "" {
-			t.Fatalf("app=%q 的品牌没有内嵌图 cid", app)
+		if b.logoPath == "" || !strings.HasPrefix(b.logoPath, "/brand/") {
+			t.Fatalf("app=%q 的品牌缺 /brand/ logo 路径（得到 %q）", app, b.logoPath)
 		}
-		if !mail.HasInlineIcon(b.icon) {
-			t.Errorf("app=%q 的 cid %q 在 mail 包里没有对应内嵌 PNG（cid = 文件名 + \"-icon\"）", app, b.icon)
+		if other, dup := seen[b.logoPath]; dup {
+			t.Errorf("app=%q 与 app=%q 共用 logo %q，三品牌该各有各的图", app, other, b.logoPath)
 		}
-		if other, dup := seen[b.icon]; dup {
-			t.Errorf("app=%q 与 app=%q 共用 cid %q，三品牌该各带各的图", app, other, b.icon)
-		}
-		seen[b.icon] = app
+		seen[b.logoPath] = app
 
-		_, codeBody := codeEmail(b, "注册", "123456")
-		_, noticeBody := changeEmailNoticeEmail(b, true, "old@example.com", "new@example.com")
+		_, codeBody, _ := codeEmail(b, "注册", "123456")
+		_, noticeBody, _ := changeEmailNoticeEmail(b, true, "old@example.com", "new@example.com")
 		for name, body := range map[string]string{"验证码信": codeBody, "改绑通知": noticeBody} {
-			if !strings.Contains(body, `src="cid:`+b.icon+`"`) {
-				t.Errorf("app=%q 的%s正文缺 cid 引用 %q", app, name, b.icon)
+			if !strings.Contains(body, `src="`+b.logoURL()+`"`) {
+				t.Errorf("app=%q 的%s正文缺 logo 引用 %q", app, name, b.logoURL())
 			}
-			// 图标属性三件套：alt（读屏）、显式宽高（版面不随图片加载抖动）、border=0
-			for _, attr := range []string{` alt="`, ` width="44"`, ` height="44"`, `border="0"`} {
-				if !strings.Contains(body, attr) {
-					t.Errorf("app=%q 的%s里图标缺属性 %q", app, name, attr)
+			// 图标属性：alt（Yahoo 不渲染 alt 的兜底靠旁边的品牌名 live 文本）、
+			// 显式宽高（版面不随图片加载抖动）、外层 td 刷品牌主色
+			for _, want := range []string{
+				` alt="` + b.name + `"`, ` width="48"`, ` height="48"`, `border="0"`,
+				`bgcolor="` + b.primaryHex + `"`,
+				`>` + b.name + `</span>`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Errorf("app=%q 的%s缺 %q", app, name, want)
+				}
+			}
+		}
+	}
+}
+
+// 新外壳的结构性钉子（每品牌抽查验证码信 + 新登录提醒）：HTML 与纯文本并存、
+// 按钮 bulletproof（VML 兜底 + 按钮下方纯文本 URL）、不出现纯白底/纯黑字、
+// 没有模板渲染错误标记。
+func TestEmailShellStructure(t *testing.T) {
+	for _, app := range []string{"calorie-diary", "expense-diary", ""} {
+		b := brandFor(app)
+		rendered := map[string][2]string{
+			"验证码信": func() [2]string {
+				_, h, x := codeEmail(b, "注册", "123456")
+				return [2]string{h, x}
+			}(),
+			"新登录提醒": func() [2]string {
+				_, h, x := loginNotifyEmail(b, "Pixel 8", "热量日记", time.Unix(1761000000, 0))
+				return [2]string{h, x}
+			}(),
+		}
+		for name, r := range rendered {
+			htmlBody, text := r[0], r[1]
+			if htmlBody == "" || text == "" {
+				t.Fatalf("app=%q 的%s HTML/纯文本有空版本", app, name)
+			}
+			for _, bad := range []string{"%!", "#FFFFFF;background-color:#FFFFFF", "color:#000000"} {
+				if strings.Contains(htmlBody, bad) {
+					t.Errorf("app=%q 的%s含 %q", app, name, bad)
+				}
+			}
+			for _, want := range []string{`role="presentation"`, "<!--[if mso]>", "此邮件不可回复"} {
+				if !strings.Contains(htmlBody, want) {
+					t.Errorf("app=%q 的%s缺 %q", app, name, want)
+				}
+			}
+			if strings.Contains(htmlBody, "cid:") {
+				t.Errorf("app=%q 的%s还引用 cid（已改托管 logo）", app, name)
+			}
+		}
+	}
+}
+
+// 全模板双形态抽查（W2 迁移完成的钉子）：每个模板每品牌都产出 subject/html/text
+// 三件套；HTML 带托管 logo 与落款、纯文本带落款与「此邮件不可回复」、两者都没有
+// 模板渲染错误标记或已废弃的 cid 引用。
+func TestAllEmailTemplatesRenderBothParts(t *testing.T) {
+	at := time.Unix(1761000000, 0)
+	const cancelURL = "https://auth.horatio.cn/web/delete-cancel?token=abc123"
+	for _, app := range []string{"calorie-diary", "expense-diary", ""} {
+		b := brandFor(app)
+		mails := map[string]func() (string, string, string){
+			"验证码":     func() (string, string, string) { return codeEmail(b, "注册", "123456") },
+			"改绑新邮箱":  func() (string, string, string) { return changeEmailNoticeEmail(b, true, "old@example.com", "new@example.com") },
+			"改绑旧邮箱":  func() (string, string, string) { return changeEmailNoticeEmail(b, false, "old@example.com", "new@example.com") },
+			"管理员改邮新": func() (string, string, string) { return adminChangeEmailNoticeEmail(b, true, "old@example.com", "new@example.com") },
+			"管理员改邮旧": func() (string, string, string) { return adminChangeEmailNoticeEmail(b, false, "old@example.com", "new@example.com") },
+			"管理员重置":  func() (string, string, string) { return passwordResetNoticeEmail(b, "TempPass123") },
+			"改密确认":   func() (string, string, string) { return passwordChangedNoticeEmail(b, at) },
+			"注销确认":   func() (string, string, string) { return deleteRequestEmail(b, cancelURL, at) },
+			"注销撤销":   func() (string, string, string) { return deleteCancelledEmail(b) },
+			"注销完成":   func() (string, string, string) { return deleteDoneEmail(b) },
+			"新登录提醒":  func() (string, string, string) { return loginNotifyEmail(b, "Pixel 8", "热量日记", at) },
+		}
+		for name, build := range mails {
+			subject, htmlBody, text := build()
+			if subject == "" || !strings.HasPrefix(subject, b.prefix) {
+				t.Errorf("app=%q 的%s主题应带品牌前缀，得到 %q", app, name, subject)
+			}
+			if htmlBody == "" || text == "" {
+				t.Fatalf("app=%q 的%s缺 HTML 或纯文本版本", app, name)
+			}
+			for _, want := range []string{b.logoURL(), b.footer, `role="presentation"`} {
+				if !strings.Contains(htmlBody, want) {
+					t.Errorf("app=%q 的%s HTML 缺 %q", app, name, want)
+				}
+			}
+			for _, want := range []string{b.footer, "此邮件不可回复"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("app=%q 的%s纯文本缺 %q", app, name, want)
+				}
+			}
+			for _, bad := range []string{"%!", "cid:"} {
+				if strings.Contains(htmlBody, bad) {
+					t.Errorf("app=%q 的%s HTML 含 %q", app, name, bad)
 				}
 			}
 		}

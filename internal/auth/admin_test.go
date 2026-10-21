@@ -501,7 +501,15 @@ func TestAdminAIUsage(t *testing.T) {
 		t.Errorf("无 global 行时应回 limit=5000/used=0，得到 %+v", empty.Global)
 	}
 
-	// 造两天用量：12 个用户今天各 3 次；另一个用户昨天 7 次
+	// 造两天用量：12 个合成 subject 今天各 3 次（总览聚合不问 users 表，照算）；
+	// 昨天 7 次那行挂在**真实存在**的账号上——钻取（AdminAIUsageUser）拿 uid 问
+	// users 表做存在性/收权判定，纯合成 uid 会被 404 挡在门外（口径见 admin.go）。
+	drillUID := int64(8800200)
+	if _, err := svc.pool.Exec(
+		"INSERT INTO users (id, email, created_at, token_version) VALUES (?, 'ai-drill@example.com', ?, 1)",
+		drillUID, now.UnixMilli()); err != nil {
+		t.Fatalf("落钻取目标账号: %v", err)
+	}
 	day1 := now.Format("2006-01-02")
 	day2 := now.AddDate(0, 0, -1).Format("2006-01-02")
 	if _, err := svc.pool.Exec("DELETE FROM ai_usage"); err != nil {
@@ -516,7 +524,8 @@ func TestAdminAIUsage(t *testing.T) {
 		}
 	}
 	if _, err := svc.pool.Exec(
-		"INSERT INTO ai_usage (scope, subject, day, count) VALUES ('user', '2000', ?, 7)", day2); err != nil {
+		"INSERT INTO ai_usage (scope, subject, day, count) VALUES ('user', ?, ?, 7)",
+		strconv.FormatInt(drillUID, 10), day2); err != nil {
 		t.Fatalf("造次日用量: %v", err)
 	}
 
@@ -528,13 +537,13 @@ func TestAdminAIUsage(t *testing.T) {
 		t.Errorf("today/yesterday/activeToday 应 36/7/12，得到 %d/%d/%d",
 			report.Today, report.Yesterday, report.ActiveToday)
 	}
-	// users 按区间用量降序：昨天 7 次的 2000 排第一（今天为 0 的用户 Today 排序在后）
+	// users 按区间用量降序：昨天 7 次的钻取账号排第一（今天为 0 的用户 Today 排序在后）
 	if len(report.Users) != 13 {
 		t.Fatalf("应有 13 个用户，得到 %d", len(report.Users))
 	}
 	top := report.Users[0]
-	if top.UID != 2000 || top.Range != 7 || top.Today != 0 || top.Share != math.Round(7.0/43.0*10000)/10000 {
-		t.Errorf("首行应是 uid=2000（range=7, share=7/43），得到 %+v", top)
+	if top.UID != drillUID || top.Range != 7 || top.Today != 0 || top.Share != math.Round(7.0/43.0*10000)/10000 {
+		t.Errorf("首行应是 uid=%d（range=7, share=7/43），得到 %+v", drillUID, top)
 	}
 	// 默认 per-user 限额 500
 	if top.LimitToday != 500 {
@@ -574,12 +583,12 @@ func TestAdminAIUsage(t *testing.T) {
 		t.Errorf("配齐后 per-user 限额应 600，得到 %d", withQuota.Users[0].LimitToday)
 	}
 
-	// 钻取：单用户整窗 + today + limitToday；查无此 uid 404
-	detail, err := svc.AdminAIUsageUser(30, nil, 2000)
+	// 钻取：单用户整窗 + today + limitToday；查无此 uid 404（目标是上面落库的真实账号）
+	detail, err := svc.AdminAIUsageUser(30, nil, drillUID)
 	if err != nil {
 		t.Fatalf("钻取: %v", err)
 	}
-	if detail.UID != 2000 || detail.Today != 0 || len(detail.Days) != 30 || detail.LimitToday != 600 {
+	if detail.UID != drillUID || detail.Today != 0 || len(detail.Days) != 30 || detail.LimitToday != 600 {
 		t.Errorf("钻取回执不对: %+v", detail)
 	}
 	var sawY bool

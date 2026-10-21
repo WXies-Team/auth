@@ -43,9 +43,11 @@ func TestEnsureColumnProbesAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// EnsureSchema 二跑必须幂等，且五个补列（role / web_token_hash / web_csrf_hash /
-// reauth_at / login_states.app）与六张新表都要就位——它们是 web 管理台与 C 批登录
-// 分流的地基，缺一列启动后的第一次登录就会炸在 SQL 上。
+// EnsureSchema 二跑必须幂等，且全部补列（role / web_token_hash / web_csrf_hash /
+// reauth_at / login_states.app / users.pending_delete_at / users.password_must_change /
+// users.login_notify / otp_codes.uid）与各批新表都要就位——它们是 web 管理台、
+// C 批登录分流、W1 新设备登录提醒与 W2/W3/W5 新表的地基，缺一列启动后的第一次登录
+// 就会炸在 SQL 上（列清单直接遍历 extraColumns，不硬编码）。
 func TestEnsureSchemaIdempotentWithWebColumns(t *testing.T) {
 	dsn := os.Getenv("TEST_MYSQL_DSN")
 	if dsn == "" {
@@ -71,7 +73,8 @@ func TestEnsureSchemaIdempotentWithWebColumns(t *testing.T) {
 		}
 	}
 	for _, table := range []string{"passkeys", "totp_factors", "recovery_codes", "webauthn_challenges",
-		"login_states", "ai_usage", "audit_logs"} {
+		"login_states", "ai_usage", "audit_logs", "user_bans", "project_policy", "project_access",
+		"oauth_clients", "user_invites"} {
 		var n int
 		if err := pool.QueryRow(
 			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", table).
@@ -86,5 +89,12 @@ func TestEnsureSchemaIdempotentWithWebColumns(t *testing.T) {
 		"SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'sessions' AND index_name = 'uq_sessions_web_token'").
 		Scan(&idx); err != nil || idx < 1 {
 		t.Errorf("sessions.uq_sessions_web_token 应存在，得到 n=%d err=%v", idx, err)
+	}
+	// otp_codes.uid 的索引同样随补列一起建：验码/烧码都按 (uid, purpose) 点查。
+	idx = 0
+	if err := pool.QueryRow(
+		"SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'otp_codes' AND index_name = 'idx_otp_uid'").
+		Scan(&idx); err != nil || idx < 1 {
+		t.Errorf("otp_codes.idx_otp_uid 应存在，得到 n=%d err=%v", idx, err)
 	}
 }

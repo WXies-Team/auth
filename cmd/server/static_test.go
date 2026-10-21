@@ -55,6 +55,40 @@ func TestStaticAssetsServed(t *testing.T) {
 	}
 }
 
+// 品牌邮件 logo 路由：PNG/SVG 的 Content-Type、PNG 魔数、immutable 长缓存、
+// 名单外 404——邮件里的 https://auth.horatio.cn/brand/<slug>-v1.png 靠这条路由落地。
+func TestBrandLogoRoutesServed(t *testing.T) {
+	cases := []struct {
+		path, ctype string
+		magic       []byte
+	}{
+		{"/brand/calorie-diary-v1.png", "image/png", []byte("\x89PNG\r\n\x1a\n")},
+		{"/brand/expense-diary-v1.png", "image/png", []byte("\x89PNG\r\n\x1a\n")},
+		{"/brand/auth-v1.png", "image/png", []byte("\x89PNG\r\n\x1a\n")},
+		{"/brand/calorie-diary.svg", "image/svg+xml; charset=utf-8", []byte("<svg")},
+	}
+	for _, c := range cases {
+		rec := staticDo(t, c.path)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s 应 200，得到 %d", c.path, rec.Code)
+			continue
+		}
+		if got := rec.Header().Get("Content-Type"); got != c.ctype {
+			t.Errorf("%s Content-Type 应为 %q，得到 %q", c.path, c.ctype, got)
+		}
+		if !bytes.HasPrefix(rec.Body.Bytes(), c.magic) {
+			t.Errorf("%s 的字节不是预期格式，开头 %q", c.path, rec.Body.Bytes())
+		}
+		if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+			t.Errorf("%s 应带 immutable 缓存头（文件名带版本段），得到 %q", c.path, cc)
+		}
+	}
+	// 名单外的品牌资产名不冒充（防 /brand/../ 与未登记 slug）
+	if rec := staticDo(t, "/brand/nope-v1.png"); rec.Code != http.StatusNotFound {
+		t.Errorf("未登记的品牌 logo 应 404，得到 %d", rec.Code)
+	}
+}
+
 // 根路径 302 → /web/login（现状 404）；但**不做全站兜底**——打错的 API 路径仍 404。
 func TestRootRedirectsToLogin(t *testing.T) {
 	rec := staticDo(t, "/")

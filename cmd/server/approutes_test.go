@@ -67,7 +67,7 @@ func TestAppPasswordLoginRouteReturnsJWT(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("App 密码登录应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	if got := keysOf(t, rec.Body.Bytes()); got != "email,token" {
+	if got := keysOf(t, rec.Body.Bytes()); got != "deletePendingCancelled,email,mustChangePassword,token" {
 		t.Errorf("回执应与 AuthResponse 同形，得到 %s", got)
 	}
 	if cookies := rec.Result().Cookies(); len(cookies) != 0 {
@@ -98,21 +98,27 @@ func TestAppPasswordLoginRouteReturnsJWT(t *testing.T) {
 	if sessions.Code != http.StatusOK {
 		t.Fatalf("设备列表应 200，得到 %d（%s）", sessions.Code, sessions.Body.String())
 	}
-	var items []struct {
-		ID  int64  `json:"id"`
-		App string `json:"app"`
+	// 回执是 {sessions:[...]} 信封（设备列表端点与网页端同款；裸数组是旧形状，
+	// 已在 TestLegacySessionsResponseShape 钉过信封本身）
+	// 设备 id 是 63 位雪花、以十进制字符串输出（SessionInfo.ID；浏览器 JS 只有 53 位
+	// 精度，数值会抹圆，故协议层用字符串）。此处只需「行的 app 归属」，id 照 string 解析。
+	var sessBody struct {
+		Sessions []struct {
+			ID  string `json:"id"`
+			App string `json:"app"`
+		} `json:"sessions"`
 	}
-	if err := json.Unmarshal(sessions.Body.Bytes(), &items); err != nil {
-		t.Fatalf("解析设备列表: %v", err)
+	if err := json.Unmarshal(sessions.Body.Bytes(), &sessBody); err != nil {
+		t.Fatalf("解析设备列表: %v (%s)", err, sessions.Body.String())
 	}
 	appRow := false
-	for _, it := range items {
+	for _, it := range sessBody.Sessions {
 		if it.App == "calorie-diary" {
 			appRow = true
 		}
 	}
 	if !appRow {
-		t.Errorf("App 会话应出现在列表里，得到 %+v", items)
+		t.Errorf("App 会话应出现在列表里，得到 %+v", sessBody.Sessions)
 	}
 
 	// web 回归：不带 app → 双 cookie、会话 token（非 JWT）、verify 不认
@@ -122,7 +128,7 @@ func TestAppPasswordLoginRouteReturnsJWT(t *testing.T) {
 	if web.Code != http.StatusOK {
 		t.Fatalf("web 密码登录应 200，得到 %d（%s）", web.Code, web.Body.String())
 	}
-	if got := keysOf(t, web.Body.Bytes()); got != "email,token" {
+	if got := keysOf(t, web.Body.Bytes()); got != "deletePendingCancelled,email,mustChangePassword,token" {
 		t.Errorf("web 回执形状应保持不变，得到 %s", got)
 	}
 	jar := map[string]*http.Cookie{}
@@ -210,7 +216,7 @@ func TestTwoStepLoginRouteCarriesApp(t *testing.T) {
 	if step2.Code != http.StatusOK {
 		t.Fatalf("第二步应 200，得到 %d（%s）", step2.Code, step2.Body.String())
 	}
-	if got := keysOf(t, step2.Body.Bytes()); got != "email,token" {
+	if got := keysOf(t, step2.Body.Bytes()); got != "deletePendingCancelled,email,mustChangePassword,token" {
 		t.Errorf("第二步回执应与 AuthResponse 同形，得到 %s", got)
 	}
 	if cookies := step2.Result().Cookies(); len(cookies) != 0 {
@@ -249,7 +255,7 @@ func TestPasskeyLoginFinishRouteAppAndWeb(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("App passkey 登录应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	if got := keysOf(t, rec.Body.Bytes()); got != "email,token" {
+	if got := keysOf(t, rec.Body.Bytes()); got != "deletePendingCancelled,email,mustChangePassword,token" {
 		t.Errorf("回执应与 AuthResponse 同形，得到 %s", got)
 	}
 	if cookies := rec.Result().Cookies(); len(cookies) != 0 {

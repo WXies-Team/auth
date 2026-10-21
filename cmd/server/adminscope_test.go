@@ -43,10 +43,17 @@ type adminActor struct {
 // makeActor 落一个指定角色的账号、绑 MFA、登录取 cookie、落 scope 行、过 reauth。
 func makeActor(t *testing.T, e *routeEnv, name, role string, apps []string) *adminActor {
 	t.Helper()
+	return makeActorEmail(t, e, name, name+"@example.com", role, apps)
+}
+
+// makeActorEmail 同 makeActor 但邮箱显式给出——根收口（W7-2）的用例需要
+// RootSuperEmail 账号，推导邮箱凑不出这个地址。
+func makeActorEmail(t *testing.T, e *routeEnv, name, email, role string, apps []string) *adminActor {
+	t.Helper()
 	drainLoginBucket()
 	t.Cleanup(drainLoginBucket)
-	uid := seedUser(t, e, name+"@example.com", "secret123", role)
-	sess, csrf := loginCookie(t, e, name+"@example.com", "secret123")
+	uid := seedUser(t, e, email, "secret123", role)
+	sess, csrf := loginCookie(t, e, email, "secret123")
 	enrollMFA(t, e, uid)
 	for _, app := range apps {
 		if _, err := e.pool.Exec(
@@ -294,27 +301,42 @@ func TestAdminScopeMatrix(t *testing.T) {
 
 	// ---- GET /admin/ai-usage：subject 归属过滤 ----
 	t.Run("ai-usage", func(t *testing.T) {
-		parseTotal := func(rec *httptest.ResponseRecorder) int {
+		// 回执的天序列字段是 count（total 是旧名）且按日期**升序**：最旧一天在
+		// [0]、today 收尾。图表按 date key 取数、顺序无关，但把 [0] 当今天就会错
+		//——字段名与顺序口径在此钉死，顺带钉默认窗口 30 天。
+		parseToday := func(rec *httptest.ResponseRecorder) int {
 			var rep struct {
 				Days []struct {
-					Total int `json:"total"`
+					Date  string `json:"date"`
+					Count int    `json:"count"`
 				} `json:"days"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
 				t.Fatalf("解析用量回执: %v (%s)", err, rec.Body.String())
 			}
-			if len(rep.Days) == 0 {
-				return 0
+			if len(rep.Days) != 30 {
+				t.Fatalf("默认窗口应 30 天，得到 %d", len(rep.Days))
 			}
-			return rep.Days[0].Total
+			now := time.Now()
+			var today int
+			for i, d := range rep.Days {
+				want := now.AddDate(0, 0, -(len(rep.Days) - 1 - i)).Format("2006-01-02")
+				if d.Date != want {
+					t.Fatalf("days[%d] 应为 %s（升序、收尾今天），得到 %s", i, want, d.Date)
+				}
+				if d.Date == now.Format("2006-01-02") {
+					today = d.Count
+				}
+			}
+			return today
 		}
 		// victim 只注册过（calorie 会话），用量 5 → calorie 视角应看到
 		rec := e.do(t, "GET", "/admin/ai-usage", "", oneApp.cookieOnly)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("app-admin 看板应 200，得到 %d %s", rec.Code, rec.Body.String())
 		}
-		if total := parseTotal(rec); total != 5 {
-			t.Errorf("calorie 视角当日 total 应 5，得到 %d", total)
+		if total := parseToday(rec); total != 5 {
+			t.Errorf("calorie 视角当日 count 应 5，得到 %d", total)
 		}
 		// 零 scope：403
 		if rec = e.do(t, "GET", "/admin/ai-usage", "", noScope.cookieOnly); rec.Code != http.StatusForbidden {
@@ -355,10 +377,12 @@ func TestAdminScopeMatrix(t *testing.T) {
 }
 
 // 角色管理端点的行为：授予隐含提 admin、收光降回 user、审计落行、
-// 最后一个 super 不可降级、非法输入。
+// 非法输入；角色调整唯一入口是 POST /admin/users/{uid}/role，涉 super 的
+// 授予/回收收口根 su（W7-2，非根 super 一律 403）。
 func TestRolesEndpoints(t *testing.T) {
 	e := newRouteEnv(t)
 	superX := makeActor(t, e, "ro-super", "super", nil)
+	root := makeActorEmail(t, e, "ro-root", auth.RootSuperEmail, "super", nil)
 	target := seedUser(t, e, "ro-target@example.com", "secret123", "user")
 	otherSuper := seedUser(t, e, "ro-othersuper@example.com", "secret123", "super")
 
@@ -437,26 +461,37 @@ func TestRolesEndpoints(t *testing.T) {
 		t.Errorf("名单外 app 应 400，得到 %d", rec.Code)
 	}
 
-	// role 变更：target 先提成 admin，再升 super，然后试着降最后一个 super（失败）
+	// role 变更走唯一入口 POST /admin/users/{uid}/role（旧 /admin/roles/{uid}/role
+	// 与 PATCH /admin/users/{uid} 已并入删除）。涉 super 的授予/回收收口根 su（W7-2）。
 	_ = e.do(t, "POST", "/admin/roles/"+strconv.FormatInt(target, 10)+"/scope",
 		`{"app":"calorie-diary","op":"grant"}`, superX.withCSRF)
-	rec = e.do(t, "POST", "/admin/roles/"+strconv.FormatInt(target, 10)+"/role",
+	// 非根 super 授他人 super → 403（只有根 su 能给 super）
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(target, 10)+"/role",
 		`{"role":"super"}`, superX.withCSRF)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("admin 升 super 应 200，得到 %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("非根 super 授他人 super 应 403，得到 %d %s", rec.Code, rec.Body.String())
 	}
-	// 现在有两个 super（superX + target）：superX 不能自贬（400 含「自己」）
-	rec = e.do(t, "POST", "/admin/roles/"+strconv.FormatInt(superX.uid, 10)+"/role",
+	// 根 su 把 admin 升 super → 200
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(target, 10)+"/role",
+		`{"role":"super"}`, root.withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("根 su 给 admin 升 super 应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	// 自贬一律 400 且点名（先于 super 收口判定表态）
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(superX.uid, 10)+"/role",
 		`{"role":"admin"}`, superX.withCSRF)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "自己") {
 		t.Errorf("自贬应 400 且点名，得到 %d %s", rec.Code, rec.Body.String())
 	}
-	// 把 otherSuper 也升成 super，再逐个降——降到最后一个时应 400
-	_ = e.do(t, "POST", "/admin/roles/"+strconv.FormatInt(otherSuper, 10)+"/role",
-		`{"role":"super"}`, superX.withCSRF) // otherSuper 本就是 super，此调用应 400（非 admin 目标）
-	// target 降 admin（库里还有 superX，允许）
-	rec = e.do(t, "POST", "/admin/roles/"+strconv.FormatInt(target, 10)+"/role",
-		`{"role":"admin"}`, superX.withCSRF)
+	// otherSuper 已是 super：根 su 重复授 super 幂等 200（不写不报错）
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(otherSuper, 10)+"/role",
+		`{"role":"super"}`, root.withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Errorf("重复授 super 应幂等 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	// target 降 admin（库里还有其它 super，允许）
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(target, 10)+"/role",
+		`{"role":"admin"}`, root.withCSRF)
 	if rec.Code != http.StatusOK {
 		t.Errorf("非最后 super 降级应 200，得到 %d %s", rec.Code, rec.Body.String())
 	}
@@ -467,8 +502,8 @@ func TestRolesEndpoints(t *testing.T) {
 		t.Errorf("角色调整应落 admin.role.change 审计，得到 %d err=%v", changes, err)
 	}
 	// 非法 role 值
-	rec = e.do(t, "POST", "/admin/roles/"+strconv.FormatInt(target, 10)+"/role",
-		`{"role":"root"}`, superX.withCSRF)
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(target, 10)+"/role",
+		`{"role":"root"}`, root.withCSRF)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("非法 role 应 400，得到 %d", rec.Code)
 	}
@@ -535,5 +570,111 @@ func TestSwitcherRendering(t *testing.T) {
 	rec = e.do(t, "GET", "/web/admin/sessions", "", plain.cookieOnly)
 	if rec.Code != http.StatusFound || !strings.Contains(rec.Header().Get("Location"), "/web/console") {
 		t.Errorf("普通用户访问管理页应 302 去概览，得到 %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+// B5 路由级：管理员换邮 / 重置资料两个新端点 + 用户列表/详情的资料字段。
+// 矩阵入口（403/404）在业务层用例里钉（TestAdminChangeEmailPermissions），这里只钉
+// 路由挂载、回执形状与新字段的 JSON 名。
+func TestAdminEmailAndProfileRoutes(t *testing.T) {
+	e := newRouteEnv(t)
+	superX := makeActor(t, e, "b5-route-super", "super", nil)
+	oneApp := makeActor(t, e, "b5-route-one", "admin", []string{"calorie-diary"})
+
+	target := seedUser(t, e, "b5-route-target@example.com", "secret123", "user")
+	seedAppSession(t, e, "b5-route-target@example.com", "calorie-diary")
+	// 种一行档案（昵称 + 色 + 头像），列表/详情回执都要带
+	if _, err := e.pool.Exec(
+		"INSERT INTO user_profile (user_id, nickname, avatar_color, avatar_image, updated_at) VALUES (?,?,?,?,?)",
+		target, "路由测试昵称", 3, "YWJjZGVm", time.Now().UnixMilli()); err != nil {
+		t.Fatalf("种档案行: %v", err)
+	}
+
+	// 换邮：super 成功 → {ok:true} 且库中邮箱已变、审计落行
+	uid := strconv.FormatInt(target, 10)
+	rec := e.do(t, "POST", "/admin/users/"+uid+"/email",
+		`{"email":"b5-route-new@example.com","reason":"路由测试"}`, superX.withCSRF)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
+		t.Fatalf("换邮应 200 {ok:true}，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	var gotEmail string
+	if err := e.pool.QueryRow("SELECT email FROM users WHERE id = ?", target).Scan(&gotEmail); err != nil ||
+		gotEmail != "b5-route-new@example.com" {
+		t.Errorf("库中邮箱应更新，得到 %q err=%v", gotEmail, err)
+	}
+	var auditN int
+	_ = e.pool.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'user.email_change' AND result = 'ok'").Scan(&auditN)
+	if auditN == 0 {
+		t.Error("换邮应落 user.email_change 审计")
+	}
+	// 未变化 → 400
+	rec = e.do(t, "POST", "/admin/users/"+uid+"/email",
+		`{"email":"b5-route-new@example.com"}`, superX.withCSRF)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("同邮箱应 400，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	// app-admin 无会话目标 → 403（矩阵口径在路由层同样成立：这里目标有 calorie 会话，
+	// 换成越界目标测 403；此处先验本目标放行）
+	rec = e.do(t, "POST", "/admin/users/"+uid+"/email",
+		`{"email":"b5-route-appadmin@example.com"}`, oneApp.withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Errorf("有会话目标的 app-admin 换邮应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 重置资料：全否 → 400；头像+昵称 → 200 且档案回默认
+	rec = e.do(t, "POST", "/admin/users/"+uid+"/profile-reset", `{}`, superX.withCSRF)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("全否应 400，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	rec = e.do(t, "POST", "/admin/users/"+uid+"/profile-reset",
+		`{"avatar":true,"nickname":true}`, superX.withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("重置资料应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	var nick string
+	var color int
+	var avatar sql.NullString
+	// 重置按 UPDATE 语义走（清列不删行）：能查到行本身就是「行仍在」的断言
+	if err := e.pool.QueryRow("SELECT nickname, avatar_color, avatar_image FROM user_profile WHERE user_id = ?",
+		target).Scan(&nick, &color, &avatar); err != nil || nick != "" || color != 0 || avatar.Valid {
+		t.Errorf("重置后档案应清空，得到 nick=%q color=%d avatar.Valid=%v err=%v", nick, color, avatar.Valid, err)
+	}
+
+	// 用户列表 / 详情的资料字段（B5 JSON 契约）
+	// 重新种回档案（重置是 UPDATE 留行，行还在——只能 UPDATE 不能 INSERT 同 PK）
+	if _, err := e.pool.Exec(
+		"UPDATE user_profile SET nickname = ?, avatar_color = ?, avatar_image = ?, updated_at = ? WHERE user_id = ?",
+		"路由测试昵称", 3, "YWJjZGVm", time.Now().UnixMilli(), target); err != nil {
+		t.Fatalf("回种档案行: %v", err)
+	}
+	// 按当前邮箱检索（用例上文的管理员换邮已把该用户邮箱改成 b5-route-appadmin@…，
+	// 旧邮箱片段查不到行）。列表/详情都带 nickname/avatarColor/hasAvatar，详情多带全量图。
+	rec = e.do(t, "GET", "/admin/users?query=b5-route-appadmin", "", superX.cookieOnly)
+	var upage struct {
+		Items []struct {
+			Nickname    string `json:"nickname"`
+			AvatarColor int    `json:"avatarColor"`
+			HasAvatar   bool   `json:"hasAvatar"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upage); err != nil || len(upage.Items) != 1 {
+		t.Fatalf("用户列表解析: %v items=%d (%s)", err, len(upage.Items), rec.Body.String())
+	}
+	it := upage.Items[0]
+	if it.Nickname != "路由测试昵称" || it.AvatarColor != 3 || !it.HasAvatar {
+		t.Errorf("列表资料字段不对: %+v", it)
+	}
+	rec = e.do(t, "GET", "/admin/users/"+uid, "", superX.cookieOnly)
+	var detail struct {
+		Nickname    string `json:"nickname"`
+		AvatarColor int    `json:"avatarColor"`
+		HasAvatar   bool   `json:"hasAvatar"`
+		AvatarImage string `json:"avatarImage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("详情解析: %v (%s)", err, rec.Body.String())
+	}
+	if detail.Nickname != "路由测试昵称" || detail.AvatarColor != 3 || !detail.HasAvatar || detail.AvatarImage != "YWJjZGVm" {
+		t.Errorf("详情资料字段不对: %+v", detail)
 	}
 }

@@ -47,7 +47,8 @@ func newRouteEnv(t *testing.T) *routeEnv {
 	// 每轮清干净（与 internal/auth 的用例同一张测试 schema，互不残留）
 	for _, table := range []string{"users", "otp_codes", "sessions", "passkeys", "totp_factors",
 		"recovery_codes", "webauthn_challenges", "login_states", "audit_logs", "ai_usage", "app_config",
-		"user_profile", "admin_scopes"} {
+		"user_profile", "admin_scopes", "user_bans", "project_policy", "project_access", "oauth_clients",
+		"user_invites"} {
 		if _, err := pool.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("清空 %s: %v", table, err)
 		}
@@ -136,7 +137,8 @@ func keysOf(t *testing.T, raw []byte) string {
 
 // ---- 老端点回归：已发布日记 App 依赖的形状 ----
 
-// /auth/login 的成功回执必须恰好 {email,token}，失败回执恰好 {message}；
+// /auth/login 的成功回执必须恰好 {token,email,mustChangePassword,deletePendingCancelled}
+//（契约 4：两个 bool 无 omitempty、显式出现），失败回执恰好 {message}；
 // 且请求体多带未知字段照常工作（decode 不拒未知字段是前向兼容的既定口径）。
 func TestLegacyLoginResponseShape(t *testing.T) {
 	e := newRouteEnv(t)
@@ -148,8 +150,8 @@ func TestLegacyLoginResponseShape(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("登录应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	if got := keysOf(t, rec.Body.Bytes()); got != "email,token" {
-		t.Errorf("登录成功回执形状应恰为 email,token，得到 %s", got)
+	if got := keysOf(t, rec.Body.Bytes()); got != "deletePendingCancelled,email,mustChangePassword,token" {
+		t.Errorf("登录成功回执形状应恰为 deletePendingCancelled,email,mustChangePassword,token，得到 %s", got)
 	}
 
 	rec = e.do(t, "POST", "/auth/login",
@@ -282,7 +284,7 @@ func TestWebLoginIssuesCookies(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("登录应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	if got := keysOf(t, rec.Body.Bytes()); got != "email,token" {
+	if got := keysOf(t, rec.Body.Bytes()); got != "deletePendingCancelled,email,mustChangePassword,token" {
 		t.Errorf("登录回执应与 AuthResponse 同形，得到 %s", got)
 	}
 	jar := map[string]*http.Cookie{}
@@ -438,10 +440,11 @@ func TestAdminGateKeepsNonAdminsOut(t *testing.T) {
 	}
 }
 
-// M1 回归：cookie 会话调 /auth/change-password 不许把自己断掉——
-// 本会话行保活（cookie 照用）、其它会话全被踢、响应里不许出现非法 aud 的 JWT、
-// sessions 表不许留下 app='web' 却没有 web_token_hash 的僵尸行。
-func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
+// 契约 5：cookie 会话调 /auth/change-password **换发**——响应 Set-Cookie 刷新会话
+//（旧 cookie 当场失效）、其它会话全被踢、回执 token 恒空串（绝不给 app='web' 的
+// 会话签 JWT）、sessions 表不许留下 app='web' 却没有 web_token_hash 的僵尸行。
+//（旧 M1「本会话行保活、cookie 照用」口径由本批契约推翻：改密后凭据必须轮换。）
+func TestWebChangePasswordRotatesCurrentSession(t *testing.T) {
 	e := newRouteEnv(t)
 	uid := seedUser(t, e, "web-chpw@example.com", "secret123", "user")
 	sess, csrf := loginCookie(t, e, "web-chpw@example.com", "secret123")
@@ -462,7 +465,7 @@ func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("web 改密应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	// 响应形状仍 {token,email}，但 token 必须是空串——绝不给 app='web' 的会话签 JWT
+	// 响应形状仍 {token,email,...}，但 token 必须是空串——绝不给 app='web' 的会话签 JWT
 	var resp authResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("改密回执解析: %v（%s）", err, rec.Body.String())
@@ -473,11 +476,27 @@ func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
 	if resp.Email != "web-chpw@example.com" {
 		t.Errorf("回执 email 应为库里当前邮箱，得到 %q", resp.Email)
 	}
+	// 契约 5：Set-Cookie 换发新会话（新值 ≠ 旧值）
+	newSess := cookieNamed(rec, auth.WebCookieName)
+	newCSRF := cookieNamed(rec, auth.WebCSRFCookieName)
+	if newSess == nil || newCSRF == nil || newSess.Value == "" || newSess.Value == sess.Value {
+		t.Fatalf("改密响应应 Set-Cookie 换发新会话，得到 sess=%v csrf=%v", newSess, newCSRF)
+	}
 
-	// 本会话仍可用：cookie + CSRF 打 /web/session 应 200
-	after := e.do(t, "POST", "/web/session", `{}`, withCSRF)
+	// 旧 cookie 当场失效（旧行随全吊销判死）
+	oldAfter := e.do(t, "POST", "/web/session", `{}`, withCSRF)
+	if oldAfter.Code != http.StatusUnauthorized {
+		t.Errorf("改密后旧 cookie 应 401，得到 %d（%s）", oldAfter.Code, oldAfter.Body.String())
+	}
+	// 新 cookie 可用（换发不是把自己断掉）
+	withNew := func(r *http.Request) {
+		r.AddCookie(newSess)
+		r.AddCookie(newCSRF)
+		r.Header.Set("X-CSRF-Token", newCSRF.Value)
+	}
+	after := e.do(t, "POST", "/web/session", `{}`, withNew)
 	if after.Code != http.StatusOK {
-		t.Fatalf("改密后本 web 会话应仍可用，得到 %d（%s）", after.Code, after.Body.String())
+		t.Fatalf("换发后的 web 会话应可用，得到 %d（%s）", after.Code, after.Body.String())
 	}
 
 	// 其它会话被踢：App 侧 JWT 当场失效
@@ -493,11 +512,11 @@ func TestWebChangePasswordKeepsCurrentSession(t *testing.T) {
 		uid).Scan(&zombies); err != nil || zombies != 0 {
 		t.Errorf("不该留下无 web_token_hash 的活 web 行，得到 %d (err=%v)", zombies, err)
 	}
-	// 活跃行只有本会话一条（其它都被吊销）
+	// 活跃行只有换发给本会话这一条（旧 web 行与其它设备都被吊销）
 	var active int
 	if err := e.pool.QueryRow(
 		"SELECT COUNT(*) FROM sessions WHERE user_id = ? AND revoked_at IS NULL", uid).Scan(&active); err != nil || active != 1 {
-		t.Errorf("改密后应只剩本会话一条活跃行，得到 %d (err=%v)", active, err)
+		t.Errorf("改密后应只剩换发的 1 条活跃行，得到 %d (err=%v)", active, err)
 	}
 }
 
@@ -640,13 +659,14 @@ func TestAdminAuthzMatrix(t *testing.T) {
 		t.Errorf("后台列表回执应恰为 items,total，得到 %s", got)
 	}
 
-	// ④ 降级自己 → 400（服务端守卫；前端禁用只是提示）
-	rec = e.do(t, "PATCH", "/admin/users/"+strconv.FormatInt(boss, 10), `{"role":"user"}`, withCSRF)
+	// ④ 降级自己 → 400（服务端守卫；前端禁用只是提示）。角色调整唯一入口是
+	//    POST /admin/users/{uid}/role（旧 PATCH /admin/users/{uid} 已并入并删除）
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(boss, 10)+"/role", `{"role":"user"}`, withCSRF)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("降级自己应 400，得到 %d %s", rec.Code, rec.Body.String())
 	}
 	// 给同事升权 → 200，且审计里有 admin.user.role_change
-	rec = e.do(t, "PATCH", "/admin/users/"+strconv.FormatInt(worker, 10), `{"role":"admin"}`, withCSRF)
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(worker, 10)+"/role", `{"role":"admin"}`, withCSRF)
 	if rec.Code != http.StatusOK {
 		t.Errorf("给他人改角色应 200，得到 %d %s", rec.Code, rec.Body.String())
 	}
@@ -725,8 +745,8 @@ func TestAdminConfigNeverLeaksSecret(t *testing.T) {
 
 // ---- 用户档案（GET/PUT /api/profile）----
 
-// 回执形状恰好四字段、Bearer 与 cookie 会话两种凭据都能读写；未登录 401，
-// cookie 进来的非 GET 照吃 CSRF 闸（老端点同款，Bearer 不受影响）。
+// 回执形状恰好五字段（含 W1 的 loginNotify）、Bearer 与 cookie 会话两种凭据都能读写；
+// 未登录 401，cookie 进来的非 GET 照吃 CSRF 闸（老端点同款，Bearer 不受影响）。
 func TestProfileRoutesShapeAndSessionKinds(t *testing.T) {
 	e := newRouteEnv(t)
 	uid := seedUser(t, e, "profile-route@example.com", "secret123", "user")
@@ -741,18 +761,19 @@ func TestProfileRoutesShapeAndSessionKinds(t *testing.T) {
 		t.Errorf("未登录读档案应 401，得到 %d", rec.Code)
 	}
 
-	// 无行 → 默认值，且形状恰好四字段
+	// 无行 → 默认值，且形状恰好五字段（W1 起新增 loginNotify，默认开）
 	rec := e.do(t, "GET", "/api/profile", "", bearer)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("读档案应 200，得到 %d（%s）", rec.Code, rec.Body.String())
 	}
-	if got := keysOf(t, rec.Body.Bytes()); got != "avatarColor,avatarImage,nickname,updatedAt" {
-		t.Errorf("档案回执形状应恰为四字段，得到 %s", got)
+	if got := keysOf(t, rec.Body.Bytes()); got != "avatarColor,avatarImage,loginNotify,nickname,updatedAt" {
+		t.Errorf("档案回执形状应恰为五字段（含 loginNotify），得到 %s", got)
 	}
 	var def struct {
 		Nickname    string  `json:"nickname"`
 		AvatarColor int     `json:"avatarColor"`
 		AvatarImage *string `json:"avatarImage"`
+		LoginNotify bool    `json:"loginNotify"`
 		UpdatedAt   int64   `json:"updatedAt"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &def); err != nil {
@@ -760,6 +781,10 @@ func TestProfileRoutesShapeAndSessionKinds(t *testing.T) {
 	}
 	if def.Nickname != "" || def.AvatarColor != 0 || def.AvatarImage != nil || def.UpdatedAt != 0 {
 		t.Errorf("默认档案应全为零值，得到 %+v", def)
+	}
+	// 新设备登录提醒缺省开（users.login_notify 默认 1）
+	if !def.LoginNotify {
+		t.Error("loginNotify 默认应为 true")
 	}
 
 	// Bearer PUT → GET 往返
@@ -1016,8 +1041,9 @@ func TestRevokeOthersForcesReauthAndAudits(t *testing.T) {
 }
 
 // reauth 窗 = 2 小时且**滑动续期**（GitHub sudo mode 口径）：三道 reauth 闸
-//（reauthThen / reauthed / admin gate）里过闸且成功的敏感操作把 reauth_at 刷到现在，
-// 失败不刷。回拨 90 分钟仍放行（老的 15 分钟窗早已超时），本身也钉住了 2 小时窗。
+//（reauthThen / reauthed / admin gate）里过闸且成功的**非 GET 写操作**把 reauth_at
+// 刷到现在，失败不刷；GET 读操作不续期（W7-1）。回拨 90 分钟仍放行（老的 15 分钟
+// 窗早已超时），本身也钉住了 2 小时窗。
 func TestReauthWindowSlidesOnSensitiveOps(t *testing.T) {
 	e := newRouteEnv(t)
 	uid := seedUser(t, e, "slide-reauth@example.com", "secret123", "user")
@@ -1077,14 +1103,24 @@ func TestReauthWindowSlidesOnSensitiveOps(t *testing.T) {
 		t.Errorf("reauthed 闸的成功操作也应滑动续期，得到 %v 前", age)
 	}
 
-	// ④ admin gate 成功同样滑动（super 身份，cookie + role + MFA + reauth 四道闸全过）
+	// ④ admin gate 的**写**操作滑动（super 身份，cookie + role + MFA + reauth 四道闸全过）；
+	//    GET 读操作不再续期（W7-1）——读列表不该给强认证窗续命
 	sup := makeActor(t, e, "slide-super", "super", nil)
+	supTarget := seedUser(t, e, "slide-target@example.com", "secret123", "user")
+	backdate(sup.uid, 90*time.Minute)
+	rec = e.do(t, "POST", "/admin/users/"+strconv.FormatInt(supTarget, 10)+"/revoke-sessions", `{}`, sup.withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("后台写操作应 200，得到 %d %s", rec.Code, rec.Body.String())
+	}
+	if age := time.Since(time.UnixMilli(reauthAt(sup.uid))); age > time.Minute {
+		t.Errorf("admin 写操作成功应滑动续期 reauth_at，得到 %v 前", age)
+	}
 	backdate(sup.uid, 90*time.Minute)
 	rec = e.do(t, "GET", "/admin/users", "", sup.cookieOnly)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("后台用户列表应 200，得到 %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("后台读操作应 200，得到 %d %s", rec.Code, rec.Body.String())
 	}
-	if age := time.Since(time.UnixMilli(reauthAt(sup.uid))); age > time.Minute {
-		t.Errorf("admin gate 的成功操作也应滑动续期，得到 %v 前", age)
+	if age := time.Since(time.UnixMilli(reauthAt(sup.uid))); age < 89*time.Minute {
+		t.Errorf("GET 读操作不该滑动 reauth_at，得到 %v 前", age)
 	}
 }

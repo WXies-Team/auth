@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -35,15 +38,15 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		})))
 	}
 	// reauthed：在 authed 之上再要一道 2 小时内的强认证（ASVS V7.5.1）。
-	// 401 + 固定文案，前端据此弹「重新验证」框后调 /web/reauth；成功的操作
-	// 顺带滑动续期 reauth_at（slideReauth 的 sudo mode 语义）。
+	// 401 + 固定文案，前端据此弹「重新验证」框后调 /web/reauth；成功的**写**操作
+	// 顺带滑动续期 reauth_at（slideReauth 的 sudo mode 语义；GET 读操作不续期，W7-1）。
 	reauthed := func(scope string, max int, h func(c auth.WebCaller, w http.ResponseWriter, r *http.Request)) http.Handler {
 		return authed(scope, max, func(c auth.WebCaller, w http.ResponseWriter, r *http.Request) {
 			if err := svc.RequireReauth(c.SID); err != nil {
 				writeResult(w, nil, err)
 				return
 			}
-			slideReauth(svc, c.SID, w, func(w http.ResponseWriter) { h(c, w, r) })
+			slideReauth(svc, c.SID, r.Method, w, func(w http.ResponseWriter) { h(c, w, r) })
 		})
 	}
 	// ---- 登录（无登录态，只有 Origin 同源校验：此时没有可搭的 cookie 顺风车）----
@@ -73,6 +76,54 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return
 			}
 			writeLoginResult(svc, w, res)
+		})))))
+
+	// ---- 注销撤销页（W3）：**不挂 withUID**——已登出的用户也要能撤（申请注销时
+	// 全部会话已被吊销），撤销 token 即凭证、不可猜。GET 渲染确认页 / 友好错误页，
+	// POST 提交；两路各吃 IP 10/分 限流。页面 HTML 内嵌在本文件（不进
+	// internal/ui 的模板集——那批文件由并行批次维护，且这页无需登录壳）。
+	mux.Handle("GET /web/delete-cancel", withLogging(limitN("delete-cancel", 10,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token := r.URL.Query().Get("token")
+			if err := svc.CheckDeleteCancel(token); err != nil {
+				writeDeleteCancelPage(w, token, false, errText(err))
+				return
+			}
+			writeDeleteCancelPage(w, token, true, "")
+		}))))
+	mux.Handle("POST /web/delete-cancel", withLogging(limitN("delete-cancel", 10,
+		jsonBody[deleteCancelRequest](func(req *deleteCancelRequest, w http.ResponseWriter, _ *http.Request) {
+			if err := svc.CancelDelete(req.Token); err != nil {
+				writeResult(w, nil, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		}))))
+
+	// ---- 接受邀请（B9）：纯 HTML 表单 POST（零 JS，invite.html 直接 method=post）。
+	// 与登录/OAuth 确认同款守卫组合——无登录态可搭 withUID 的 CSRF 头闸，靠
+	// originGuard（跨站表单必带 Origin，不同源即 403）+ SameSite=Strict 双闸兜底；
+	// 限流 unauthed 15/分/IP（与 GET 同一 web-invite 桶）。成功 = 建号 + 种 web
+	// cookie 302 回控制台（AcceptInvite 内已建会话并单次消费邀请）。
+	mux.Handle("POST /web/invite", withLogging(originGuard(limitN("web-invite", 15,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 表单只有 token/password/nickname 三个字段，8KB 上限足够
+			//（与 OAuth confirm 同款防膨口径：不给匿名端点塞 10MB 默认值的机会）
+			r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+			if err := r.ParseForm(); err != nil {
+				renderInviteError(w, "请求格式不正确，请从邀请邮件重新打开")
+				return
+			}
+			token, password := r.PostFormValue("token"), r.PostFormValue("password")
+			res, err := svc.AcceptInvite(token, password, r.PostFormValue("nickname"), sessMeta(r))
+			if err != nil {
+				// 业务打回就地重渲染：token 仍有效（密码不合规）→ 表单 + 字段下报错；
+				// token 已失效 → 同模板错误变体（renderInvitePage 内部分流）
+				renderInvitePage(svc, w, token, errText(err))
+				return
+			}
+			setWebCookies(w, res.Session)
+			http.Redirect(w, r, "/web/console", http.StatusFound)
 		})))))
 
 	// ---- 会话（当前身份 / 重新验证 / 登出）----
@@ -316,12 +367,123 @@ func writeLoginResult(svc *auth.Service, w http.ResponseWriter, res *auth.WebLog
 		})
 		return
 	}
+	// 契约 4：完成步的回执带两个账号态位（无 omitempty，bool 默认值也要显式出现）
 	if res.App != "" {
-		writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: res.JWT, Email: res.Email})
+		writeJSON(w, http.StatusOK, protocol.AuthResponse{
+			Token: res.JWT, Email: res.Email,
+			MustChangePassword:     res.MustChangePassword,
+			DeletePendingCancelled: res.DeletePendingCancelled,
+		})
 		return
 	}
 	setWebCookies(w, res.Session)
-	writeJSON(w, http.StatusOK, protocol.AuthResponse{Token: "", Email: res.Email})
+	writeJSON(w, http.StatusOK, protocol.AuthResponse{
+		Token: "", Email: res.Email,
+		MustChangePassword:     res.MustChangePassword,
+		DeletePendingCancelled: res.DeletePendingCancelled,
+	})
+}
+
+// deleteCancelRequest 是 POST /web/delete-cancel 的请求体（W3 撤销提交）。
+type deleteCancelRequest struct {
+	Token string `json:"token"`
+}
+
+// errText 把业务错误翻成页面可展示的一句话：HTTPError 取自带文案，其余一律中性
+// 503 白话（根因进 writeResult 的服务端日志，这里不复述）。
+func errText(err error) string {
+	var he *auth.HTTPError
+	if errors.As(err, &he) {
+		return he.Message
+	}
+	return "服务暂时不可用，请稍后重试"
+}
+
+// writeDeleteCancelPage 渲染注销撤销页（W3）：ok=true 是确认页（按钮 → POST →
+// 成功后展示结果 + 登录入口），否则是友好错误页（400 + 一句可执行的下一步）。
+// HTML/CSS/JS 全内嵌：这页没有登录态、不进 internal/ui 的模板集（那批文件由
+// 并行批次维护），也不依赖任何外链资源。
+func writeDeleteCancelPage(w http.ResponseWriter, token string, ok bool, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	const head = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>注销确认</title>
+<style>
+:root { color-scheme: light dark; }
+body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+       background:#f7f7f7; color:#000; font-family:MiSans,-apple-system,"HarmonyOS Sans SC","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif; }
+.card { background:#fff; border-radius:24px; padding:32px 32px 28px; width:100%; max-width:440px; margin:16px;
+        box-shadow:0 8px 32px rgba(0,0,0,.06); }
+h1 { font-size:20px; font-weight:400; margin:0 0 12px; }
+p  { font-size:15px; line-height:1.7; margin:0 0 10px; color:#333; }
+.warn { color:#e94634; }
+.btn { display:block; width:100%; margin-top:20px; padding:13px 0; border:0; border-radius:16px;
+       background:#3482ff; color:#fff; font-size:16px; cursor:pointer; }
+.btn:disabled { opacity:.6; cursor:default; }
+.link { display:inline-block; margin-top:14px; color:#3482ff; text-decoration:none; font-size:15px; }
+.err { color:#e94634; font-size:14px; margin-top:10px; }
+.hidden { display:none; }
+@media (prefers-color-scheme: dark) {
+  body { background:#000; color:#e6ffffff; }
+  .card { background:#242424; box-shadow:none; }
+  p { color:#b4b4b4; }
+}
+</style></head><body><div class="card">`
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		msg := html.EscapeString(message)
+		_, _ = io.WriteString(w, head+`<h1>无法撤销注销</h1>
+<p>`+msg+`</p>
+<a class="link" href="/web/login">前往登录</a>
+</div></body></html>`)
+		return
+	}
+	tokJSON, err := json.Marshal(token)
+	if err != nil {
+		tokJSON = []byte(`""`)
+	}
+	_, _ = io.WriteString(w, head+`<div id="main">
+<h1>注销确认</h1>
+<p>你正在撤销此前提交的注销申请。撤销后账号与数据一切如常，随时可以重新登录。</p>
+<p class="warn">如果不是你本人操作，请撤销后立即修改密码并检查登录设备。</p>
+<button class="btn" id="go">撤销注销</button>
+<p class="err hidden" id="err"></p>
+</div>
+<div class="hidden" id="done">
+<h1>注销已撤销</h1>
+<p>你的注销申请已撤销，账号与数据一切如常。</p>
+<a class="link" href="/web/login">前往登录</a>
+</div>
+<script>
+const TOKEN = ` + string(tokJSON) + `;
+const go = document.getElementById('go');
+go.addEventListener('click', async () => {
+  go.disabled = true; go.textContent = '处理中…';
+  const errEl = document.getElementById('err');
+  try {
+    const res = await fetch('/web/delete-cancel', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: TOKEN})
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      document.getElementById('main').classList.add('hidden');
+      document.getElementById('done').classList.remove('hidden');
+      return;
+    }
+    errEl.textContent = data.message || '撤销失败，请稍后重试';
+  } catch (e) {
+    errEl.textContent = '网络异常，请稍后重试';
+  }
+  errEl.classList.remove('hidden');
+  go.disabled = false; go.textContent = '撤销注销';
+});
+</script>
+</div></body></html>`)
 }
 
 // credentialJSON 把 response 归一成库要的 PublicKeyCredential **对象字节**，
@@ -449,8 +611,14 @@ func (w *statusWriter) WriteHeader(code int) {
 // slideReauth 执行一个受 reauth 闸保护的敏感操作，**成功回执（<400）落笔后**把本
 // 会话 reauth_at 刷到现在：2 小时强认证窗的滑动续期（GitHub sudo mode 口径——
 // 「两次提示之间为 2 小时，期间任何敏感操作都会重置计时器」）。
-// 失败（≥400 / 没写出状态）不刷：刷了等于给爆破者续命，防重放与审计语义都不变。
-func slideReauth(svc *auth.Service, sid int64, w http.ResponseWriter, run func(http.ResponseWriter)) {
+//
+// **W7-1：GET/HEAD/OPTIONS 读操作不续期**——读列表不该给强认证窗续命（滑动只属于
+// 真正动了状态的写操作）；失败（≥400 / 没写出状态）同样不刷：刷了等于给爆破者续命。
+func slideReauth(svc *auth.Service, sid int64, method string, w http.ResponseWriter, run func(http.ResponseWriter)) {
+	if readMethod(method) {
+		run(w)
+		return
+	}
 	sw := &statusWriter{ResponseWriter: w}
 	run(sw)
 	if sw.status >= 200 && sw.status < 400 {
@@ -474,7 +642,7 @@ func reauthThen(svc *auth.Service, h func(auth.Caller, http.ResponseWriter, *htt
 				writeResult(w, nil, err)
 				return
 			}
-			slideReauth(svc, wc.SID, w, func(w http.ResponseWriter) { h(c, w, r) })
+			slideReauth(svc, wc.SID, r.Method, w, func(w http.ResponseWriter) { h(c, w, r) })
 			return
 		}
 		h(c, w, r)

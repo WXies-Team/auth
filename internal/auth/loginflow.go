@@ -44,6 +44,11 @@ type WebLoginResult struct {
 	Status     string
 	LoginToken string
 	Methods    []string
+	// MustChangePassword / DeletePendingCancelled 是登录回执的两个账号态位（契约 4）：
+	// loginGate 回填，路由层 writeLoginResult 原样落进 AuthResponse（强制改密屏 /
+	// 「已撤销注销」提示的依据）。
+	MustChangePassword     bool
+	DeletePendingCancelled bool
 	// usedMethod 是第二步实际用掉的因子（totp / recovery / email_code），给审计落 detail.method 用；
 	// 不进响应体——客户端不需要知道自己刚输的是哪种码。
 	usedMethod string
@@ -103,7 +108,15 @@ type loginStateRow struct {
 //
 // 两支都打 reauth_at：登录即强认证，passkey 注册那道 Bearer reauth 窗靠它（App 登录
 // 拿到的会话行是它唯一的落点）。
+//
+// **loginGate 在最前面**（凭据已在各调用方验过）：封禁 → 项目白名单 → 注销 pending →
+// mustChange，四道按契约顺序在建会话/签 token 之前过完——任一命中这里直接返回，
+// 不留半截会话。
 func (s *Service) completeLogin(uid int64, email, app string, meta SessionMeta) (*WebLoginResult, error) {
+	mustChange, cancelled, err := s.loginGate(uid, app, meta)
+	if err != nil {
+		return nil, err
+	}
 	if app == "" {
 		ws, err := s.CreateWebSession(uid, meta)
 		if err != nil {
@@ -112,7 +125,12 @@ func (s *Service) completeLogin(uid int64, email, app string, meta SessionMeta) 
 		// 密码/验证码/因子刚验过 = 强认证：给新会话记 reauth_at，接下来 2 小时内的
 		// 敏感操作（改密改邮、绑解两步验证、进管理后台）不必再逼用户输一遍。
 		_ = s.MarkReauth(ws.SID)
-		return &WebLoginResult{UID: uid, Email: email, Session: ws, SID: ws.SID}, nil
+		// 新设备登录提醒（W1）：best-effort，失败只 slog 不拦登录
+		s.notifyNewLoginDevice(uid, ws.SID, email, app, meta)
+		return &WebLoginResult{
+			UID: uid, Email: email, Session: ws, SID: ws.SID,
+			MustChangePassword: mustChange, DeletePendingCancelled: cancelled,
+		}, nil
 	}
 	// 兜底：入口处（normalizeLoginApp）已校验过，这里再过一道——app 是 JWT 的 aud，
 	// 白名单外的值一个字节都不签。
@@ -132,7 +150,12 @@ func (s *Service) completeLogin(uid int64, email, app string, meta SessionMeta) 
 		return nil, err
 	}
 	_ = s.MarkReauth(sid)
-	return &WebLoginResult{UID: uid, Email: email, App: app, JWT: token, SID: sid}, nil
+	// 新设备登录提醒（W1）：best-effort，失败只 slog 不拦登录
+	s.notifyNewLoginDevice(uid, sid, email, app, meta)
+	return &WebLoginResult{
+		UID: uid, Email: email, App: app, JWT: token, SID: sid,
+		MustChangePassword: mustChange, DeletePendingCancelled: cancelled,
+	}, nil
 }
 
 // WebLoginPassword 密码登录第一步：验密码 → 无 2FA 直接落会话，有 2FA 发中间态。
@@ -188,6 +211,10 @@ func (s *Service) WebLoginPassword(rawEmail, password string, meta SessionMeta, 
 
 // WebLoginEmailCode 邮箱验证码登录：一路建到底，**不叠 TOTP**（理由见包注释）。
 // 契约里没有 app（这条路只在 Web 台出现），恒走 web 流程。
+//
+// 登录闸（loginGate）与 completeLogin 同款前置；且**登录成功打 reauth_at**——
+// 与另两条 web 登录路合流（W4 定案：登录成功一律刷新强认证窗，强制改密要过
+// reauthThen；早先「邮件通道不算强因子故不合流」的口径由 W1 批推翻）。
 func (s *Service) WebLoginEmailCode(rawEmail, code string, meta SessionMeta) (res *WebLoginResult, err error) {
 	defer func() {
 		s.Audit(AuditEvent{
@@ -200,13 +227,9 @@ func (s *Service) WebLoginEmailCode(rawEmail, code string, meta SessionMeta) (re
 	if err != nil {
 		return nil, err
 	}
-	// 恒走 web 支，但**不打 reauth**：邮件通道不算强因子（与 completeLogin 的
-	// 「登录即强认证」不同口径，这里刻意不合流）。
-	ws, err := s.CreateWebSession(uid, meta)
-	if err != nil {
-		return nil, err
-	}
-	return &WebLoginResult{UID: uid, Email: email, Session: ws, SID: ws.SID}, nil
+	// 与另两条 web 登录路合流到 completeLogin（W1 批重构）：loginGate + 建会话 +
+	// reauth 收口在那一处，新设备登录提醒的接线点也因此一处覆盖全部登录路径。
+	return s.completeLogin(uid, email, "", meta)
 }
 
 // WebLoginTOTP 登录第二步：TOTP 码 / 恢复码 / 邮箱验证码任一验过即落会话。
@@ -292,8 +315,9 @@ func (s *Service) WebLoginTOTP(loginToken, code, recoveryCode, emailCode string,
 			return nil, err
 		}
 		// otp 层回自己的文案（错码/过期/请先获取）并管逐码计数；错码另计入
-		// login state 的共享烧毁计数——三选一是三条通道、不是三份额度
-		if verr := s.otps.verify(PurposeLogin2FA, email, strings.TrimSpace(emailCode)); verr != nil {
+		// login state 的共享烧毁计数——三选一是三条通道、不是三份额度。
+		// 两步验证邮箱码走匿名 SendCode（uid=0），验按 0 收口
+		if verr := s.otps.verify(0, PurposeLogin2FA, email, strings.TrimSpace(emailCode)); verr != nil {
 			if ferr := s.failLoginState(loginToken); ferr != nil {
 				return nil, ferr
 			}

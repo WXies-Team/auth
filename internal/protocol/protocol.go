@@ -65,9 +65,19 @@ type ChangeEmailRequest struct {
 }
 
 // AuthResponse 对应 AuthResponse。
+//
+// MustChangePassword / DeletePendingCancelled 是本批新增的两个**无 omitempty 的
+// bool**（顺序钉死：token, email, mustChangePassword, deletePendingCancelled）：
+// 前者 = 本次登录拿到的账号处于「强制修改密码」态（管理员重置后置位，客户端据此
+// 弹强制改密屏）；后者 = 本次登录是否刚顺手撤销了一笔待执行的注销申请。两个 App
+// 的 kotlinx 序列化都开着 ignoreUnknownKeys=true，旧 APK 多收这两个字段会被安全
+// 忽略——但服务端不省略它们：布尔默认值 false 必须显式出现，客户端才分得清
+// 「字段没发」与「值就是 false」。快照对拍见 protocol_test.go。
 type AuthResponse struct {
-	Token string `json:"token"`
-	Email string `json:"email"`
+	Token                  string `json:"token"`
+	Email                  string `json:"email"`
+	MustChangePassword     bool   `json:"mustChangePassword"`
+	DeletePendingCancelled bool   `json:"deletePendingCancelled"`
 }
 
 // ChangePasswordRequest 对应 ChangePasswordRequest（原密码版改密，老客户端仍走它）。
@@ -82,9 +92,15 @@ type ChangePasswordCodeRequest struct {
 	Password string `json:"password"`
 }
 
-// DeleteAccountRequest 对应 DeleteAccountRequest。
+// DeleteAccountRequest 对应 DeleteAccountRequest：注销申请改为**邮箱验证码**确认
+//（{email, code}，purpose=delete 的 6 位码发到注册邮箱）。
+//
+// 不再收 password：body 里只带 password 的老 APK 请求由路由层翻译成 400
+//「注销流程已更新，请升级应用后使用新版注销流程」（老字段不进本结构体——
+// 快照对拍钉的是新版形状）。
 type DeleteAccountRequest struct {
-	Password string `json:"password"`
+	Email string `json:"email"`
+	Code  string `json:"code"`
 }
 
 // VerifyRequest 是 POST /internal/verify 的请求体：调用方（日记服务的 withUID
@@ -177,20 +193,29 @@ type SessionInfo struct {
 // Nickname 空串 = 未设置；AvatarImage 为 nil（JSON null）= 无头像——日记客户端的
 // avatarImage 是「空串即无头像」的 String，切过来时把 null 映射成 "" 即可。
 // UpdatedAt 是档案最后一次写入的毫秒时间戳，从未写过时为 0（无行时的默认回执）。
+// LoginNotify 是「新设备登录提醒」开关（W1，users.login_notify，默认 true；
+// 日记客户端不识别此字段，ignoreUnknownKeys 天然忽略）。
 type ProfileResponse struct {
 	Nickname    string  `json:"nickname"`
 	AvatarColor int     `json:"avatarColor"`
 	AvatarImage *string `json:"avatarImage"`
 	UpdatedAt   int64   `json:"updatedAt"`
+	LoginNotify bool    `json:"loginNotify"`
 }
 
-// ProfileUpdateRequest 是 PUT /api/profile 的请求体：三字段**全量替换**（没传的字段
-// 等于清空——客户端每次提交完整档案，服务端不做局部合并）。AvatarImage 给 null/缺字段/
-// 空串都表示清除头像（与日记客户端 clearAvatarImage() 的空串语义对齐）。
+// ProfileUpdateRequest 是 PUT /api/profile 的请求体：档案三字段**全量替换**
+//（没传的字段等于清空——客户端每次提交完整档案，服务端不做局部合并）。
+// AvatarImage 给 null/缺字段/空串都表示清除头像（与日记客户端 clearAvatarImage()
+// 的空串语义对齐）。
+//
+// LoginNotify 是唯一的例外：**nil = 不改值**，显式传 true/false 才更新
+//（App 的全量档案提交不带它，不能让「没传」变成「关掉提醒」）。web 账号页的
+// 开关每次 GET 后整份 PUT，带上当前值。
 type ProfileUpdateRequest struct {
 	Nickname    string  `json:"nickname"`
 	AvatarColor int     `json:"avatarColor"`
 	AvatarImage *string `json:"avatarImage"`
+	LoginNotify *bool   `json:"loginNotify,omitempty"`
 }
 
 // ---- Web 自助台 / 管理后台的新端点 DTO ----

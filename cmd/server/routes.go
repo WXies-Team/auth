@@ -92,6 +92,11 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 			return
 		}
 		resp, err := authSvc.ChangePassword(c, req.OldPassword, req.NewPassword)
+		// 契约 5：web cookie 调用者改密成功后**换发**新会话——回执不带凭据
+		//（token 恒空串），凭据经 Set-Cookie 刷新；必须先落 cookie 头再写体
+		if err == nil && resp != nil && resp.Session != nil {
+			setWebCookies(w, resp.Session)
+		}
 		writeResult(w, resp, err)
 	})))
 	// 改密码的验证码版：发码端点收件人由 **uid 查库**决定，客户端传不了收件人——
@@ -106,6 +111,11 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 			return
 		}
 		resp, err := authSvc.ChangePasswordByCode(c, req.Code, req.Password)
+		// 与 /auth/change-password 同款换发：web 会话改密也走 Set-Cookie 刷新
+		//（旧 cookie 行已随全吊销判死，不刷就把用户断在门外）
+		if err == nil && resp != nil && resp.Session != nil {
+			setWebCookies(w, resp.Session)
+		}
 		writeResult(w, resp, err)
 	})))
 	// 改邮箱：发码与提交都按 uid 限流。码发到**新**邮箱（purpose=email_change，
@@ -126,14 +136,25 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 		}
 		writeResult(w, map[string]bool{"ok": true}, authSvc.ChangeEmail(c, req.Password, req.Email, req.Code))
 	})))
+	// 注销申请（W3 七天宽限，契约 2 新 body {email, code}）：**一个数据都不删**——
+	// 置 pending、杀全部会话、发带撤销链接的确认信，7 天内可撤、到期由清扫执行。
+	// 老 APK 的旧 body（只有 password）→ 400 指引升级；审计（account.delete_requested）
+	// 在业务层 RequestAccountDeletion 里记，路由层不再补。
 	mux.Handle("POST /auth/delete", authedLimited("delete-account", 10, func(c auth.Caller, w http.ResponseWriter, r *http.Request) {
-		var req protocol.DeleteAccountRequest
+		var req struct {
+			protocol.DeleteAccountRequest
+			// Password 只为识别老协议 body：新 DTO 已无此字段，用指针区分
+			// 「没带」与「带了」——老 APK 的 {password} 原样命中升级提示。
+			Password *string `json:"password"`
+		}
 		if !decodeOr400(w, r, &req) {
 			return
 		}
-		err := authSvc.DeleteAccount(c.UID, req.Password)
-		auditRoute(authSvc, auth.AuditAccountDelete, &c, r, nil, err)
-		writeResult(w, map[string]bool{"ok": true}, err)
+		if req.Password != nil && req.Email == "" {
+			writeError(w, http.StatusBadRequest, "注销流程已更新，请升级应用后使用新版注销流程")
+			return
+		}
+		writeResult(w, map[string]bool{"ok": true}, authSvc.RequestAccountDeletion(c, req.Email, req.Code))
 	}))
 
 	// ---- 已登录设备（会话管理）----
@@ -286,4 +307,5 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	registerPageRoutes(mux, authSvc)
 	registerWebRoutes(mux, authSvc)
 	registerAdminRoutes(mux, authSvc)
+	registerOAuthRoutes(mux, authSvc)
 }

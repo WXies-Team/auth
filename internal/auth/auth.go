@@ -26,9 +26,9 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -86,17 +86,25 @@ func (e *HTTPError) Error() string { return e.Message }
 func badRequest(msg string) error   { return &HTTPError{400, msg} }
 func unauthorized(msg string) error { return &HTTPError{401, msg} }
 
-// Response 是 /auth/register 与 /auth/login 的响应体，字段名与 AuthResponse 一致。
+// Response 是 /auth/register 与 /auth/login 的响应体，字段名与 AuthResponse 一致
+//（token, email, mustChangePassword, deletePendingCancelled，顺序逐字同步）。
+//
+// Session 只在 **web cookie 调用者的改密换发**里非空（json:"-" 不进回执）：路由层
+// 据它 Set-Cookie 刷新 web 会话——凭据轮换是传输层的事，不改变回执形状。
 type Response struct {
-	Token string `json:"token"`
-	Email string `json:"email"`
+	Token                  string      `json:"token"`
+	Email                  string      `json:"email"`
+	MustChangePassword     bool        `json:"mustChangePassword"`
+	DeletePendingCancelled bool        `json:"deletePendingCancelled"`
+	Session                *WebSession `json:"-"`
 }
 
 // Mailer 是发信能力的最小接口：生产用 internal/mail 的 Graph 实现，测试注入假实现
 // （这样真库测试不会往外真发信）。fromName 是这封信的发件人显示名（品牌名，见
-// brandFor）——与正文品牌同源取值，分头各传一套必然漂。
+// brandFor）——与正文品牌同源取值，分头各传一套必然漂。text 是 HTML 的忠实纯文本
+// 降级（模板逐封给出），与 html 一起拼进 multipart/alternative。
 type Mailer interface {
-	Send(ctx context.Context, fromName, to, subject, html string) error
+	Send(ctx context.Context, fromName, to, subject, html, text string) error
 }
 
 // Caller 是已验签会话的身份信息：路由层验完放进 context，业务层直接用——
@@ -140,9 +148,15 @@ type Service struct {
 	// credBySID 记「本会话用哪把 Passkey 登录」（列表页 current 标记），见 passkey.go。
 	credBySIDMu sync.RWMutex
 	credBySID   map[int64]string
+	// oauthStore 是 OAuth 授权事务 / 授权码的进程内内存态（单实例假设，
+	// 与 cmd/server 的滑动限流同口径），见 oauth.go。
+	oauthStore *oauthStore
 	// enforceCfg 读 totp_enforce_apps（老客户端密码登录的兼容开关，默认空=不拦）。
 	// nil 时恒放行（测试形态与「配置还没接」的形态一致）。
 	enforceCfg ConfigFunc
+	// rootUID 是启动时解析的根 su（RootSuperEmail → uid，W7-2）：0=尚未解析成功，
+	// isRootSuper/isRootAccount 回退邮箱比对并由 resolveRootSuper 打日志。
+	rootUID atomic.Int64
 }
 
 // SetEnforceApps 注入兼容开关的配置读取器（生产传 cfg.Require，测试不设即全放行）。
@@ -207,11 +221,16 @@ func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks, wa 
 	if err != nil {
 		return nil, err
 	}
-	return &Service{
+	svc := &Service{
 		pool: pool, secret: jwtSecret, ids: node, otps: &otpStore{pool: pool},
 		mailer: mailer, hooks: hooks,
 		totpKey: totpKey, recoveryPepper: deriveRecoveryPepper(jwtSecret), wa: wa,
-	}, nil
+		oauthStore: newOAuthStore(),
+	}
+	// 启动即解析根 su 的 uid（W7-2）：root 换绑邮箱不再失权；失败回退邮箱比对
+	//（resolveRootSuper 内打 Error 日志，isRootSuper 还会惰性补解析）。
+	svc.resolveRootSuper()
+	return svc, nil
 }
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
@@ -410,10 +429,22 @@ func (s *Service) Verify(bearer, expectApp string) (*VerifyResult, error) {
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return nil, unauthorized("登录已过期，请重新登录")
 	}
-	stored, err := s.tokenVersion(uid)
+	// email 从**库**取而不是信 claim（B5 管理员换邮的最小改动）：管理员更换邮箱
+	// 不 bump token_version（会话全保留），老 token 的 email claim 会停在旧值——
+	// 下游日记 App 靠本回执显示邮箱，取 claim 就会一直显示到 token 过期为止。
+	// uid 是权威标识（Entra uid-权威口径），ver 与 email 同一条查询取回。
+	var stored int
+	var dbEmail string
+	err = s.pool.QueryRowContext(context.Background(),
+		"SELECT token_version, email FROM users WHERE id = ?", uid).Scan(&stored, &dbEmail)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, unauthorized("登录已过期，请重新登录")
+	}
 	if err != nil {
 		return nil, &HTTPError{503, "服务暂时不可用，请稍后重试"}
 	}
+	_ = email // claim 邮箱只作 token 形状校验（老 token 必带），回执一律用库值
+	email = dbEmail
 	if stored != int(ver) {
 		return nil, unauthorized("登录已过期，请重新登录")
 	}
@@ -423,6 +454,12 @@ func (s *Service) Verify(bearer, expectApp string) (*VerifyResult, error) {
 	}
 	if !alive {
 		return nil, unauthorized("登录已过期，请重新登录")
+	}
+	// 封禁与项目白名单在下游入口同样生效（W2/W5）：会话建好后被封/项目开限制的
+	// 老 token 在这里当场 403，body 与其它 verify 错误同形（ApiError {message}）。
+	// 强制改密**不拦**——由客户端 UI 强制，别让 App 强制屏还没出就被登出（W4）。
+	if err := s.denyReason(uid, aud[0]); err != nil {
+		return nil, err
 	}
 	return &VerifyResult{UID: uid, Email: email, App: aud[0]}, nil
 }
@@ -479,7 +516,8 @@ func (s *Service) Register(rawEmail, password, code, app string, meta SessionMet
 	if exists {
 		return nil, badRequest("该邮箱已注册，请直接登录")
 	}
-	if err := s.otps.verify(PurposeRegister, email, code); err != nil {
+	// 匿名路（/auth/send-code 发的注册码）：发码时无登录态，归属 uid=0，验也按 0
+	if err := s.otps.verify(0, PurposeRegister, email, code); err != nil {
 		return nil, err
 	}
 	// 码已验过，此后任何失败（bcrypt/建库错）都撤销活跃代：verify 成功时已烧代
@@ -488,7 +526,7 @@ func (s *Service) Register(rawEmail, password, code, app string, meta SessionMet
 	//（回归：TestRegisterFailureAfterVerifyAllowsImmediateResend）。
 	defer func() {
 		if err != nil {
-			s.otps.revoke(PurposeRegister, email)
+			s.otps.revoke(0, PurposeRegister, email)
 		}
 	}()
 	// bcrypt 放到所有校验之后：前几步失败时不必白烧一次百毫秒的 cost12
@@ -636,15 +674,28 @@ func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (resp 
 	if s.enforceTOTPFor(app, uid) {
 		return nil, &HTTPError{401, "请升级应用后使用新版登录"}
 	}
+	// 凭据过了才走三道登录闸（顺序钉死：封禁 → 项目白名单 → 注销 pending → mustChange）
+	mustChange, cancelled, err := s.loginGate(uid, app, meta)
+	if err != nil {
+		return nil, err
+	}
 	sid, err := s.createSession(uid, app, meta)
 	if err != nil {
 		return nil, err
 	}
+	// 登录即强认证：打 reauth 窗，强制改密（reauthThen）与 passkey 注册的 Bearer
+	// reauth 都靠它（W4 定案：登录成功必刷 reauth_at）
+	_ = s.MarkReauth(sid)
+	// 新设备登录提醒（W1）：best-effort，失败只 slog 不拦登录
+	s.notifyNewLoginDevice(uid, sid, normalizeEmail(rawEmail), app, meta)
 	tok, err := s.createToken(uid, normalizeEmail(rawEmail), app, version, sid)
 	if err != nil {
 		return nil, err
 	}
-	return &Response{Token: tok, Email: normalizeEmail(rawEmail)}, nil
+	return &Response{
+		Token: tok, Email: normalizeEmail(rawEmail),
+		MustChangePassword: mustChange, DeletePendingCancelled: cancelled,
+	}, nil
 }
 
 // checkPassword 校验邮箱+密码，回 uid 与当前 token_version。
@@ -692,7 +743,7 @@ func (s *Service) checkPassword(rawEmail, password string) (int64, int, error) {
 	return id, version, nil
 }
 
-// SendCode 发送「注册 / 找回密码 / 登录 / 登录两步验证」验证码。purpose 走白名单。
+// SendCode 发送「注册 / 找回密码 / 登录 / 登录两步验证 / 注销」验证码。purpose 走白名单。
 //
 // app 可选：给了就决定这封验证码邮件的品牌（空 = 中性品牌 Auth，留给将来的 web
 // 账号台），未知值 400——与登录等端点同口径，老客户端不传照常工作。
@@ -702,6 +753,13 @@ func (s *Service) checkPassword(rawEmail, password string) (int64, int, error) {
 //
 // **不额外做防枚举是有意的**：注册侧本就对所有请求回「该邮箱已注册」（既有行为），
 // 同一信息在找回侧保持沉默换不来任何防护，只换来「等 60 秒却收不到信」的困惑。
+//
+// ============================ 定案（OWASP 终检 2026-10-21）============================
+// login_2fa 的差异化回执（未注册「邮箱未注册，请先注册」vs 已注册未开 2FA
+// 「该账号未开启两步验证」）是**接受的低危枚举面**，与上面注册态披露同理由：
+// 攻击者能枚举的只有「该邮箱注册过且没开两步验证」，而注册态本身已由本函数全量
+// 披露——在这条路上补沉默换不来任何防护，只会让真实用户白等 60 秒后收到一封本
+// 不该发的信。**不改行为**，本注释即定案记录；要收紧就与注册态披露一起收紧。
 func (s *Service) SendCode(rawEmail, purpose, app string) error {
 	// app 是客户端 bug 的第一现场，先于邮箱/用途校验回 400（与 Login 的顺序一致）
 	if app != "" {
@@ -713,9 +771,8 @@ func (s *Service) SendCode(rawEmail, purpose, app string) error {
 	if err := validateEmail(email); err != nil {
 		return err
 	}
-	if purpose != PurposeRegister && purpose != PurposeReset &&
-		purpose != PurposeLogin && purpose != PurposeLogin2FA {
-		return badRequest("参数不正确")
+	if err := validateCodePurpose(purpose); err != nil {
+		return err
 	}
 	if s.mailer == nil {
 		return &HTTPError{503, "邮件服务暂不可用，请稍后重试"}
@@ -733,6 +790,11 @@ func (s *Service) SendCode(rawEmail, purpose, app string) error {
 	}
 	if purpose == PurposeLogin && !exists {
 		return badRequest("邮箱未注册，请先注册")
+	}
+	// 注销确认码：邮箱必须已注册（不存在 → 不发码）。已有 pending 也照发——
+	// 重复申请注销要能覆盖旧申请的到期时间。
+	if purpose == PurposeDelete && !exists {
+		return badRequest("该邮箱尚未注册")
 	}
 	if purpose == PurposeLogin2FA {
 		if !exists {
@@ -759,26 +821,43 @@ func (s *Service) SendCode(rawEmail, purpose, app string) error {
 		action = "登录"
 	case PurposeLogin2FA:
 		action = "登录两步验证"
+	case PurposeDelete:
+		action = "注销账号"
 	}
-	return s.sendOTP(purpose, email, action, app)
+	// /auth/send-code 无登录态，五种匿名用途的码不归属任何账号（uid=0）——
+	// 归属 uid 只在登录态的两条发码路（SendChangeCode / SendChangeEmailCode）写入
+	return s.sendOTP(0, purpose, email, action, app)
+}
+
+// validateCodePurpose 是 /auth/send-code 的 purpose 白名单（契约 3 的五值）。
+// 抽成独立判定：TestDiaryCodePurposeMatchesServerWhitelist 用它对拍日记侧
+// CodePurpose 常量集——白名单漂了客户端发的 purpose 会直接吃 400。
+func validateCodePurpose(purpose string) error {
+	switch purpose {
+	case PurposeRegister, PurposeReset, PurposeLogin, PurposeLogin2FA, PurposeDelete:
+		return nil
+	default:
+		return badRequest("参数不正确")
+	}
 }
 
 // sendOTP 公共发码尾段：占坑（issue，冷却与日限额在**发信之前**就挡）→ 投信 →
 // 信没发出去回滚。注册 / 找回密码 / 修改密码三条发码路共用；app 只用来选邮件品牌。
-func (s *Service) sendOTP(purpose, email, action, app string) error {
+// uid 是码的账号归属（见 otpStore.issue）：匿名路传 0，登录态路传真 uid。
+func (s *Service) sendOTP(uid int64, purpose, email, action, app string) error {
 	if s.mailer == nil {
 		return &HTTPError{503, "邮件服务暂不可用，请稍后重试"}
 	}
-	code, err := s.otps.issue(purpose, email)
+	code, err := s.otps.issue(uid, purpose, email)
 	if err != nil {
 		return err
 	}
 	b := brandFor(app)
-	subject, html := codeEmail(b, action, code)
+	subject, htmlBody, text := codeEmail(b, action, code)
 	// 不接请求 ctx：发送器自带 15s 超时（含取 token 一次往返），不会把 handler 拖成悬挂
-	if err := s.mailer.Send(context.Background(), b.name, email, subject, html); err != nil {
+	if err := s.mailer.Send(context.Background(), b.name, email, subject, htmlBody, text); err != nil {
 		// 码已生成但信没发出去：撤销，否则用户要白等 60 秒冷却
-		s.otps.revoke(purpose, email)
+		s.otps.revoke(uid, purpose, email)
 		mailLog(err, purpose, email)
 		return &HTTPError{503, "验证码发送失败，请稍后重试"}
 	}
@@ -793,7 +872,7 @@ func (s *Service) SendChangeCode(c Caller) error {
 	if err != nil {
 		return err
 	}
-	return s.sendOTP(PurposeChange, email, "修改密码", c.App)
+	return s.sendOTP(c.UID, PurposeChange, email, "修改密码", c.App)
 }
 
 // SendChangeEmailCode 给**新**邮箱发「修改邮箱」验证码。收件人是客户端传入的新邮箱，
@@ -819,10 +898,12 @@ func (s *Service) SendChangeEmailCode(c Caller, rawEmail string) error {
 	if exists {
 		return badRequest("该邮箱已被其他账号使用")
 	}
-	return s.sendOTP(PurposeChangeEmail, email, "修改邮箱", c.App)
+	return s.sendOTP(c.UID, PurposeChangeEmail, email, "修改邮箱", c.App)
 }
 
 // LoginByEmailCode 用邮箱验证码登录：与 Login 同款成功响应（token + email）。
+// 登录闸与建会话收口在 completeLogin（W1 批重构，与 WebLoginPassword 合流），
+// 新设备登录提醒的接线点随之统一。
 //
 // purpose 进 key，注册/找回/登录三种码互不串用——拿注册码来这里登录会得到
 // 「验证码已过期」。**未注册先于验码返回**：没发过码的邮箱若先验码只会回
@@ -840,19 +921,20 @@ func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta)
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
-	uid, version, email, err := s.checkLoginCode(rawEmail, code)
+	uid, _, email, err := s.checkLoginCode(rawEmail, code)
 	if err != nil {
 		return nil, err
 	}
-	sid, err := s.createSession(uid, app, meta)
+	// 与另两条 web 登录路合流到 completeLogin（W1 批重构）：loginGate + 建会话 +
+	// reauth 收口在那一处，新设备登录提醒的接线点也因此一处覆盖全部登录路径。
+	res, err := s.completeLogin(uid, email, app, meta)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := s.createToken(uid, email, app, version, sid)
-	if err != nil {
-		return nil, err
-	}
-	return &Response{Token: tok, Email: email}, nil
+	return &Response{
+		Token: res.JWT, Email: res.Email,
+		MustChangePassword: res.MustChangePassword, DeletePendingCancelled: res.DeletePendingCancelled,
+	}, nil
 }
 
 // checkLoginCode 校验「登录」用途的邮箱验证码，回 uid / token_version / 归一化邮箱。
@@ -875,7 +957,9 @@ func (s *Service) checkLoginCode(rawEmail, code string) (int64, int, string, err
 	if err != nil {
 		return 0, 0, "", fmt.Errorf("查用户: %w", err)
 	}
-	if err := s.otps.verify(PurposeLogin, email, code); err != nil {
+	// 登录码是匿名路发的（uid=0），验按 0 收口——码绑定的是「当时输入的邮箱」，
+	// 不绑定账号（此步还不知道是谁）
+	if err := s.otps.verify(0, PurposeLogin, email, code); err != nil {
 		return 0, 0, "", err
 	}
 	return id, version, email, nil
@@ -901,14 +985,15 @@ func (s *Service) ResetPassword(rawEmail, code, newPassword string) error {
 	if err != nil {
 		return fmt.Errorf("查用户: %w", err)
 	}
-	if err := s.otps.verify(PurposeReset, email, code); err != nil {
+	// 找回密码码是匿名路发的（uid=0），验也按 0——这一步还没建立登录态
+	if err := s.otps.verify(0, PurposeReset, email, code); err != nil {
 		return err
 	}
 	newHash, err := hash(newPassword)
 	if err != nil {
 		return err
 	}
-	return s.setPasswordAndRevoke(uid, newHash, 0)
+	return s.setPasswordAndRevoke(uid, newHash)
 }
 
 // Logout 递增 token_version——**这是 token 层吊销的唯一机制**：所有已签发 token 的
@@ -956,11 +1041,16 @@ func (s *Service) loadUserAuth(userID int64) (email, hashed string, err error) {
 //（与 Logout/注销同一套机制）。改密的三条路——原密码、验证码、找回密码——共用这一处，
 // 「改密必吊销」不会在某条路上漏掉。
 //
-// 同一事务里把全部会话行也置 revoked_at：token 层判死的那批设备，会话行若留着，
+// **同一事务里把全部会话行也置 revoked_at**：token 层判死的那批设备，会话行若留着，
 // 设备列表就是一列没有 token 的活死行（找回密码最明显——用户重登拿到新会话，
-// 旧行永远挂着没人踢得掉）。换发的新会话由 reissueToken 另建（找回密码没有换发）。
-// keepSID > 0 时该行保活：web 会话改密走这条（cookie 不换发，续用当前行）。
-func (s *Service) setPasswordAndRevoke(userID int64, newHash string, keepSID int64) error {
+// 旧行永远挂着没人踢得掉）。**全吊销、不保活任何一行**（W3/W4 批定案）：web 改密
+// 也换发——reissueToken 给当前设备建新行并由路由层 Set-Cookie（见契约 5），
+// 旧行必须死透才叫换发。
+//
+// **顺带清 password_must_change（W4）**：用户自己改掉密码 = 强制改密态结束，清零
+// 收在这一处，三条改密路不会漏；管理员重置（AdminResetPassword）**不走这里**——
+// 它按 forceChange 显式置位。
+func (s *Service) setPasswordAndRevoke(userID int64, newHash string) error {
 	ctx := context.Background()
 	tx, err := s.pool.BeginTx(ctx, nil)
 	if err != nil {
@@ -969,11 +1059,11 @@ func (s *Service) setPasswordAndRevoke(userID int64, newHash string, keepSID int
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?",
+		"UPDATE users SET password_hash = ?, token_version = token_version + 1, password_must_change = 0 WHERE id = ?",
 		newHash, userID); err != nil {
 		return fmt.Errorf("改密: %w", err)
 	}
-	if err := revokeUserSessions(ctx, tx, userID, keepSID, nil); err != nil {
+	if err := revokeUserSessions(ctx, tx, userID, 0, nil); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -982,20 +1072,20 @@ func (s *Service) setPasswordAndRevoke(userID int64, newHash string, keepSID int
 	return nil
 }
 
-// reissueToken 读吊销后的新版本号并换发 token：当前设备拿它无缝续用，
-// 其他设备的旧 ver 已对不上（被登出的只会是它们）。aud 沿用调用方现会话的 app。
+// reissueToken 读吊销后的新版本号并换发凭据：当前设备拿它无缝续用，其他设备的旧
+// ver 已对不上（被登出的只会是它们）。aud 沿用调用方现会话的 app。
 //
-// **web 会话（app='web'）不换发**：cookie 值即会话凭据本身，当前行已由
-// setPasswordAndRevoke 的 keepSID 保活，cookie 继续有效；给它签 JWT 毫无意义
-//（aud='web' 不在白名单，签出来就是一枚谁也不认的死 token）。回体形状保持
-// {token,email}，token 恒空串——凭据只在 cookie 里。
+// **web 会话（app='web'）也换发（契约 5）**：旧行已由 setPasswordAndRevoke 全吊销，
+// 这里建一行新会话并把双 token 放进 Response.Session（json:"-"，回执形状不变），
+// 路由层据它 Set-Cookie 刷新——回体 token 恒空串（aud='web' 的 JWT 谁也不认）。
+// 新会话行同步打 reauth_at：改密是强认证动作，而 slideReauth 想刷的旧行已经死了。
 //
 // 邮箱从**库**取而不是沿用 token claim：改绑邮箱不 bump token_version，走到这里的
 // token 其 email claim 可能还是旧值——把旧邮箱签回新 token，会让「验证码收与验
 // 同源」在下一轮改密时再次断开（改绑后验证码改密失败的另一半就在这里）。
 //
 // 旧会话行已由 setPasswordAndRevoke 同批吊销（token 层与会话层一起走），
-// 这里只给本设备建一行新会话，换发的 token 绑它。
+// 这里只给本设备建一行新会话，换发的 token/cookie 绑它。
 func (s *Service) reissueToken(c Caller) (*Response, error) {
 	var next int
 	var email string
@@ -1004,7 +1094,12 @@ func (s *Service) reissueToken(c Caller) (*Response, error) {
 		return nil, fmt.Errorf("读新版本号: %w", err)
 	}
 	if c.App == webAppLabel {
-		return &Response{Token: "", Email: email}, nil
+		ws, err := s.CreateWebSession(c.UID, c.Meta)
+		if err != nil {
+			return nil, err
+		}
+		_ = s.MarkReauth(ws.SID)
+		return &Response{Token: "", Email: email, Session: ws}, nil
 	}
 	sid, err := s.createSession(c.UID, c.App, c.Meta)
 	if err != nil {
@@ -1014,21 +1109,18 @@ func (s *Service) reissueToken(c Caller) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = s.MarkReauth(sid)
 	return &Response{Token: tok, Email: email}, nil
 }
 
-// changeKeepSID 是改密时**保活**的会话行 id：web 会话保当前行（cookie 不换发，
-// 续用；不留 app='web' 无 web_token_hash 的僵尸行）；App 会话回 0 = 全吊销后
-// 由 reissueToken 另建新行换新 JWT。
-func changeKeepSID(c Caller) int64 {
-	if c.App == webAppLabel {
-		return c.SID
-	}
-	return 0
-}
-
-// ChangePassword 校验旧密码、改密并**顺带吊销**（版本 +1），返回新 token 让当前设备继续用。
-// App 会话换发新 JWT；web 会话不换发（token 恒空串、当前行保活，凭据只在 cookie，见 reissueToken）。
+// ChangePassword 校验旧密码、改密并**顺带吊销**（版本 +1），返回新凭据让当前设备继续用。
+// App 会话换发新 JWT；web 会话换发新会话行（token 恒空串，路由层 Set-Cookie 刷新，
+// 见 reissueToken）。成功后发「密码已修改」确认邮件（W8，Okta 口径：时间 + 入口，
+// 不含密码）——信没发出去只记日志，不把改密回滚成 500。
+//
+// **oldPassword 可传空的唯一场景（契约 5）**：账号处于 password_must_change=1 且
+// 本会话在 2 小时强认证窗内——管理员重置了临时密码、而 passkey 登录者根本不知道
+// 那串密码，两条都成立才放行；flag 没置位或窗已过，空串照旧 400「原密码不正确」。
 func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (resp *Response, err error) {
 	// 改密是安全敏感操作：成败必记（ASVS V16.3）。detail 不带任何口令字段。
 	defer func() {
@@ -1040,30 +1132,49 @@ func (s *Service) ChangePassword(c Caller, oldPassword, newPassword string) (res
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
 	}
-	if len(oldPassword) > maxPasswordB {
-		return nil, badRequest("原密码不正确")
-	}
-	_, hashed, err := s.loadUserAuth(c.UID)
-	if err != nil {
-		return nil, err
-	}
-	if !verify(oldPassword, hashed) {
-		return nil, badRequest("原密码不正确")
+	if strings.TrimSpace(oldPassword) == "" {
+		mustChange, merr := s.passwordMustChange(c.UID)
+		if merr != nil {
+			return nil, merr
+		}
+		if !mustChange {
+			return nil, badRequest("原密码不正确")
+		}
+		// 窗判定放行前：不是「强认证过的会话」不给免原密码通道
+		if err := s.RequireReauth(c.SID); err != nil {
+			return nil, err
+		}
+	} else {
+		if len(oldPassword) > maxPasswordB {
+			return nil, badRequest("原密码不正确")
+		}
+		_, hashed, lerr := s.loadUserAuth(c.UID)
+		if lerr != nil {
+			return nil, lerr
+		}
+		if !verify(oldPassword, hashed) {
+			return nil, badRequest("原密码不正确")
+		}
 	}
 	newHash, err := hash(newPassword)
 	if err != nil {
 		return nil, err
 	}
-	// web 会话保活当前行、App 会话全吊销后换发（见 changeKeepSID / reissueToken）
-	if err := s.setPasswordAndRevoke(c.UID, newHash, changeKeepSID(c)); err != nil {
+	// 全吊销后按调用方形态换发（web 建新行 + Set-Cookie，App 签新 JWT，见 reissueToken）
+	if err := s.setPasswordAndRevoke(c.UID, newHash); err != nil {
 		return nil, err
 	}
-	return s.reissueToken(c)
+	resp, err = s.reissueToken(c)
+	if err != nil {
+		return nil, err
+	}
+	s.notifyPasswordChanged(resp.Email)
+	return resp, nil
 }
 
 // ChangePasswordByCode 改密码的验证码版：码经 [SendChangeCode] 发进**账号当前绑定的
-// 邮箱**，验证通过即改密并 token_version+1 吊销其他设备；当前设备拿返回的新 token
-// 无缝续用（与 ChangePassword 同一契约）。
+// 邮箱**，验证通过即改密并 token_version+1 吊销其他设备；当前设备拿返回的新凭据
+// 无缝续用（与 ChangePassword 同一契约，含「密码已修改」确认邮件）。
 // 强度校验放在验码之前：先拒弱密码、不白烧一次码的试错次数。
 func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (resp *Response, err error) {
 	defer func() {
@@ -1083,17 +1194,24 @@ func (s *Service) ChangePasswordByCode(c Caller, code, newPassword string) (resp
 	if err != nil {
 		return nil, err
 	}
-	if err := s.otps.verify(PurposeChange, email, code); err != nil {
+	// 归属校验：改密码只经 authed 的 SendChangeCode 发出（uid=c.UID），验也按
+	// 同一 uid——别的账号手里同邮箱段的码在这里必然查无行
+	if err := s.otps.verify(c.UID, PurposeChange, email, code); err != nil {
 		return nil, err
 	}
 	newHash, err := hash(newPassword)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.setPasswordAndRevoke(c.UID, newHash, changeKeepSID(c)); err != nil {
+	if err := s.setPasswordAndRevoke(c.UID, newHash); err != nil {
 		return nil, err
 	}
-	return s.reissueToken(c)
+	resp, err = s.reissueToken(c)
+	if err != nil {
+		return nil, err
+	}
+	s.notifyPasswordChanged(resp.Email)
+	return resp, nil
 }
 
 // ChangeEmail 改绑邮箱：当前密码重验 → 新邮箱验证码 → 更新 users.email →
@@ -1136,7 +1254,10 @@ func (s *Service) ChangeEmail(c Caller, password, rawEmail, code string) (err er
 	if !verify(password, hashed) {
 		return badRequest("原密码不正确")
 	}
-	if err := s.otps.verify(PurposeChangeEmail, email, code); err != nil {
+	// 归属校验（FX5）：改邮码只经 authed 的 SendChangeEmailCode 发出（uid=c.UID），
+	// 验按同一 uid 收口——两个账号可以同时申请改成同一个空闲地址，A 拿 B 那代
+	// 申请地址的码在这里查无行（码只对发出它的账号可用）
+	if err := s.otps.verify(c.UID, PurposeChangeEmail, email, code); err != nil {
 		return err
 	}
 	if _, err := s.pool.ExecContext(context.Background(),
@@ -1164,20 +1285,38 @@ func (s *Service) notifyEmailChanged(app, oldEmail, newEmail string) {
 		addr  string
 		toNew bool
 	}{{oldEmail, false}, {newEmail, true}} {
-		subject, body := changeEmailNoticeEmail(b, to.toNew, oldEmail, newEmail)
-		if err := s.mailer.Send(context.Background(), b.name, to.addr, subject, body); err != nil {
+		subject, htmlBody, text := changeEmailNoticeEmail(b, to.toNew, oldEmail, newEmail)
+		if err := s.mailer.Send(context.Background(), b.name, to.addr, subject, htmlBody, text); err != nil {
 			mailLog(err, "email_change_notice", to.addr)
 		}
 	}
 }
 
-// DeleteAccount 注销：先让两个日记服务清掉各自的业务数据，再删本服务持有的数据
-// （账号行 + 验证码行）。
+// notifyPasswordChanged 是自助改密成功后的确认信（W8 第 2 封，Okta 口径：时间 +
+// 入口，不含密码）。品牌恒中性 Auth（契约钉死 subject 前缀【Auth】）——账号级通知
+// 不借任何 App 的名头。信没发出去只记日志：改密已完成，不该回滚成 500。
+func (s *Service) notifyPasswordChanged(email string) {
+	if s.mailer == nil {
+		return
+	}
+	b := brandFor("")
+	subject, htmlBody, text := passwordChangedNoticeEmail(b, time.Now())
+	if err := s.mailer.Send(context.Background(), b.name, email, subject, htmlBody, text); err != nil {
+		mailLog(err, "password_changed_notice", email)
+	}
+}
+
+// DeleteAccount 是**密码确认版注销**（先验密码再执行）：校验通过后把钩子 + 清库
+// 主体交给可复用的 [purgeAccount]。
 //
 // **顺序不能反**：auth 侧的行删了，日记侧按 uid 关联的业务数据就成了查无账号的孤儿，
 // 而且没有任何东西会再去清它们。所以钩子全成功才开本服务的事务；任一钩子失败整个
 // 注销中止、auth 行一字不动（用户稍后重试即可）。钩子的配置与调用细节见 [Hooks]。
 // 账号服务仍然不连别的库——跨库删数据是权限与耦合的双重坏味道，清理由 HTTP 钩子完成。
+//
+// **端点已改走 W3 宽限流程**（POST /auth/delete → [RequestAccountDeletion]），
+// 本方法不再被路由调用：留着它是因为「密码确认即注销」这条语义本身仍有调用方
+// （真库用例与可能的内部自助流程），且它正是 purgeAccount 的密码闸包装。
 func (s *Service) DeleteAccount(userID int64, password string) error {
 	if len(password) > maxPasswordB {
 		return badRequest("密码不正确")
@@ -1195,71 +1334,9 @@ func (s *Service) DeleteAccount(userID int64, password string) error {
 	if !hashed.Valid || !verify(password, hashed.String) {
 		return badRequest("密码不正确")
 	}
-
 	// 钩子排在密码校验之后：密码写错时**一个钩子都不该打**——否则随手一次输错密码
 	// 就把用户在两个日记里的数据清了，而账号还在。
-	if s.hooks != nil {
-		if err := s.hooks.BeforeDelete(userID, email); err != nil {
-			return err
-		}
-	}
-
-	tx, err := s.pool.BeginTx(context.Background(), nil)
-	if err != nil {
-		return fmt.Errorf("开事务: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// 验证码行按邮箱清：账号没了还留着验证码记录，既是隐私残留，
-	// 也拦不住同邮箱重新注册后被旧计数误伤
-	if _, err := tx.ExecContext(context.Background(),
-		"DELETE FROM otp_codes WHERE email = ?", email); err != nil {
-		return fmt.Errorf("清空验证码记录: %w", err)
-	}
-	// 会话行按 uid 清：账号都删了，设备列表的行只剩隐私残留，没人再踢得掉它们
-	if _, err := tx.ExecContext(context.Background(),
-		"DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
-		return fmt.Errorf("清空登录会话: %w", err)
-	}
-	// Web 管理台的四张按 uid 存行的表同批清（passkey / TOTP / 恢复码 / 仪式中间态），
-	// 外加两步登录的中间态——它们是 5 分钟的在途凭证，账号没了还挂着就是一张废票。
-	// user_profile 也在列：档案归身份提供方，账号删了还留着昵称/头像就是隐私残留
-	//（日记侧的对应资料行由注销钩子清，本服务这行只能在这里删）。
-	// admin_scopes 同列名 uid（不是 user_id），单独一条 DELETE：授权行指向已注销
-	// 的账号既无意义也是残留（uid 复用时会把前任的授权送给人）。
-	for _, table := range []string{"passkeys", "totp_factors", "recovery_codes", "webauthn_challenges", "login_states", "user_profile"} {
-		if _, err := tx.ExecContext(context.Background(),
-			"DELETE FROM "+table+" WHERE user_id = ?", userID); err != nil {
-			return fmt.Errorf("清空 %s: %w", table, err)
-		}
-	}
-	if _, err := tx.ExecContext(context.Background(),
-		"DELETE FROM admin_scopes WHERE uid = ?", userID); err != nil {
-		return fmt.Errorf("清空应用授权: %w", err)
-	}
-	// m14：个人 AI 用量行同批清（scope='user' AND subject=uid）——隐私残留 +
-	// 防日后 uid 复用时把前任的用量算到新人头上。global 行与迁移映射表行**保留**：
-	// 它们不指向任何个人（global 是全站日计数，映射表是合并对账的守卫键）。
-	// subject 存的是 7 位随机 uid 的十进制串（ai_usage 口径，见 internal/ai 包注释）。
-	if _, err := tx.ExecContext(context.Background(),
-		"DELETE FROM ai_usage WHERE scope = 'user' AND subject = ?", strconv.FormatInt(userID, 10)); err != nil {
-		return fmt.Errorf("清空 AI 用量: %w", err)
-	}
-	// 审计行**留着但匿名化**：删掉它等于给「注销自己账号就能抹掉操作痕迹」开后门，
-	// 事件本身要继续对得起 ASVS V16；邮箱清空后行里只剩 uid，账号已不存在。
-	if _, err := tx.ExecContext(context.Background(),
-		"UPDATE audit_logs SET actor_email = '' WHERE actor_uid = ?", userID); err != nil {
-		return fmt.Errorf("匿名化审计: %w", err)
-	}
-	if _, err := tx.ExecContext(context.Background(),
-		"DELETE FROM users WHERE id = ?", userID); err != nil {
-		return fmt.Errorf("删除账号: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交注销: %w", err)
-	}
-	slog.Info("账号已注销", "uid", userID, "email", maskEmail(email))
-	return nil
+	return s.purgeAccount(userID, email)
 }
 
 // sha256Hex 是验证码的落库形态：库里不存明文码。
