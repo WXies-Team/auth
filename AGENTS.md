@@ -200,3 +200,17 @@ the same PR**—a stale guide ships wrong integrations.
 - Recovery codes are Crockford alphanumeric `XXXX-XXXX-XXXX-XXXX`: any input that accepts
   them (web or Apps) must NOT use a numeric-only keyboard — letters can't be typed and
   some IMEs disable paste under numeric/password keyboards.
+- `sessions.device` is an **insert-time snapshot**; every display path re-derives
+  `shortDevice(user_agent)` at read time (legacy rows hold raw library UAs like
+  `ktor-client/2.0`) — never render the stored column directly.
+- The browser password-manager badge anchors to the **containing block**: field wrappers
+  (`.field`/`.code-line`) must stay `position:relative` (plus `padding-right:44px` on
+  credential/OTP fields) or the badge flies hundreds of px off the input (measured 554px).
+- `.content` is a grid — children need `min-width:0` or the sessions table's min-width
+  pushes the **whole page** into horizontal scroll; overflow belongs inside `.table-wrap`.
+- `.bar-fill` (AI usage bars) is an inline span: without `display:block` its `height:100%`
+  is ignored and the bar never renders.
+- Admin avatar endpoint `GET /admin/users/{uid}/avatar`: admin gate, 300/min/uid, 404 =
+  no image (frontend onerror falls back to colored initial). OAuth admin UI (Web 接入
+  block) was removed from 项目访问 — backend `/admin/projects/{app}/oauth` + `clientId`
+  stay dormant; restore the UI when the first real web project lands.
