@@ -245,6 +245,7 @@ func pageHandler(svc *auth.Service, name, title string, gate pageGate) http.Hand
 			Apps: apps, CurrentApp: curApp,
 		}
 		if haveC {
+			d.UID = wc.UID // W3：顶栏头像底色在 avatarColor 未设时按 uid 派生
 			if prof, perr := svc.GetProfile(wc.UID); perr == nil {
 				d.Nickname = prof.Nickname
 				d.AvatarColor = prof.AvatarColor

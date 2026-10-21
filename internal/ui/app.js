@@ -249,8 +249,26 @@ function makeCodeToggle(input, labelEl, cfg) {
   };
 }
 
-/* ---------- 重新验证弹框 ---------- */
+/* ---------- 重新验证弹框（W2 分步：先密码，开了两步验证再要一个码） ----------
+   接线说明（现状是**单接口带三字段**，服务端 /web/reauth 密码/两步码/恢复码三选一）：
+   这里做成前端两段、**两次都打同一个既有接口**——第一步 POST {password}（服务端
+   当场验密码，错密码在这里就报），成功后按 /web/session 回执的 totpEnabled 决定
+   是否进第二步；第二步 POST {totpCode|recoveryCode}（服务端验因子），成功才收口。
+   无 2FA 账号第一步即完成。接口一个没加、一个没改。 */
 let reauthResolver = null;
+let reauthStep = 'password';   // 'password' | 'code'
+let reauthTotp = null;         // 打开弹框时发起的两步验证状态查询（Promise<boolean>）
+
+/* 步切换沿用 dlg 内既有交叉淡入（swapIn，reduced-motion 自动跳过） */
+function reauthShowStep(step) {
+  reauthStep = step;
+  const s1 = $('#reauth-step1'), s2 = $('#reauth-step2');
+  if (!s1 || !s2) return;
+  const toCode = step === 'code';
+  s1.classList.toggle('hidden', toCode);
+  s2.classList.toggle('hidden', !toCode);
+  if (!toCode) swapIn(s1); else swapIn(s2);
+}
 
 function promptReauth() {
   return new Promise(resolve => {
@@ -261,6 +279,13 @@ function promptReauth() {
     $('#reauth-password').value = '';
     $('#reauth-code').value = '';
     if (window.__reauthToggle) window.__reauthToggle.reset();
+    // 每次打开都回第一步；两步验证状态同步去问一次（第一步提交后据此分流）
+    reauthStep = 'password';
+    $('#reauth-step1').classList.remove('hidden');
+    $('#reauth-step2').classList.add('hidden');
+    reauthTotp = api('/web/session', { method: 'POST', body: {}, noReauth: true })
+      .then(me => !!(me && me.totpEnabled))
+      .catch(() => false);   // 状态取不到按「没有 2FA」走：密码已过即收口，不卡流程
     if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
     $('#reauth-password').focus();
   });
@@ -269,6 +294,7 @@ function promptReauth() {
 function closeReauth(ok) {
   const dlg = $('#reauth');
   if (dlg && dlg.open) dlg.close();
+  reauthStep = 'password';
   if (reauthResolver) { reauthResolver(ok); reauthResolver = null; }
 }
 
@@ -295,18 +321,37 @@ function wireReauth() {
   $('#reauth').addEventListener('cancel', e => { e.preventDefault(); closeReauth(false); });
   form.addEventListener('submit', async e => {
     e.preventDefault();
-    const password = $('#reauth-password').value;
-    const useRecovery = window.__reauthToggle.mode() === 'recovery';
-    const totpCode = useRecovery ? '' : $('#reauth-code').value;
-    const recoveryCode = useRecovery ? $('#reauth-code').value : '';
-    if (!password && !totpCode && !recoveryCode) {
-      showErr('#reauth-error', '请输入密码、两步验证码或恢复码'); return;
-    }
     const btn = $('#reauth-ok');
+    if (reauthStep === 'password') {
+      const password = $('#reauth-password').value;
+      if (!password) { showErr('#reauth-error', '请输入密码'); return; }
+      setBusy(btn, true);
+      try {
+        await api('/web/reauth', { method: 'POST', body: { password }, noReauth: true });
+        if (reauthTotp && await reauthTotp) {
+          reauthShowStep('code');   // 账号开了两步验证：进第二步收一个码
+          $('#reauth-code').focus();
+        } else {
+          closeReauth(true);        // 无 2FA：一步到位
+        }
+      } catch (err) {
+        showErr('#reauth-error', err.message);
+      } finally {
+        setBusy(btn, false);
+      }
+      return;
+    }
+    // 第二步：按当前 N 态决定字段（恢复码 ↔ 两步验证码），空输入前端先挡
+    const useRecovery = window.__reauthToggle.mode() === 'recovery';
+    const totpCode = useRecovery ? '' : $('#reauth-code').value.trim();
+    const recoveryCode = useRecovery ? $('#reauth-code').value.trim() : '';
+    if (!totpCode && !recoveryCode) {
+      showErr('#reauth-error', useRecovery ? '请输入恢复码' : '请输入两步验证码'); return;
+    }
     setBusy(btn, true);
     try {
       await api('/web/reauth', {
-        method: 'POST', body: { password, totpCode, recoveryCode }, noReauth: true,
+        method: 'POST', body: { totpCode, recoveryCode }, noReauth: true,
       });
       closeReauth(true);
     } catch (err) {
@@ -510,7 +555,7 @@ function initLogin() {
     modes: {
       totp: {
         label: '两步验证码（6 位）', placeholder: '输入验证器上的 6 位验证码', numeric: true,
-        hide: ['#send-2fa-row'], show: ['#toggle-email'],
+        hide: ['#send-2fa-code'], show: ['#toggle-email'],
         buttons: {
           '#toggle-email': '没有验证器？获取邮箱验证码',
           '#toggle-recovery': '使用恢复码',
@@ -519,7 +564,7 @@ function initLogin() {
       },
       email: {
         label: '邮箱验证码（6 位）', placeholder: '输入邮箱里收到的 6 位验证码', numeric: true,
-        show: ['#send-2fa-row', '#toggle-email'],
+        show: ['#send-2fa-code', '#toggle-email'],
         buttons: {
           '#toggle-email': '换回验证器验证码',
           '#toggle-recovery': '使用恢复码',
@@ -528,8 +573,8 @@ function initLogin() {
       },
       recovery: {
         label: '恢复码', placeholder: 'XXXX-XXXX-XXXX-XXXX', numeric: false,
-        // 邮箱码专属的发码行收起；toggle-email 藏起来，免得摆一个点了没反应的按钮
-        hide: ['#send-2fa-row', '#toggle-email'],
+        // 邮箱码专属的发码按钮收起；toggle-email 藏起来，免得摆一个点了没反应的按钮
+        hide: ['#send-2fa-code', '#toggle-email'],
         buttons: { '#toggle-recovery': '改用两步验证码' },
         intro: '该账号已开启两步验证：请输入一个恢复码完成登录。',
       },
@@ -776,9 +821,8 @@ function deviceIcon(device) {
   return DEVICE_ICONS.device;
 }
 
-/* 会话条目的短标识：session + id 末 4 位（id 一律按字符串处理，雪花 id 的
-   JS 精度陷阱不踩第二次）。 */
-const sessTag = id => 'session' + String(id).slice(-4);
+/* 会话行：项目名 + 最近活跃（相对时间），行尾「详情」展开首次登录时间与 IP。
+   不再显示 session 尾号短标识——行内分组已带设备名，尾号对用户没有信息量。 */
 
 function initSessions() {
   const list = $('#session-list');
@@ -832,11 +876,12 @@ function initSessions() {
             ${g.items.map(it => `
               <div class="session-row${it.current ? ' current' : ''}" data-id="${esc(it.id)}">
                 <span class="grow">
-                  <span class="mono sess-tag">${esc(appLabel(it.app))} · ${esc(sessTag(it.id))}</span>
+                  <span class="title">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))}</span>
                   ${it.current ? '<span class="badge on">本设备</span>' : ''}
-                  <br><span class="meta">${esc(it.ip)} · 最近活跃 ${esc(relTime(it.lastSeenAt))}</span>
                 </span>
+                <button type="button" class="btn small ghost" data-act="more" aria-expanded="false">详情</button>
                 ${it.current ? '' : '<button type="button" class="btn small danger">退出</button>'}
+                <div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>
               </div>`).join('')}
           </div>
         </div>`);
@@ -854,13 +899,23 @@ function initSessions() {
         });
       }
       $$('.session-row', el).forEach(row => {
-        const kick = row.querySelector('button');
-        if (!kick) return;
         const it = g.items.find(i => String(i.id) === row.dataset.id);
+        // 「详情」展开首次登录时间与 IP（GitHub See-more 式）：收起态 .hidden 不占
+        // 行高；展开进场复用既有 swapIn（reduced-motion 自动跳过，只换显示状态）
+        const more = row.querySelector('[data-act=more]');
+        more.addEventListener('click', () => {
+          const detail = row.querySelector('.sess-more');
+          const collapsed = detail.classList.toggle('hidden');
+          more.setAttribute('aria-expanded', String(!collapsed));
+          more.textContent = collapsed ? '详情' : '收起';
+          if (!collapsed) swapIn(detail);
+        });
+        const kick = row.querySelector('button.danger');
+        if (!kick) return;
         kick.addEventListener('click', () => {
-          pending = { mode: 'one', ids: [row.dataset.id], label: it ? sessTag(it.id) : '', count: 1 };
+          pending = { mode: 'one', ids: [row.dataset.id], label: it ? appLabel(it.app) : '', count: 1 };
           $('#kick-title').textContent = '退出这条会话';
-          $('#kick-desc').textContent = `将退出「${g.device}」上的 ${pending.label}，它下次请求时会退出登录。`;
+          $('#kick-desc').textContent = `将退出「${g.device}」上的「${pending.label}」会话，它下次请求时会退出登录。`;
           $('#kick-ok').textContent = '退出会话';
           openDialog($('#kick-dialog'), '#kick-cancel');
         });
@@ -1313,6 +1368,7 @@ function initProfile() {
   const email = $('#topbar-email') ? $('#topbar-email').getAttribute('title') : '';
   let pf = { nickname: '', avatarColor: 0, avatarImage: '' };
   let loaded = { nickname: '', avatarColor: 0, avatarImage: '' };
+  let meUid = 0;   // W3 派生底色用（/web/session 现取，拿不到按 0 回退色板首位）
 
   // 色板来自服务端注入的 JSON（internal/ui avatarPalette，与两 App AvatarPalette 同值）
   const PALETTE = (() => {
@@ -1323,6 +1379,15 @@ function initProfile() {
     } catch (_) { return ['#5B8DEF']; }
   })();
 
+  /* W3：展示底色 = 显式色（>0）> uid%8 派生——与 Go ui.AvatarPaletteHexFor /
+     app.js avatarHex 同式。色板 chips 按展示色高亮；显式值只在用户点选后落 pf
+     （未设色的账号点「已高亮的那颗」不产生脏值）。 */
+  function effectiveColor() {
+    const i = Number(pf.avatarColor);
+    if (Number.isInteger(i) && i > 0 && i < PALETTE.length) return i;
+    return meUid > 0 ? meUid % PALETTE.length : 0;
+  }
+
   // 首字回退链与服务端 initialFor 同源：昵称首字符 → 邮箱前缀首字符
   function avatarInitial() {
     const src = (pf.nickname || '').trim() || (email || '').split('@')[0] || '';
@@ -1331,7 +1396,7 @@ function initProfile() {
   }
 
   function renderAvatar(fade) {
-    const bg = PALETTE[Number(pf.avatarColor)] || PALETTE[0];
+    const bg = PALETTE[effectiveColor()] || PALETTE[0];
     avatarEl.style.background = bg;
     avatarEl.style.color = avatarInk(bg); // 首字墨色与底色成对（.avatar 不写死白墨）
     const wantImg = !!pf.avatarImage;
@@ -1354,6 +1419,10 @@ function initProfile() {
       avatarEl.textContent = avatarInitial();
     }
     $('#pf-clear-avatar').classList.toggle('hidden', !wantImg);
+    // W7：有自定义头像时收起色板行（底色只在无图时决定首字观感）；
+    // 移除头像/换回色块形态即恢复——上传与移除都经这里，两态永远同步。
+    const paletteBox = $('#pf-palette');
+    if (paletteBox) paletteBox.classList.toggle('hidden', wantImg);
   }
 
   function renderNick() {
@@ -1364,10 +1433,10 @@ function initProfile() {
     const box = $('#pf-palette');
     box.innerHTML = '';
     PALETTE.forEach((hex, i) => {
-      const chip = node(`<button type="button" class="pf-chip${i === Number(pf.avatarColor) ? ' on' : ''}"
-        style="background:${esc(hex)}" aria-pressed="${i === Number(pf.avatarColor)}" aria-label="头像底色 ${i + 1}"></button>`);
+      const chip = node(`<button type="button" class="pf-chip${i === effectiveColor() ? ' on' : ''}"
+        style="background:${esc(hex)}" aria-pressed="${i === effectiveColor()}" aria-label="头像底色 ${i + 1}"></button>`);
       chip.addEventListener('click', () => {
-        if (Number(pf.avatarColor) === i) return;
+        if (effectiveColor() === i) return;
         pf.avatarColor = i;
         $$('.pf-chip', box).forEach((c, j) => {
           c.classList.toggle('on', j === i);
@@ -1409,7 +1478,13 @@ function initProfile() {
 
   async function load() {
     try {
-      applyProfile(await api('/api/profile'));
+      // W3：uid 只为「未设色按 uid 派生」服务，取不到就按 0 回退色板首位，不拦页面
+      const [me, profile] = await Promise.all([
+        api('/web/session', { method: 'POST', body: {} }).catch(() => null),
+        api('/api/profile'),
+      ]);
+      meUid = Number(me && me.uid) || 0;
+      applyProfile(profile);
     } catch (err) { showErr('#pf-error', err.message); }
   }
 
@@ -1485,7 +1560,7 @@ function initProfile() {
   function updateTopbarAvatar() {
     const top = $('#me-avatar');
     if (!top) return;
-    const bg = PALETTE[Number(pf.avatarColor)] || PALETTE[0];
+    const bg = PALETTE[effectiveColor()] || PALETTE[0];
     top.style.background = bg;
     top.style.color = avatarInk(bg); // 首字墨色与底色成对（.avatar 不写死白墨）
     if (pf.avatarImage) {
@@ -1603,10 +1678,14 @@ function avatarInitial(nickname, email) {
   const runes = Array.from(src);
   return runes.length ? esc(runes[0].toUpperCase()) : '?';
 }
-function avatarHex(index) {
+function avatarHex(index, uid) {
   const p = avatarPalette();
   const i = Number(index);
-  return p[Number.isInteger(i) && i >= 0 && i < p.length ? i : 0];
+  // W3 展示色派生：显式设过的色（>0）原样用；未设（0/越界）按 uid%8 派生——
+  // 与 Go 侧 ui.AvatarPaletteHexFor 同式（改规则请同 PR 同步 Go 半边）。
+  if (Number.isInteger(i) && i > 0 && i < p.length) return p[i];
+  const u = Number(uid);
+  return p[Number.isInteger(u) && u > 0 ? u % p.length : 0];
 }
 /* 首字墨色：按 WCAG 相对亮度取白墨/黑墨中对比更高的一支——与 Go 侧 ui.avatarInkFor
    及两 App AvatarPalette.inkFor 同式（.avatar 不再写死白墨：白墨对 8 色色板实测只有
@@ -1622,12 +1701,24 @@ function avatarInk(bg) {
 }
 function avatarHTML(u, px) {
   const size = `width:${px}px;height:${px}px;font-size:${Math.round(px * 0.42)}px`;
-  if (u.avatarImage) {
-    return `<span class="avatar" style="${size}" aria-hidden="true"><img src="data:image/jpeg;base64,${esc(u.avatarImage)}" alt=""></span>`;
-  }
-  const bg = avatarHex(u.avatarColor);
-  return `<span class="avatar" style="${size};background:${esc(bg)};color:${avatarInk(bg)}" aria-hidden="true">${avatarInitial(u.nickname, u.email)}</span>`;
+  const bg = avatarHex(u.avatarColor, u.uid);
+  const initial = avatarInitial(u.nickname, u.email);
+  // W3：真图统一走 /admin/users/{uid}/avatar（懒加载；服务端弱缓存 5 分钟 + ETag），
+  // 无图 404 或加载失败时由 document 捕获阶段的 error 监听回退「色块 + 首字」——
+  // 回退方向是「图 → 占位符」，占位色块是兜底不是主图。uid 缺位（打开抽屉的过场）
+  // 直接渲染色块，不发注定 404 的请求。
+  const img = Number(u.uid) > 0
+    ? `<img class="avatar-img" loading="lazy" src="/admin/users/${esc(u.uid)}/avatar" alt="">` : '';
+  return `<span class="avatar" data-initial="${initial}" style="${size};background:${esc(bg)};color:${avatarInk(bg)}" aria-hidden="true">${img || initial}</span>`;
 }
+/* 头像图加载失败（无图 404 / 网络错）：原地换回色块+首字。error 事件不冒泡，
+   用 document 的**捕获**阶段统一接（免去每个 innerHTML 注入点各自挂 onerror）。 */
+document.addEventListener('error', e => {
+  const t = e.target;
+  if (!t || !t.classList || !t.classList.contains('avatar-img')) return;
+  const wrap = t.parentElement;
+  if (wrap) wrap.textContent = wrap.dataset.initial || '?';
+}, true);
 /* 身份堆叠（头像+昵称+邮箱，Qualytics 形态）：列表与抽屉头部同款。 */
 function userCell(u, px) {
   const name = (u.nickname || '').trim() || u.email;
@@ -1898,6 +1989,7 @@ function initAdminUsers() {
       const opts = await banScopeOptions();
       $('#bulk-app').innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('')
         || '<option value="">无可用范围</option>';
+      decorateSelect($('#bulk-app'));   // W9：同步按钮文案
       const isBan = kind === 'ban';
       $('#bulk-dur-group').classList.toggle('hidden', !isBan);
       $('#bulk-reason-field').classList.toggle('hidden', !isBan);
@@ -1933,6 +2025,7 @@ function initAdminUsers() {
     }
     sel.innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('')
       || '<option value="">无可邀请的项目</option>';
+    decorateSelect(sel);   // W9：选项是打开后才灌的，这里同步按钮文案
     $('#invite-email').focus();
   }
 
@@ -1994,7 +2087,7 @@ function initAdminUsers() {
       const sessions = (d.sessions || []).map(s => `
         <div class="item">
           <span class="grow"><span class="title">${esc(s.device)}</span><br>
-          <span class="meta">${esc(appLabel(s.app))} · ${esc(sessTag(s.id))} · ${esc(s.ip)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span></span>
+          <span class="meta">${esc(appLabel(s.app))} · ${esc(s.ip)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span></span>
           <button type="button" class="btn small danger" data-kick="${esc(s.id)}">退出</button>
         </div>`).join('') || '<div class="empty">暂无活跃会话</div>';
       const passkeys = (d.passkeys || []).map(p =>
@@ -2100,6 +2193,7 @@ function initAdminUsers() {
         <div class="detail row">
           <button type="button" class="btn small danger" id="ud-kick-all">退出该用户全部会话</button>
         </div>`;
+      decorateSelects($('#ud-body'));   // W9：抽屉里的角色/封禁范围下拉换站内形态
       $$('#ud-body [data-kick]').forEach(btn => btn.addEventListener('click', async () => {
         try {
           await api('/admin/sessions/' + btn.dataset.kick, { method: 'DELETE' });
@@ -2216,7 +2310,10 @@ function initAdminUsers() {
       // ---- 封禁（W3）：范围（super 见全局+全部项目，项目管理员只见授权项目）----
       const banSel = $('#ud-ban-app');
       banScopeOptions().then(opts => {
-        if (banSel) banSel.innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('');
+        if (banSel) {
+          banSel.innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('');
+          decorateSelect(banSel);   // W9：范围选项异步灌入后同步按钮文案
+        }
       });
       const untilField = $('#ud-ban-until-field');
       const untilInput = $('#ud-ban-until');
@@ -2419,25 +2516,9 @@ function initAdminAccess() {
     } catch (err) { toast(err.message, true); } finally { setBusy(btn, false); }
   });
 
-  // ---- OAuth Secret 一次性展示层（照抄用户页临时密码配方：mono + 复制 + 关层清零）----
-  let oauthSecret = '';
-  function showOAuthSecret(secret) {
-    oauthSecret = secret || '';
-    $('#oauth-secret-val').textContent = oauthSecret;
-    openDialog($('#oauth-secret-dlg'));
-  }
-  $('#oauth-secret-copy').addEventListener('click', async () => {
-    if (!oauthSecret) return;
-    await copyText(oauthSecret);
-    toast('Secret 已复制');
-  });
-  $('#oauth-secret-close').addEventListener('click', () => closeDialog($('#oauth-secret-dlg')));
-  // Esc / 关闭都落到 close 事件：变量与展示一并清零
-  $('#oauth-secret-dlg').addEventListener('close', () => {
-    oauthSecret = '';
-    $('#oauth-secret-val').textContent = '';
-  });
-
+  // ---- Web 接入（B4 OAuth 跳转授权）已整体撤下（W4 定案：项目访问页的两个日记
+  // App 不是 web 项目，OAuth 接入留给以后的 web 项目）——后端 /admin/projects 的
+  // clientId 字段与 /admin/projects/{app}/oauth 端点保留休眠，这里不再渲染任何入口。
   async function load() {
     showErr('#access-error', '');
     let list = [];
@@ -2563,76 +2644,7 @@ function initAdminAccess() {
       } finally { setBusy(btn, false); }
     });
 
-    // ---- Web 接入（B4 OAuth 跳转授权）：clientId 展示 + 回跳地址编辑 + Secret 一次性回执 ----
-    let clientId = p.clientId || '';
-    const webSec = node(`
-      <div class="detail" data-webaccess>
-        <h3>Web 接入</h3>
-        <p class="hint">开启后，第三方网页应用可通过跳转授权让用户用本项目账号登录；回跳地址需与应用登记的逐字一致。</p>
-        <div data-webaccess-id></div>
-        <label class="field"><span>回跳地址（一行一个，需完整的 https 地址）</span>
-          <textarea data-webaccess-uris rows="3" spellcheck="false" autocapitalize="off"
-            placeholder="example.com/oauth/callback"></textarea></label>
-        <p class="err" data-webaccess-err role="alert" hidden></p>
-        <div class="row">
-          <button type="button" class="btn primary" data-webaccess-save>保存回跳地址</button>
-          <button type="button" class="btn danger" data-webaccess-rotate>生成 / 重置 Secret</button>
-        </div>
-      </div>`);
-    card.appendChild(webSec);
-    const waId = webSec.querySelector('[data-webaccess-id]');
-    const waURIs = webSec.querySelector('[data-webaccess-uris]');
-    const waErr = webSec.querySelector('[data-webaccess-err]');
-    const waRotate = webSec.querySelector('[data-webaccess-rotate]');
-    waURIs.value = (p.redirectUris || []).join('\n');
-
-    function renderWebAccess() {
-      if (clientId) {
-        waId.innerHTML = `
-          <div class="item">
-            <span class="grow"><span class="title mono">${esc(clientId)}</span><br>
-            <span class="meta">client_id</span></span>
-            <button type="button" class="btn small" data-webaccess-copy>复制</button>
-          </div>`;
-        waId.querySelector('[data-webaccess-copy]').addEventListener('click', async () => {
-          await copyText(clientId);
-          toast('client_id 已复制');
-        });
-      } else {
-        waId.innerHTML = '<p class="hint" style="margin:4px 0">尚未开通：填写回跳地址后点「生成 / 重置 Secret」即可开通。</p>';
-      }
-    }
-    renderWebAccess();
-
-    function webAccessURIs() {
-      return waURIs.value.split('\n').map(s => s.trim()).filter(Boolean);
-    }
-    async function saveOAuth(rotate, btn) {
-      waErr.textContent = ''; waErr.hidden = true;
-      setBusy(btn, true);
-      try {
-        const res = await api(`/admin/projects/${encodeURIComponent(p.app)}/oauth`, {
-          method: 'POST', body: { redirectUris: webAccessURIs(), rotateSecret: !!rotate },
-        });
-        clientId = res.clientId || clientId;
-        waURIs.value = (res.redirectUris || webAccessURIs()).join('\n');
-        renderWebAccess();
-        if (res.secret) showOAuthSecret(res.secret);
-        toast(rotate ? '已生成新的 Client Secret' : '回跳地址已保存');
-      } catch (err) {
-        waErr.textContent = err.message;
-        waErr.hidden = false;
-        throw err;   // 上抛：确认弹层据此不误报成功
-      } finally { setBusy(btn, false); }
-    }
-    webSec.querySelector('[data-webaccess-save]').addEventListener('click', e =>
-      saveOAuth(false, e.currentTarget).catch(() => {}));
-    waRotate.addEventListener('click', () => {
-      confirmAccess('生成 / 重置 Secret',
-        `将为「${name}」${clientId ? '重置' : '生成'} Client Secret；${clientId ? '重置后旧 Secret 立即失效，正在使用它的应用将无法换 token。' : '开通后跳转授权即可使用。'}Secret 只显示这一次。`,
-        true, clientId ? '已重置 Client Secret' : '已开通 Web 接入',
-        () => saveOAuth(true, waRotate));
-    });
+    // Web 接入（clientId / 回跳地址 / Secret）块已撤下（W4）：见上方说明。
     return card;
   }
 
@@ -2715,7 +2727,7 @@ function initAdminSessions() {
           <div class="item" data-id="${esc(s.id)}">
             <span class="ico-wrap">${deviceIcon(s.device)}</span>
             <span class="grow">
-              <span class="title">${esc(s.device)}</span> <span class="mono sess-tag">${esc(sessTag(s.id))}</span>
+              <span class="title">${esc(s.device)}</span>
               <br><span class="meta">${esc(appLabel(s.app))} · ${esc(s.ip)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span>
             </span>
             <button type="button" class="btn small danger">退出</button>
@@ -2821,9 +2833,42 @@ function initAdminAudit() {
   }
 
   $('#audit-filter-form').addEventListener('submit', e => { e.preventDefault(); pager.state.offset = 0; load(); });
+  // ---- W8③ 时间范围重做：快捷档位 chips（今天 / 近 7 天 / 近 30 天 / 自定义）+
+  // 两枚站内样式日期输入。档位选中即填 from/to 并查询；直接改日期输入则回落到
+  // 「自定义」高亮。选中环沿用 app-chip 的 primary-soft 态，无新动效面。 ----
+  const p2 = n => String(n).padStart(2, '0');
+  const dayStr = d => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  function rangeChipSync(active) {
+    $$('#audit-filter-form [data-range]').forEach(c => {
+      const on = c.dataset.range === active;
+      c.classList.toggle('on', on);
+      c.setAttribute('aria-pressed', String(on));
+    });
+  }
+  function setRange(kind) {
+    if (kind === 'custom') {
+      $('#audit-from').value = ''; $('#audit-to').value = '';
+    } else {
+      const now = new Date();
+      const from = new Date(now);
+      if (kind === '7') from.setDate(from.getDate() - 6);
+      else if (kind === '30') from.setDate(from.getDate() - 29);
+      $('#audit-from').value = dayStr(from);
+      $('#audit-to').value = dayStr(now);
+    }
+    rangeChipSync(kind);
+    pager.state.offset = 0;
+    load();
+  }
+  $$('#audit-filter-form [data-range]').forEach(c =>
+    c.addEventListener('click', () => setRange(c.dataset.range)));
+  ['#audit-from', '#audit-to'].forEach(sel =>
+    $(sel).addEventListener('change', () => rangeChipSync('custom')));
   $('#audit-reset').addEventListener('click', () => {
     $('#audit-action').value = ''; $('#audit-actor').value = ''; $('#audit-target').value = '';
     $('#audit-from').value = ''; $('#audit-to').value = '';
+    rangeChipSync('custom');
+    decorateSelect($('#audit-action'));   // 值被重置，同步下拉按钮文案
     pager.state.offset = 0; load();
   });
   pager.wire(load);
@@ -3207,11 +3252,104 @@ function wireTabs() {
   });
 }
 
+/* W9 下拉（站内 miuix 风）：把原生 <select> 装成「按钮 + 浮层菜单」（fade-scale
+   进场走既有 swapIn）。原 select 保留为**值载体**（.hidden）：表单逻辑读
+   .value / 改 .innerHTML 的代码一字不动；菜单每次打开按 当前 option 重建，
+   openInvite/openBulk 这类后填选项的场景天然成立。
+   键盘与无障碍：按钮 aria-haspopup=listbox + aria-expanded；Enter/空格/↓ 打开，
+   ↑/↓ 移动高亮，Enter/空格 选中，Esc 关闭回焦；点外部关闭。 */
+function decorateSelect(sel) {
+  if (!sel) return null;
+  if (sel.__dropSync) { sel.__dropSync(); return sel; }   // 已装饰：只同步按钮文案
+  const wrap = document.createElement('span');
+  wrap.className = 'select-drop';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'select-btn';
+  btn.setAttribute('aria-haspopup', 'listbox');
+  btn.setAttribute('aria-expanded', 'false');
+  const label = document.createElement('span');
+  btn.appendChild(label);
+  // 展开箭头：与站内图标同 viewBox/线宽（ico 类），旋转动效由 CSS 接管
+  const chev = node('<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>');
+  btn.appendChild(chev);
+  const menu = document.createElement('ul');
+  menu.className = 'select-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+  sel.parentNode.insertBefore(wrap, sel);
+  wrap.appendChild(btn);
+  wrap.appendChild(menu);
+  wrap.appendChild(sel);
+  sel.classList.add('hidden');   // 值载体不参与视觉（.hidden !important 盖得住任何 UA display）
+  let activeIdx = -1;
+
+  function sync() {
+    const opt = sel.options[sel.selectedIndex];
+    label.textContent = opt ? opt.textContent : '';
+    btn.disabled = sel.disabled;
+  }
+  function open() {
+    menu.innerHTML = '';
+    activeIdx = sel.selectedIndex;
+    Array.from(sel.options).forEach((opt, i) => {
+      const li = node('<li class="select-opt" role="option"></li>');
+      li.textContent = opt.textContent;
+      li.setAttribute('aria-selected', String(i === sel.selectedIndex));
+      li.addEventListener('click', () => pick(i));
+      menu.appendChild(li);
+    });
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    swapIn(menu);   // 浮层进场：fade-scale（popIn 语义的区块动效）
+    mark();
+  }
+  function mark() {
+    $$('.select-opt', menu).forEach((li, i) => li.classList.toggle('active', i === activeIdx));
+  }
+  function close(focusBtn) {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    if (focusBtn) btn.focus();
+  }
+  function pick(i) {
+    if (i < 0 || i >= sel.options.length) return;
+    sel.selectedIndex = i;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    sync();
+    close(true);
+  }
+  btn.addEventListener('click', () => (menu.hidden ? open() : close(false)));
+  btn.addEventListener('keydown', e => {
+    if ((e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') && menu.hidden) {
+      e.preventDefault(); open(); return;
+    }
+    if (menu.hidden) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); activeIdx = Math.min(sel.options.length - 1, activeIdx + 1); mark(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(0, activeIdx - 1); mark(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(activeIdx); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(true); }
+  });
+  // 点外部关闭（弹层不拦 Tab：关闭后焦点仍在按钮，语义与原生一致）
+  document.addEventListener('click', e => {
+    if (!menu.hidden && !wrap.contains(e.target)) close(false);
+  });
+  sel.addEventListener('change', sync);
+  sel.__dropSync = sync;
+  sync();
+  return sel;
+}
+function decorateSelects(root) {
+  $$('select', root || document).forEach(decorateSelect);
+}
+
 /* ---------- 入口 ---------- */
 document.addEventListener('DOMContentLoaded', () => {
   drainFlash();   // 跨页提示先出（注销撤销 / 强制改密成功 / 注销已提交）
   wireReauth();
   wireTabs();
+  decorateSelects(document);   // W9：静态 <select> 全部换站内下拉（值载体保留）
   initAdminGuard();
   initAppSwitch();
   initLogin();

@@ -131,12 +131,30 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 		t.Error("本设备会话行应带「本设备」徽标")
 	}
 	// 会话 id 一律按字符串处理（雪花 id 的 JS 精度陷阱）：列表请求的回执是
-	// {sessions:[...]}，且踢人路径用 sessTag/字符串拼接
+	// {sessions:[...]}；session 尾号短标识已退役，行改为「项目名 · 最近活跃」
+	// + 行尾「详情」展开（首次登录时间与 IP）
 	if !strings.Contains(js, "res.sessions || []") {
 		t.Error("会话列表应从 {sessions:[...]} 回执取数组")
 	}
-	if !strings.Contains(js, "const sessTag = id => 'session' + String(id).slice(-4)") {
-		t.Error("会话条目应有 session+末4位 的字符串短标识")
+	if strings.Contains(js, "sessTag") {
+		t.Error("session 尾号短标识已退役，app.js 不该再出现 sessTag")
+	}
+	for _, want := range []string{
+		`· 最近活跃 ${esc(relTime(it.lastSeenAt))}`,
+		`data-act="more"`,
+		`<div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("会话行应包含 %s（项目名 · 最近活跃 + 详情展开）", want)
+		}
+	}
+	// 页首 hint 钉住「最近活跃」口径（用户问得最多的一句）
+	page, err := files.ReadFile("templates/sessions.html")
+	if err != nil {
+		t.Fatalf("读 sessions.html: %v", err)
+	}
+	if !strings.Contains(string(page), "最近活跃指该设备最后与服务器通信的时间。") {
+		t.Error("sessions.html 页首应有「最近活跃」口径说明")
 	}
 	// 按设备分组 + 组级批量退出走 revoke-many
 	if !strings.Contains(js, "/api/sessions/revoke-many") {
@@ -537,7 +555,8 @@ func TestMotionSystem(t *testing.T) {
 		"transition-duration: 0.001ms !important",
 		"animation-duration: 0.001ms !important",
 		"animation-delay: 0ms !important",
-		".btn:active, .tab:active { transform: none; }",
+		".btn:active, .tab:active, .app-chip:active, .select-btn:active",
+		"input[type=checkbox]:active, input[type=radio]:active { transform: none; }",
 	} {
 		if !strings.Contains(rms, frag) {
 			t.Errorf("reduced-motion 块缺 %q", frag)
@@ -865,5 +884,255 @@ func TestAvatarInkContrast(t *testing.T) {
 	}
 	if n := strings.Count(string(jsBytes), "avatarInk("); n < 4 {
 		t.Errorf("app.js 应定义并三处调用 avatarInk，只找到 %d 处", n)
+	}
+}
+
+// W1 底栏清零：登录（含注册/找回 tab）、授权（确认与错误两变体）、邀请（表单与
+// 错误两变体）、403 拒绝页**渲染产物里连 <footer> 容器都不出现**——不是 display:none
+// 藏一下。逐页 Render 实测（而不是只看模板里的 if 条件），条件被误删时这里先翻车。
+func TestMinimalPagesRenderNoFooter(t *testing.T) {
+	cases := []struct {
+		file string
+		data Data
+	}{
+		{"login", Data{Title: "登录", Minimal: true}},
+		{"authorize", Data{Title: "授权登录", Minimal: true, OAuth: &OAuthView{
+			Tx: "t", App: "calorie-diary", AppName: "热量日记", RedirectHost: "a.example", Email: "u@example.com"}}},
+		{"authorize", Data{Title: "无法发起授权", Minimal: true, Status: http.StatusBadRequest,
+			OAuth: &OAuthView{ErrorTitle: "无法发起授权", ErrorMessage: "应用未登记"}}},
+		{"invite", Data{Title: "接受邀请", Minimal: true, Invite: &InviteView{
+			Token: "t", Email: "a@example.com", App: "calorie-diary", AppName: "热量日记"}}},
+		{"invite", Data{Title: "无法接受邀请", Minimal: true, Status: http.StatusBadRequest,
+			Invite: &InviteView{ErrorTitle: "无法接受邀请", ErrorMessage: "邀请链接已过期"}}},
+		{"denied", Data{Title: "无权访问", Minimal: true, DeniedApp: "calorie-diary"}},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		if err := Render(rec, c.file, c.data); err != nil {
+			t.Fatalf("渲染 %s: %v", c.file, err)
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, "<footer") || strings.Contains(body, `class="foot"`) {
+			t.Errorf("%s（Minimal 壳）渲染出了底栏——公共页一律无页脚", c.file)
+		}
+	}
+	// 全模板只允许 layout 一处 <footer>（否则门控漏了第二处渲染点）
+	entries, err := files.ReadDir("templates")
+	if err != nil {
+		t.Fatalf("列模板: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".html") {
+			continue
+		}
+		raw, rerr := files.ReadFile("templates/" + e.Name())
+		if rerr != nil {
+			t.Fatalf("读 %s: %v", e.Name(), rerr)
+		}
+		n += strings.Count(string(raw), "<footer")
+	}
+	if n != 1 {
+		t.Errorf("模板里应恰有一处 <footer>（layout 且由 not Minimal 门控），得到 %d 处", n)
+	}
+	// 注销撤销页（cmd/server 的独立 HTML）不进模板集：它自带的整页里也没有页脚
+	//（本包只对模板集负责，独立页由 cmd/server 自持——这里只钉模板口径）。
+}
+
+// W3 头像底色派生：avatarColor 未设（0/越界）按 uid%8 从同一 8 色色板派生，
+// 显式色原样用——顶栏不再「全员一个色」。Go 半边钉 AvatarPaletteHexFor 与
+// Render 落地；JS 半边（app.js avatarHex/avatarHTML）钉结构与镜像式。
+func TestAvatarDeriveByUID(t *testing.T) {
+	want := []string{"#5B8DEF", "#7C6AF2", "#E2556B", "#FF8A3D", "#2BB673", "#14A8A0", "#E6B422", "#8B7355"}
+	for _, uid := range []int64{1, 8, 9, 1000001, 1000002, 1000003} {
+		if got := AvatarPaletteHexFor(uid, 0); got != want[uid%8] {
+			t.Errorf("uid=%d 未设色应派生 palette[uid%%%d]=%s，得到 %s", uid, len(want), want[uid%8], got)
+		}
+		if got := AvatarPaletteHexFor(uid, 99); got != want[uid%8] {
+			t.Errorf("uid=%d 越界色应按未设派生 %s，得到 %s", uid, want[uid%8], got)
+		}
+		if got := AvatarPaletteHexFor(uid, 3); got != want[3] {
+			t.Errorf("uid=%d 显式色 3 应原样用 %s，得到 %s", uid, want[3], got)
+		}
+	}
+	if AvatarPaletteHexFor(0, 0) != want[0] {
+		t.Error("无 uid（Minimal 壳）回退色板首位")
+	}
+	// Render 落地：uid=9（9%8=1）、未设色 → 顶栏色块 #7C6AF2（墨色按亮度择黑）
+	rec := httptest.NewRecorder()
+	if err := Render(rec, "console", Data{Title: "概览", Email: "u@example.com",
+		UID: 9, AvatarColor: 0}); err != nil {
+		t.Fatalf("渲染概览: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "background:#7C6AF2") {
+		t.Error("顶栏色块应按 uid 派生（uid=9 → #7C6AF2）")
+	}
+	// app.js 半边：派生式与真图端点/回退结构
+	jsBytes, err := files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	js := string(jsBytes)
+	for _, wantFrag := range []string{
+		"u % p.length",                        // uid%8 派生式
+		"/admin/users/${esc(u.uid)}/avatar",   // 列表/抽屉头像走真图端点
+		`class="avatar-img" loading="lazy"`,   // 懒加载
+		"wrap.dataset.initial",                // onerror 回退色块+首字
+		"avatar-img",                          // 捕获阶段 error 监听的选择器依据
+	} {
+		if !strings.Contains(js, wantFrag) {
+			t.Errorf("app.js 缺 W3 头像结构 %q", wantFrag)
+		}
+	}
+	// 回退方向是「图 → 占位符」：不再有按 avatarImage 直出 data URL 的分支
+	if strings.Contains(js, `data:image/jpeg;base64,${esc(u.avatarImage)}`) {
+		t.Error("列表/抽屉头像不该再走 data URL 直出（应走 /admin/users/{uid}/avatar + onerror 回退）")
+	}
+}
+
+// W2 reauth 分步 + W4 Web 接入撤下的 JS/模板同步钉：
+// 弹窗只允许「一屏一问」（第一步密码、第二步码），Web 接入的模板与脚本一并撤净。
+func TestReauthStagedAndWebAccessRemoved(t *testing.T) {
+	layout, err := files.ReadFile("templates/layout.html")
+	if err != nil {
+		t.Fatalf("读 layout: %v", err)
+	}
+	head := string(layout)
+	for _, want := range []string{`id="reauth-step1"`, `id="reauth-step2"`, `class="hidden"`} {
+		if !strings.Contains(head, want) {
+			t.Errorf("reauth 弹窗缺分步结构 %q", want)
+		}
+	}
+	// 「一屏全堆」的旧结构不许回潮：密码与码框之间的「或」分隔
+	if strings.Contains(head, `<p class="or">或</p>`) {
+		t.Error("reauth 弹窗不该再有「密码 或 验证码」的同屏分隔（W2 已改分步）")
+	}
+	jsBytes, err := files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	js := string(jsBytes)
+	for _, want := range []string{"function reauthShowStep(", "totpEnabled", `body: { password }`, "body: { totpCode, recoveryCode }"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js 缺 W2 分步接线 %q", want)
+		}
+	}
+	access, err := files.ReadFile("templates/admin-access.html")
+	if err != nil {
+		t.Fatalf("读 admin-access: %v", err)
+	}
+	if strings.Contains(string(access), "oauth-secret-dlg") {
+		t.Error("Web 接入的一次性 Secret 层应随 W4 撤下")
+	}
+	if strings.Contains(js, "data-webaccess") || strings.Contains(js, "showOAuthSecret") {
+		t.Error("app.js 不该再渲染 Web 接入块（W4：后端端点保留休眠，前端整体撤下）")
+	}
+}
+
+// W5/W6 发码按钮内联与密码管理器徽章修复的结构钉：
+// 验证码行 = 输入 flex + 按钮 flex:none 同一行；徽章锚定收进字段（position:relative
+// + 右侧预留 44px）+ :-webkit-autofill 归一保住 FX3 内环。
+func TestCodeRowInlineAndBadgeAnchorFix(t *testing.T) {
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	css := string(cssBytes)
+	codeLine, ok := cssRule(css, ".code-line")
+	if !ok {
+		t.Fatal("style.css 缺 .code-line 规则（W5 验证码行）")
+	}
+	for _, frag := range []string{"display: flex", "position: relative"} {
+		if !strings.Contains(codeLine, frag) {
+			t.Errorf(".code-line 缺 %q", frag)
+		}
+	}
+	// W6 定位锚：.field 必须是 positioned，徽章/下拉才解析回字段自身
+	field, ok := cssRule(css, ".field")
+	if !ok {
+		t.Fatal("style.css 缺 .field 规则")
+	}
+	if !strings.Contains(field, "position: relative") {
+		t.Error(".field 应带 position:relative（W6：凭据徽章的包含块锚点）")
+	}
+	if !strings.Contains(css, `input[autocomplete="one-time-code"], input[type=password]`) ||
+		!strings.Contains(css, "padding-right: 44px") {
+		t.Error("凭据/OTP 字段应预留右侧徽章位（padding-right: 44px）")
+	}
+	if !strings.Contains(css, "input:-webkit-autofill") {
+		t.Error("缺 :-webkit-autofill 归一（autofill 底色会盖掉站点内环）")
+	}
+	// 6 处发码按钮都进了 code-line（grep 全部「获取验证码」按钮的所在行）
+	for _, tpl := range []string{"templates/login.html", "templates/account.html"} {
+		raw, rerr := files.ReadFile(tpl)
+		if rerr != nil {
+			t.Fatalf("读 %s: %v", tpl, rerr)
+		}
+		if n := strings.Count(string(raw), `class="code-line"`); n < 1 {
+			t.Errorf("%s 缺 code-line 行（W5 发码按钮内联）", tpl)
+		}
+		if strings.Contains(string(raw), `style="margin-top:-4px"`) {
+			t.Errorf("%s 不该再有负 margin 的独占发码行（W5 已内联）", tpl)
+		}
+	}
+	jsBytes, err := files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	if !strings.Contains(string(jsBytes), "hide: ['#send-2fa-code']") {
+		t.Error("两步邮箱码模式的发码按钮显隐应指向 #send-2fa-code（原独立行已删）")
+	}
+}
+
+// W8/W9 排版与原生控件 miuix 化：站内下拉（按钮+浮层菜单、值载体保留）、样式
+// checkbox/radio、披露行箭头、日期输入吃站内规则、表格窄屏横滚不破版、审计时间档位。
+func TestNativeControlsMiuixAndLayoutFixes(t *testing.T) {
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	css := string(cssBytes)
+	// ① 日期输入必须在输入框规则名单里（W8③ 直接根因：漏了 type=date 就掉回 UA 形态）
+	if !strings.Contains(css, "input[type=date]") {
+		t.Error("input[type=date] 应并入站内输入框规则（否则审计日期掉回 UA 原生形态）")
+	}
+	// ② 站内下拉形态与勾选/单选自绘
+	for _, frag := range []string{
+		".select-btn", ".select-menu", ".select-opt",
+		"input[type=checkbox]", "appearance: none",
+		"details.section > summary::after",
+	} {
+		if !strings.Contains(css, frag) {
+			t.Errorf("style.css 缺站内控件形态 %q", frag)
+		}
+	}
+	// ③ 窄屏不破版：表格有 min-width（横滚交给 .table-wrap），网格子项压回 min-width:0
+	tableRule, _ := cssRule(css, "table")
+	if !strings.Contains(tableRule, "min-width") {
+		t.Error("table 应带 min-width（窄屏让容器横滚，而不是把列压成一字一行）")
+	}
+	if !strings.Contains(css, ".content > * { min-width: 0; }") {
+		t.Error(".content 网格子项应 min-width:0（防表格把整页撑横滚）")
+	}
+	// ④ JS 侧：下拉装饰器 + 审计时间快捷档位
+	jsBytes, err := files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	js := string(jsBytes)
+	for _, frag := range []string{"function decorateSelect(", "decorateSelects(document)", "data-range", "function setRange("} {
+		if !strings.Contains(js, frag) {
+			t.Errorf("app.js 缺 W8/W9 结构 %q", frag)
+		}
+	}
+	// ⑤ 审计页模板带四档位 chips（今天/近7天/近30天/自定义）
+	audit, err := files.ReadFile("templates/admin-audit.html")
+	if err != nil {
+		t.Fatalf("读 admin-audit: %v", err)
+	}
+	for _, frag := range []string{`data-range="today"`, `data-range="7"`, `data-range="30"`, `data-range="custom"`} {
+		if !strings.Contains(string(audit), frag) {
+			t.Errorf("审计页缺时间快捷档位 %q", frag)
+		}
 	}
 }

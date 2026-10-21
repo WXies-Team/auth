@@ -44,6 +44,9 @@ type Data struct {
 	Minimal bool // 登录页这类无导航的壳
 	Email   string
 	Initial string // 账号胶囊头像占位首字母（无档案头像时的兜底）
+	// UID 是当前登录者的用户 id（W3 头像底色派生用）：avatarColor 未设（0/越界）时
+	// 按 uid%8 从同一 8 色色板派生，与 app.js avatarHex 同式。仅登录态页面有值。
+	UID int64
 	// B5 资料三件套（顶栏头像/昵称升级的渲染数据）：Nickname 空 = 未设置（顶栏回退
 	// 邮箱前缀）；AvatarImage 非空 = 档案头像 base64（无 data: 前缀，与两 App 存储
 	// 格式同源）；AvatarColor 是色板下标（AvatarPalette 同序，0 回退首位）。
@@ -324,6 +327,21 @@ func AvatarPaletteHex(index int) string {
 	return avatarPalette[index]
 }
 
+// AvatarPaletteHexFor 是 W3 的**展示色派生**（顶栏账号胶囊用）：显式设过的色
+//（index>0）原样用；未设（0 = 从未写过档案，或越界）按 uid%8 从同一 8 色色板
+// 派生——没有自定义头像的用户也是彩色首字，而不是全员一个色。0 与「未设」不可
+// 分（user_profile.avatarColor 默认 0），口径与 app.js avatarHex 同式镜像，
+// TestAvatarDeriveByUID 钉住两侧口径的 Go 半边。
+func AvatarPaletteHexFor(uid int64, index int) string {
+	if index > 0 && index < len(avatarPalette) {
+		return avatarPalette[index]
+	}
+	if uid > 0 {
+		return avatarPalette[int(uid%int64(len(avatarPalette)))]
+	}
+	return avatarPalette[0]
+}
+
 // PaletteJSON 把色板序列化成 JSON 数组——前端色板 chips 与首字回退从这里取色，
 // 色值不进 JS 硬编码（与 knownApps 同一「服务端唯一清单」口径）。
 func PaletteJSON() template.JS {
@@ -463,7 +481,7 @@ func Render(w http.ResponseWriter, name string, data Data) error {
 	if data.Initial == "" {
 		data.Initial = initialFor(data.Nickname, data.Email)
 	}
-	data.AvatarColorHex = AvatarPaletteHex(data.AvatarColor)
+	data.AvatarColorHex = AvatarPaletteHexFor(data.UID, data.AvatarColor) // W3：未设色按 uid 派生
 	data.AvatarInkHex = avatarInkFor(data.AvatarColorHex) // 首字墨色与底色成对注入
 	if img := strings.TrimSpace(data.AvatarImage); img != "" {
 		data.AvatarSrc = template.URL("data:image/jpeg;base64," + img) //nolint:gosec // 内容是服务端校验过的标准 base64（validateProfile 只收该字母表），无注入面

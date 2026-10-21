@@ -64,22 +64,30 @@
 {{end}}
 
 <!-- 重新验证：管理后台与安全操作的 401 会把它顶出来，验过再自动重试原请求。
-     两步验证一栏是 GitHub 式单输入：默认收 6 位两步验证码，「使用恢复码」链接
-     原地切换语义（label/placeholder/inputmode 同步换，值清空防误提交）。 -->
+     W2 改**分步**（GitHub sudo 模式）：第一步只出「当前密码」，服务端确认密码后
+     若账号开了两步验证才进第二步（只出码框）；无 2FA 账号一步到位。第二步复用
+     B2 的 N 态工厂（makeCodeToggle）在「两步验证码 ↔ 恢复码」间原地换语义
+     （label/placeholder/inputmode 同步换，值清空防误提交），不再一屏全堆。 -->
 <dialog id="reauth" class="dlg" aria-labelledby="reauth-title">
   <form method="dialog" id="reauth-form">
     <h2 id="reauth-title">重新验证身份</h2>
     <p class="dim">为保护账号，敏感操作需要再次确认是你本人。</p>
-    <label class="field">
-      <span>当前密码</span>
-      <input type="password" id="reauth-password" autocomplete="current-password">
-    </label>
-    <p class="or">或</p>
-    <label class="field">
-      <span id="reauth-code-label">两步验证码（6 位）</span>
-      <input type="text" id="reauth-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入验证器上的 6 位验证码">
-    </label>
-    <button type="button" class="btn ghost small toggle-recovery" id="reauth-toggle-recovery">使用恢复码</button>
+
+    <!-- 第一步：只收当前密码 -->
+    <div id="reauth-step1">
+      <label class="field"><span>当前密码</span>
+        <input type="password" id="reauth-password" autocomplete="current-password">
+      </label>
+    </div>
+
+    <!-- 第二步（仅账号已开两步验证时进入）：只收一个码，恢复码原地切换 -->
+    <div id="reauth-step2" class="hidden">
+      <label class="field"><span id="reauth-code-label">两步验证码（6 位）</span>
+        <input type="text" id="reauth-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入验证器上的 6 位验证码">
+      </label>
+      <button type="button" class="btn ghost small toggle-recovery" id="reauth-toggle-recovery">使用恢复码</button>
+    </div>
+
     <p class="err" id="reauth-error" role="alert" hidden></p>
     <div class="row end">
       <button type="button" class="btn" id="reauth-cancel">取消</button>

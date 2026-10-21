@@ -20,15 +20,4 @@
     <button type="button" class="btn primary" id="access-dlg-ok">确认</button>
   </div>
 </dialog>
-
-<!-- OAuth Secret 一次性展示层（照抄用户页临时密码配方：mono + 复制 + 关层清零） -->
-<dialog class="dlg" id="oauth-secret-dlg" aria-labelledby="oauth-secret-title">
-  <h2 id="oauth-secret-title">Client Secret</h2>
-  <p class="dim" id="oauth-secret-hint">此 Secret 仅显示一次，关闭后无法再次查看。</p>
-  <p class="secret-line" style="margin-top:8px"><code class="mono" id="oauth-secret-val"></code>
-    <button type="button" class="btn small" id="oauth-secret-copy">{{icon "copy"}} 复制</button></p>
-  <div class="row end" style="margin-top:12px">
-    <button type="button" class="btn primary" id="oauth-secret-close">我已保存</button>
-  </div>
-</dialog>
 {{end}}

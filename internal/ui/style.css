@@ -154,6 +154,9 @@ code { font-family: var(--mono); }
 }
 .app-chip:hover { color: var(--ink); }
 .app-chip.on { background: var(--primary-soft); color: var(--primary); font-weight: 500; }
+/* W8② 按压反馈统一：分段 chip 与 .btn/.tab 同款「按下轻微缩进」（只 transform，
+   reduced-motion 由文件末尾一刀切撤掉）——之前点它是「无反应」，和全站不一致。 */
+.app-chip:active { transform: scale(.97); }
 /* 分段控件里的按钮形态（项目访问页的范围开关、用户详情的重置方式切换）：
    沿用 app-chip 同一套令牌，只剥掉 UA 按钮的默认底与边框 */
 button.app-chip { background: transparent; border: 0; font: inherit; cursor: pointer; }
@@ -171,6 +174,9 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
   display: grid; gap: var(--gap);
   align-content: start;
 }
+/* 网格子项默认 min-width:auto——内容（如表格 min-width）会把整页撑横滚。
+   一律压回 0：横滚只许发生在 .table-wrap 这类专职滚动盒里（W8①）。 */
+.content > * { min-width: 0; }
 
 /* 窄屏：分区导航折叠成顶栏下的横向滚动 tab 行（不依赖 JS，display:none 切换最稳） */
 .tabnav {
@@ -259,19 +265,130 @@ p.hint { margin: 6px 0; }
 .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .row.end { justify-content: flex-end; }
 .row.between { justify-content: space-between; }
+/* .grow 在 .item 之外也要成立（W8①）：搜索行的 label.field.grow 过去没有规则，
+   输入框按内容宽缩成一小截、和右侧按钮挤在一起——这里给它统一的 flex 伸展
+  （.item/.session-row 的同名规则特异性更高，220px/200px 基准不受影响）。 */
+.grow { flex: 1 1 auto; min-width: 0; }
 .stack { display: grid; gap: 12px; }
 .grid2 { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 
 /* ---- 表单 ---- */
-.field { display: grid; gap: 6px; margin: 12px 0; }
-.field > span { font-size: 13px; color: var(--dim); }
-input[type=text], input[type=email], input[type=password], input[type=datetime-local], select, textarea {
+/* .field 兼作**定位锚**（W6）：密码管理器/OTP 的徽章与下拉是浏览器（或扩展）层
+   绘制的 UI，位置按包含块解析——包装层全是 position:static 时会一路解析到很远的
+   祖先甚至初始包含块，徽章就「飘出输入框一大截」。把锚定收到字段自身。 */
+.field { display: grid; gap: 6px; margin: 12px 0; position: relative; }
+.field > span, .field > label { font-size: 13px; color: var(--dim); }
+/* input[type=date] 必须在名单里：漏了它，审计页的起始/结束日期会掉回 UA 原生
+   形态（白底细边框 + mm/dd/yyyy），与站内控件两种观感（W8③ 的直接根因）。 */
+input[type=text], input[type=email], input[type=password], input[type=date],
+input[type=datetime-local], select, textarea {
   width: 100%; min-height: var(--tap); padding: 9px 15px;
   border: none; border-radius: var(--radius-ctl);
   background: var(--card); background-clip: padding-box; color: var(--ink); font: inherit;
   box-shadow: inset 0 0 0 1px var(--line);
   transition: box-shadow var(--dur-1) var(--ease);
 }
+/* W6 ①：凭据/OTP 字段右侧预留徽章位（Chrome 密码管理器钥匙图标、OTP 下拉锚标
+   画在输入框右缘内侧）——不预留时徽章与内环/文字挤在一起。只给这类字段加：
+   普通输入框（autocomplete=off）不长徽章，右 padding 保持原样。 */
+input[autocomplete="username"], input[autocomplete="one-time-code"], input[type=password] {
+  padding-right: 44px;
+}
+/* W6 ②：:-webkit-autofill 归一。Chrome 自动填充的底色是浏览器层绘制，会盖掉
+   站点背景与 FX3 内环、并强制浅色文本。用 1000px inset 卡片底接管底色（背景裁进
+   padding-box，圆角不破），内环与文本色/插入符显式回到站点令牌；超长 transition
+   让 autofill 的高亮色渐变永远播不完（标准配方）。 */
+input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--card) inset, inset 0 0 0 1px var(--line);
+  -webkit-text-fill-color: var(--ink);
+  caret-color: var(--ink);
+  transition: background-color 99999s ease-out, box-shadow var(--dur-1) var(--ease);
+}
+/* ---- 验证码行（W5）：输入框 + 发码按钮同一行 ----
+   输入 flex 收缩（min-width:0 允许压窄），按钮 flex:none 不换行不溢出；
+   按钮沿用站内次级钮（.btn 默认 sub-bg 底），倒计时态由 cooldown() 改文案。 */
+.code-line { display: flex; align-items: center; gap: 8px; position: relative; }
+.code-line > input { flex: 1 1 auto; min-width: 0; }
+.code-line > .btn { flex: none; white-space: nowrap; }
+
+/* ---- 原生控件 miuix 化（W9）----
+   ① 下拉：原生 <select> 退为**隐藏的值载体**（.hidden），站内形态是
+      「按钮 + 浮层菜单」（fade-scale 进场，aria-haspopup/aria-expanded +
+      键盘上下键/Enter/Esc，见 app.js decorateSelects）；
+   ② 勾选/单选：appearance:none 自绘，语义与键盘行为仍走原生 input；
+   ③ 披露行：<details> 保留原生开合，summary 变整行把手 + 箭头旋转。 */
+.select-drop { display: block; position: relative; flex: 0 1 auto; min-width: 130px; }
+.select-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; min-height: var(--tap); padding: 9px 15px;
+  border: none; border-radius: var(--radius-ctl);
+  background: var(--card); background-clip: padding-box; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: box-shadow var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+.select-btn:active { transform: scale(.99); }
+.select-btn .ico { color: var(--dim); transition: transform var(--dur-2) var(--ease); }
+.select-btn[aria-expanded=true] .ico { transform: rotate(180deg); }
+.select-menu {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 25;
+  margin: 0; padding: 6px; list-style: none; max-height: 280px; overflow: auto;
+  background: var(--card); background-clip: padding-box;
+  border: none; box-shadow: inset 0 0 0 1px var(--line), var(--shadow-2);
+  border-radius: var(--radius-ctl);
+}
+.select-menu[hidden] { display: none !important; }
+.select-opt {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 38px; padding: 0 12px; border-radius: calc(var(--radius-ctl) - 6px);
+  color: var(--ink); font-size: 15px; cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.select-opt:hover, .select-opt.active { background: var(--canvas); }
+.select-opt[aria-selected=true] { color: var(--primary); font-weight: 500; }
+.select-opt[aria-selected=true]::after { content: "✓"; font-size: 13px; }
+
+/* 勾选/单选自绘：原生 input 保留（语义/键盘/表单值全不动），只换外观 */
+input[type=checkbox], input[type=radio] {
+  appearance: none; -webkit-appearance: none; flex: none;
+  width: 20px; height: 20px; margin: 0; cursor: pointer; position: relative;
+  background: var(--card); background-clip: padding-box;
+  border: none; box-shadow: inset 0 0 0 1px var(--line);
+  transition: box-shadow var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease),
+              transform var(--dur-1) var(--ease);
+}
+input[type=checkbox] { border-radius: 7px; }
+input[type=radio] { border-radius: 50%; }
+input[type=checkbox]:active, input[type=radio]:active { transform: scale(.92); }
+input[type=checkbox]:checked, input[type=radio]:checked {
+  background: var(--primary); box-shadow: none; background-clip: padding-box;
+}
+input[type=checkbox]:checked::after {
+  content: ""; position: absolute; left: 6px; top: 2px; width: 6px; height: 11px;
+  border: solid var(--primary-ink); border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+input[type=radio]:checked::after {
+  content: ""; position: absolute; left: 6px; top: 6px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--primary-ink);
+}
+input[type=checkbox]:focus-visible, input[type=radio]:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 2px;
+}
+input[type=checkbox]:disabled, input[type=radio]:disabled { opacity: .5; cursor: default; }
+
+/* 披露行：<details> 语义原生保留；summary 变整行把手，箭头随开合旋转（动效走
+   既有 --dur-2/--ease 令牌族，无新关键帧） */
+details.section > summary {
+  list-style: none; display: flex; align-items: center; gap: 8px;
+  min-height: 32px; cursor: pointer;
+}
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::after {
+  content: ""; width: 8px; height: 8px; margin-left: auto;
+  border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim);
+  transform: rotate(45deg); transition: transform var(--dur-2) var(--ease);
+}
+details.section[open] > summary::after { transform: rotate(225deg); }
 /* 多行输入（Web 接入的回跳地址）：min-height 是单行下限不是强制高——内容多了自己长 */
 textarea { min-height: auto; resize: vertical; line-height: 1.6; }
 input:focus-visible, select:focus-visible, a:focus-visible, button:focus-visible {
@@ -375,14 +492,20 @@ input:disabled { opacity: .6; }
 
 /* ---- 表格（窄屏在容器内横滚，不破版）---- */
 /* 1px padding 复刻旧 border 占掉的内容盒：滚动/粘性表头的实底不会盖到内环
-   （overflow 裁切发生在 padding 边缘，内容画不进环区）。 */
+   （overflow 裁切发生在 padding 边缘，内容画不进环区）。
+   min-width（W8①）：没有它，窄屏下 wrap-cell 列（用户/邮箱）会被压到每行一个字
+   （word-break:break-all + 列宽塌缩）——给表格一个下限，让它在容器里横滚而不是
+   把内容挤成竖排。 */
 .table-wrap {
   overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 1px;
+  /* min-width:0（W8①）：它是 .content 网格的子项，表格 min-width 抬上来的
+     「自动最小尺寸」会让整个页面横滚——压回容器内，横滚只发生在本盒子里 */
+  min-width: 0;
   background: var(--card); background-clip: padding-box;
   border: none; box-shadow: inset 0 0 0 1px var(--card-line);
   border-radius: var(--radius-card);
 }
-table { border-collapse: collapse; width: 100%; font-size: 14px; }
+table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 14px; }
 th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--dim); font-weight: 500; font-size: 13px; background: var(--card); position: sticky; top: 0; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -458,7 +581,10 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 .session-row:hover { background: var(--canvas); }
 .session-row.current { background: var(--primary-soft); }
 .session-row .grow { flex: 1 1 200px; min-width: 0; }
-.sess-tag { font-size: 13px; }
+/* 行尾「详情」展开的次级信息（首次登录 + IP）：占满一行换到行下；
+   收起态由 .hidden（display:none !important）完全不占位，行高不变；
+   展开进场走 app.js 的 swapIn（同一套 --ease / --dur-2 时长） */
+.session-row .sess-more { flex: 1 1 100%; color: var(--dim); font-size: 13px; }
 
 /* ---- AI 用量：KPI 卡与 7 天 sparkline ---- */
 .kpi-row { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
@@ -494,7 +620,9 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
    环区不被填充盖住）；填充条是被圆角裁的子背景层 → 裁切从 overflow:hidden
    换成 clip-path（子元素的圆角裁切走 clip-path 才有抗锯齿）。 */
 .bar-track { background: var(--canvas); background-clip: padding-box; border: none; box-shadow: inset 0 0 0 1px var(--line); border-radius: 8px; height: 16px; padding: 1px; clip-path: inset(0 round 8px); }
-.bar-fill { height: 100%; background: var(--primary); transition: width var(--dur-3) var(--ease); }
+/* display:block（W9 终检修）：.bar-fill 是行内 span，行内盒不吃 height:100%，
+   填充条一直 0 高不可见——.bar-track 是 grid/flex 子项已是块级盒，填充条补上即可 */
+.bar-fill { display: block; height: 100%; background: var(--primary); transition: width var(--dur-3) var(--ease); }
 .bar-num { text-align: right; font-family: var(--mono); }
 
 /* ---- 登录页 ---- */
@@ -632,7 +760,8 @@ tbody tr:nth-child(10) { animation-delay: 330ms; }
   }
   /* 交互反馈只留颜色/透明度：位移类的按压与悬停抬升一并撤掉。
      （入场动画时长归零后停在终态即「可见」，无需额外兜底。） */
-  .btn:active, .tab:active { transform: none; }
+  .btn:active, .tab:active, .app-chip:active, .select-btn:active,
+  input[type=checkbox]:active, input[type=radio]:active { transform: none; }
 }
 @media (prefers-reduced-motion: reduce) and (hover: hover) {
   /* 抬升阴影撤掉，但描环保留（旧行为里 border 不随 hover 抬升消失） */
