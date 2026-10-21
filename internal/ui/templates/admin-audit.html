@@ -13,7 +13,7 @@
       <option value="login.fail">login.fail</option>
       <option value="logout">logout</option>
       <option value="password.change">password.change</option>
-      <option value="password.reset">password.reset</option>
+      <option value="password.reset">重置密码</option>
       <option value="email.change">email.change</option>
       <option value="account.delete">account.delete</option>
       <option value="session.kick">session.kick</option>
@@ -35,7 +35,28 @@
       <option value="admin.role.grant">admin.role.grant</option>
       <option value="admin.role.revoke">admin.role.revoke</option>
       <option value="admin.role.change">admin.role.change</option>
+      <!-- B4 OAuth：管理端接入配置登记/更新 -->
+      <option value="admin.oauth_client.write">接入配置</option>
       <option value="internal.ensure">internal.ensure</option>
+      <!-- W4 新增操作（value 英文串 ↔ 服务端审计事件名，label 中文） -->
+      <option value="user.ban">封禁账号</option>
+      <option value="user.unban">解除封禁</option>
+      <option value="project.access_grant">加入项目名单</option>
+      <option value="project.access_revoke">移出项目名单</option>
+      <option value="project.restrict_on">开启项目限制</option>
+      <option value="project.restrict_off">关闭项目限制</option>
+      <option value="account.delete_requested">提交注销</option>
+      <option value="account.delete_cancelled">撤销注销</option>
+      <!-- B5 管理员换邮/重置资料 -->
+      <option value="user.email_change">更换邮箱</option>
+      <option value="user.profile_reset">重置资料</option>
+      <!-- B9 邀请建号与批量操作（邀请四事件按 创建/重发/撤销/接受 排；全集对拍见
+           internal/auth 的 TestAuditFilterOptionsMatchAuditConstants） -->
+      <option value="user.invite">邀请用户</option>
+      <option value="user.invite_resend">重发邀请</option>
+      <option value="user.invite_revoke">撤销邀请</option>
+      <option value="user.invite_accept">接受邀请</option>
+      <option value="admin.bulk_action">批量操作</option>
     </select>
   </label>
   <label class="field" style="margin:0"><span>actor uid</span>

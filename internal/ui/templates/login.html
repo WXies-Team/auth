@@ -3,7 +3,7 @@
   <div class="brand-lg"><img class="ico" src="/favicon.svg" alt="" width="28" height="28"><span class="name">Auth</span></div>
 
   <div class="card" id="login-card">
-    <div class="tabs" role="tablist" aria-label="登录方式">
+    <div class="tabs" role="tablist" aria-label="登录方式" id="login-tabs">
       <button type="button" class="tab" role="tab" id="tab-password" aria-selected="true" aria-controls="pane-password">密码登录</button>
       <button type="button" class="tab" role="tab" id="tab-code" aria-selected="false" aria-controls="pane-code">邮箱验证码</button>
       <button type="button" class="tab" role="tab" id="tab-reset" aria-selected="false" aria-controls="pane-reset">找回密码</button>
@@ -76,6 +76,22 @@
       <p class="hint">重置成功后，其它已登录设备会全部退出。</p>
       <p class="err" id="reset-error" role="alert" hidden></p>
       <button type="submit" class="btn primary" style="width:100%">重置密码</button>
+    </form>
+
+    <!-- 强制改密（W1）：登录回执 mustChangePassword=true 时顶替整个卡片——
+         密码登录把这一步输过的密码作为 oldPassword 带上；Passkey/验证码登录
+         没有密码可带，按放宽契约传空串。默认 .hidden（display:none !important） -->
+    <form id="step-force-pw" class="hidden" aria-labelledby="force-pw-title">
+      <h2 id="force-pw-title">请设置新密码</h2>
+      <p class="hint">出于安全考虑，必须设置新密码后才能继续使用。</p>
+      <label class="field"><span>新密码（至少 8 位）</span>
+        <input type="password" id="force-pw-new" autocomplete="new-password" required>
+      </label>
+      <label class="field"><span>确认新密码</span>
+        <input type="password" id="force-pw-confirm" autocomplete="new-password" required>
+      </label>
+      <p class="err" id="force-pw-error" role="alert" hidden></p>
+      <button type="submit" class="btn primary" id="force-pw-submit" style="width:100%">设置新密码并继续</button>
     </form>
 
     <!-- .btn 是 author 级 display:inline-flex，UA 的 [hidden]{display:none} 被它盖掉——

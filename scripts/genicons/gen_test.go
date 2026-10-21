@@ -8,6 +8,7 @@ import (
 	"image/png" // 解码入库 PNG 做像素级断言
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -19,8 +20,8 @@ func TestGeneratedAssetsInSync(t *testing.T) {
 	if err != nil {
 		t.Fatalf("生成资产: %v", err)
 	}
-	if len(files) != 6 {
-		t.Fatalf("资产清单应为 6 份（3 邮件图标 + apple-touch + ico + svg），得到 %d", len(files))
+	if len(files) != 9 {
+		t.Fatalf("资产清单应为 9 份（3 品牌 PNG + 3 品牌 SVG + apple-touch + ico + svg），得到 %d", len(files))
 	}
 	for _, f := range files {
 		got, err := os.ReadFile(filepath.Join("..", "..", f.rel))
@@ -34,27 +35,30 @@ func TestGeneratedAssetsInSync(t *testing.T) {
 	}
 }
 
-// 三个邮件图标的 Content-ID 名必须与 internal/mail 的内嵌注册表口径一致
-//（cid = 文件名 + "-icon"）——文件名拼错会让邮件里出现裂图。
-func TestMailIconFilenamesMatchCIDConvention(t *testing.T) {
-	want := map[string]bool{"calorie-diary.png": true, "expense-diary.png": true, "auth.png": true}
+// 三品牌邮件 logo 的文件名必须与品牌注册表的 logoPath 口径一致
+//（<slug>-v1.png + 矢量源 <slug>.svg）——文件名拼错会让邮件里出现裂图。
+func TestBrandLogoFilenamesMatchRegistryConvention(t *testing.T) {
+	want := map[string]bool{
+		"calorie-diary-v1.png": true, "expense-diary-v1.png": true, "auth-v1.png": true,
+		"calorie-diary.svg": true, "expense-diary.svg": true, "auth.svg": true,
+	}
 	files, err := generate()
 	if err != nil {
 		t.Fatalf("生成资产: %v", err)
 	}
 	got := map[string]bool{}
 	for _, f := range files {
-		if dir, name := filepath.Split(f.rel); dir == "internal/mail/icons/" {
+		if dir, name := filepath.Split(f.rel); dir == "internal/ui/static/brand/" {
 			got[name] = true
 		}
 	}
 	for name := range want {
 		if !got[name] {
-			t.Errorf("缺邮件图标 %s", name)
+			t.Errorf("缺品牌 logo %s", name)
 		}
 	}
 	if len(got) != len(want) {
-		t.Errorf("邮件图标应恰为 %v，得到 %v", want, got)
+		t.Errorf("品牌 logo 应恰为 %v，得到 %v", want, got)
 	}
 }
 
@@ -91,9 +95,9 @@ func px(img image.Image, x, y int) (r, g, b, a uint8) {
 }
 
 // 站点 favicon 三件套（2026-10-20 作者拍板）：**透明底 + miuix 蓝 #3482FF 的描边本体**，
-// 不带任何背景；邮件 CID 图标（2026-10-20 重做拍板）：**纯色 #3482FF 实底**（不许渐变）
-// + 白色矢量，squircle 外形不变。
-func TestFaviconTransparentBlueAndMailIconsUnchanged(t *testing.T) {
+// 不带任何背景；品牌邮件 logo（2026-10-21 换装自 CID 内嵌图）：**纯色 #3482FF 实底**
+//（不许渐变）+ 白色矢量，squircle 外形不变。
+func TestFaviconTransparentBlueAndBrandLogosUnchanged(t *testing.T) {
 	// ---- favicon.svg：纯蓝描边，无渐变、无底 ----
 	svg := string(readAsset(t, "internal/ui/static/favicon.svg"))
 	if !strings.Contains(svg, `stroke="#3482FF"`) {
@@ -181,24 +185,27 @@ func TestFaviconTransparentBlueAndMailIconsUnchanged(t *testing.T) {
 		}
 	}
 
-	// ---- 邮件 CID 图标：纯色 #3482FF 实底（**零渐变**）+ 白矢量 + 超椭圆切角 ----
+	// ---- 品牌邮件 logo：纯色 #3482FF 实底（**零渐变**）+ 白矢量 + 超椭圆切角 ----
 	for _, name := range []string{"calorie-diary", "expense-diary", "auth"} {
-		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/mail/icons/"+name+".png")))
+		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/ui/static/brand/"+name+"-v1.png")))
 		if err != nil {
-			t.Fatalf("解码 %s.png: %v", name, err)
+			t.Fatalf("解码 %s-v1.png: %v", name, err)
+		}
+		if img.Bounds().Dx() != 128 || img.Bounds().Dy() != 128 {
+			t.Errorf("%s-v1.png 应为 128px（64@2x），得到 %v", name, img.Bounds())
 		}
 		// ① 四角是超椭圆切角（透明）
-		for _, c := range [][2]int{{0, 0}, {191, 0}, {0, 191}, {191, 191}} {
+		for _, c := range [][2]int{{0, 0}, {127, 0}, {0, 127}, {127, 127}} {
 			if a := pxAtAlpha(img, c[0], c[1]); a != 0 {
-				t.Errorf("%s 邮件图标角 (%d,%d) 应透明（超椭圆切角），得到 alpha=%d", name, c[0], c[1], a)
+				t.Errorf("%s logo 角 (%d,%d) 应透明（超椭圆切角），得到 alpha=%d", name, c[0], c[1], a)
 			}
 		}
 		// ② 采样点逐点断言：上/下/左/右四边中点都在字形外包盒之外，必须是
 		//    **不透明的 #3482FF 实底**——顶底同色即证明没有任何竖直渐变
-		for _, p := range [][2]int{{96, 8}, {96, 184}, {8, 96}, {184, 96}} {
+		for _, p := range [][2]int{{64, 8}, {64, 120}, {8, 64}, {120, 64}} {
 			r, g, b, a := px(img, p[0], p[1])
 			if a != 255 || r != 0x34 || g != 0x82 || b != 0xFF {
-				t.Errorf("%s 邮件图标 (%d,%d) 应为纯色 #3482FF 实底，得到 rgba(%d,%d,%d,%d)",
+				t.Errorf("%s logo (%d,%d) 应为纯色 #3482FF 实底，得到 rgba(%d,%d,%d,%d)",
 					name, p[0], p[1], r, g, b, a)
 			}
 		}
@@ -237,6 +244,18 @@ func TestFaviconTransparentBlueAndMailIconsUnchanged(t *testing.T) {
 		if whiteGlyph == 0 {
 			t.Errorf("%s 缺白色矢量前景", name)
 		}
+		// ④ 矢量源：同款蓝底白字形、无渐变，alt/title 文案在
+		svg := string(readAsset(t, "internal/ui/static/brand/"+name+".svg"))
+		for _, want := range []string{`fill="#3482FF"`, `stroke="#FFFFFF"`, brandLabels[name]} {
+			if !strings.Contains(svg, want) {
+				t.Errorf("%s.svg 缺 %q", name, want)
+			}
+		}
+		for _, bad := range []string{"linearGradient", "url(#"} {
+			if strings.Contains(svg, bad) {
+				t.Errorf("%s.svg 不该带渐变，却含 %q", name, bad)
+			}
+		}
 	}
 }
 
@@ -259,25 +278,25 @@ func glyphMask(img image.Image, white bool) []bool {
 	return m
 }
 
-// 字形口径（全渠道统一）：auth 品牌 = **hexagon**（与站点 favicon 同字形，2026-10-20
-// 换装：曾用 fingerprint，与 passkey 功能图标撞脸），flame/receipt 只属于两个日记品牌。
-// 比对方式：邮件图（品牌画法）与同一套路径现渲染的站点画法，**字形掩码必须逐像素一致**
-// ——映射被改错立刻红。
-func TestMailIconGlyphMapping(t *testing.T) {
+// 字形口径（全渠道统一）：auth = **shield 素盾**（2026-10-21 换装，favicon 三件套与
+// 品牌邮件 logo 同出一份 path data），flame/receipt 只属于两个日记品牌。
+// 比对方式：品牌 logo（品牌画法）与同一套路径现渲染的站点画法，**字形掩码必须逐像素
+// 一致**——映射被改错立刻红。
+func TestBrandLogoGlyphMapping(t *testing.T) {
 	cases := []struct {
 		file  string
 		paths []string
 	}{
 		{"calorie-diary", flamePaths},
 		{"expense-diary", receiptPaths},
-		{"auth", hexagonPaths},
+		{"auth", shieldPaths},
 	}
 	for _, c := range cases {
-		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/mail/icons/"+c.file+".png")))
+		img, err := png.Decode(bytes.NewReader(readAsset(t, "internal/ui/static/brand/"+c.file+"-v1.png")))
 		if err != nil {
-			t.Fatalf("解码 %s.png: %v", c.file, err)
+			t.Fatalf("解码 %s-v1.png: %v", c.file, err)
 		}
-		ref, err := renderIcon(iconSpec{size: 192, boxFrac: 0.6, paths: c.paths, transparentBlue: true})
+		ref, err := renderIcon(iconSpec{size: 128, boxFrac: 0.76, paths: c.paths, transparentBlue: true})
 		if err != nil {
 			t.Fatalf("渲染参照字形: %v", err)
 		}
@@ -292,7 +311,7 @@ func TestMailIconGlyphMapping(t *testing.T) {
 			}
 		}
 		if diff != 0 {
-			t.Errorf("%s.png 的字形与参照路径不一致（%d 像素差）——品牌→字形映射被改错了", c.file, diff)
+			t.Errorf("%s-v1.png 的字形与参照路径不一致（%d 像素差）——品牌→字形映射被改错了", c.file, diff)
 		}
 	}
 }
@@ -300,4 +319,45 @@ func TestMailIconGlyphMapping(t *testing.T) {
 func pxAtAlpha(img image.Image, x, y int) uint8 {
 	_, _, _, a := px(img, x, y)
 	return a
+}
+
+// officialShield 是 lucide 官方 icons/shield.svg 的 path data 逐字副本
+//（https://raw.githubusercontent.com/lucide-icons/lucide/main/icons/shield.svg，
+// 与 v0.462.0 同串）——钉住生成器里的 shieldPaths，字形被改一眼红。
+const officialShield = "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"
+
+// 全渠道一个图形（2026-10-21 拍板）：Auth 品牌字形只有素盾这一份——
+// ① shieldPaths 必须与 lucide 官方 shield 逐字一致；
+// ② favicon.svg 的字形路径 == brand/auth.svg 的前景字形 == shieldPaths（同源单出）。
+// 任何一处被单独改字形（比如只换了 favicon 或只换了邮件 logo），这里立刻红。
+func TestAuthGlyphSingleSourceShield(t *testing.T) {
+	if len(shieldPaths) != 1 || shieldPaths[0] != officialShield {
+		t.Errorf("shieldPaths 与 lucide 官方 icons/shield.svg 不符（字形被改了？）:\n%v", shieldPaths)
+	}
+	re := regexp.MustCompile(`d="([^"]*)"`)
+	pathDs := func(rel string) []string {
+		var out []string
+		for _, m := range re.FindAllStringSubmatch(string(readAsset(t, rel)), -1) {
+			out = append(out, m[1])
+		}
+		return out
+	}
+	// ② favicon.svg：整份文件只该有 shield 一条字形路径
+	fav := pathDs("internal/ui/static/favicon.svg")
+	if len(fav) != len(shieldPaths) {
+		t.Fatalf("favicon.svg 应恰有 %d 条字形路径，得到 %d 条: %v", len(shieldPaths), len(fav), fav)
+	}
+	// brand/auth.svg：第 1 条是超椭圆底（M...Z 折线），其后才是字形
+	brand := pathDs("internal/ui/static/brand/auth.svg")
+	if len(brand) != len(shieldPaths)+1 {
+		t.Fatalf("brand/auth.svg 应为 1 条超椭圆底 + %d 条字形，得到 %d 条", len(shieldPaths), len(brand))
+	}
+	for i, d := range shieldPaths {
+		if fav[i] != d {
+			t.Errorf("favicon.svg 字形[%d] 与 shieldPaths 不一致——站点位脱离了同源:\n got %s\nwant %s", i, fav[i], d)
+		}
+		if brand[i+1] != d {
+			t.Errorf("brand/auth.svg 字形[%d] 与 shieldPaths 不一致——品牌位脱离了同源:\n got %s\nwant %s", i, brand[i+1], d)
+		}
+	}
 }

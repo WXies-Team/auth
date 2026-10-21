@@ -8,10 +8,22 @@
 
 <form class="row" id="user-search-form" role="search">
   <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
-    <input type="text" id="user-query" placeholder="按邮箱片段或 uid 搜索" autocomplete="off">
+    <input type="text" id="user-query" placeholder="按邮箱片段或 uid 搜索（同时过滤下方邀请）" autocomplete="off">
   </label>
   <button type="submit" class="btn">{{icon "search"}} 搜索</button>
 </form>
+
+<div class="row" style="margin-top:4px">
+  <button type="button" class="btn" id="invite-open">{{icon "mail"}} 邀请用户</button>
+  <!-- 批量工具条：N 实时；选中为空整条收起（.row 是 flex，显隐必须走 .hidden 类） -->
+  <span class="row hidden" id="bulk-bar" style="gap:8px;margin-left:auto">
+    <span class="dim" id="bulk-count"></span>
+    <button type="button" class="btn danger small" id="bulk-reset">批量重置密码</button>
+    <button type="button" class="btn danger small" id="bulk-ban">批量封禁</button>
+    <button type="button" class="btn small" id="bulk-unban">批量解除封禁</button>
+    <button type="button" class="btn ghost small" id="bulk-clear">清空选择</button>
+  </span>
+</div>
 
 <p class="err" id="users-error" role="alert" hidden></p>
 
@@ -19,10 +31,10 @@
   <table>
     <caption class="sr-only">用户列表</caption>
     <thead>
-      <tr><th>邮箱</th><th>uid</th><th>角色</th><th>项目授权</th><th>两步验证</th><th>Passkey</th><th>注册时间</th><th></th></tr>
+      <tr><th style="width:42px"><input type="checkbox" id="users-selall" aria-label="选择本页全部用户"></th><th>用户</th><th>uid</th><th>角色</th><th>项目授权</th><th>两步验证</th><th>Passkey</th><th>注册时间</th><th></th></tr>
     </thead>
     <tbody id="users-body">
-      <tr><td colspan="8" class="empty">读取中…</td></tr>
+      <tr><td colspan="9" class="empty">读取中…</td></tr>
     </tbody>
   </table>
 </div>
@@ -32,6 +44,22 @@
   <span class="dim" id="users-page">—</span>
   <button type="button" class="btn small" id="users-next">下一页</button>
 </div>
+
+<!-- 待处理邀请（B9）：折叠的次级表，四态徽标 + 行内重发/撤销；过滤复用上面的搜索框 -->
+<details class="section" id="invites-wrap">
+  <summary>邀请记录 <span class="dim" id="invites-count"></span></summary>
+  <div class="table-wrap" style="margin-top:10px">
+    <table>
+      <caption class="sr-only">邀请记录</caption>
+      <thead>
+        <tr><th>邮箱</th><th>项目</th><th>状态</th><th>有效期</th><th></th></tr>
+      </thead>
+      <tbody id="invites-body">
+        <tr><td colspan="5" class="empty">读取中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</details>
 
 <!-- 详情面板：凭证摘要 + 角色调整 + 应用授权开关 + 会话管理 -->
 <section class="card detail hidden" id="user-detail" aria-labelledby="ud-title" aria-live="polite">
@@ -52,5 +80,82 @@
       <button type="submit" class="btn primary" id="ud-dlg-ok">确认</button>
     </div>
   </form>
+</dialog>
+
+<!-- 邀请用户弹层（B9）：邮箱 + 项目（super 见全部与「不限项目」，项目管理员只能选授权项） -->
+<dialog class="dlg" id="invite-dialog" aria-labelledby="inv-dlg-title">
+  <form method="dialog" id="invite-form">
+    <h2 id="inv-dlg-title">邀请用户</h2>
+    <p class="dim">邀请链接 24 小时内有效且只能使用一次：收件人点开设置密码即完成注册。</p>
+    <label class="field"><span>邮箱</span>
+      <input type="email" id="invite-email" autocomplete="off" placeholder="输入被邀请人的邮箱">
+    </label>
+    <label class="field"><span>项目</span>
+      <select id="invite-app" aria-label="邀请加入的项目"></select>
+    </label>
+    <p class="err" id="invite-error" role="alert" hidden></p>
+    <div class="row end">
+      <button type="button" class="btn" id="invite-cancel">取消</button>
+      <button type="submit" class="btn primary" id="invite-ok">发送邀请</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 批量操作弹层（B9）：确认视图（邮箱清单 + 后果逐条 + 一次配置）与结果视图同层切换 -->
+<dialog class="dlg" id="bulk-dialog" aria-labelledby="bulk-dlg-title">
+  <div id="bulk-dlg-confirm">
+    <h2 id="bulk-dlg-title">批量操作</h2>
+    <p class="dim" id="bulk-dlg-desc"></p>
+    <ul class="hint" id="bulk-dlg-cons" style="margin:8px 0 0;padding-left:18px"></ul>
+    <div class="list" id="bulk-dlg-list" style="max-height:180px;overflow:auto;margin-top:8px"></div>
+    <div id="bulk-dlg-config" class="hidden" style="margin-top:10px">
+      <div class="row" style="gap:8px">
+        <label class="row" style="gap:6px"><span class="dim">范围</span>
+          <select id="bulk-app" aria-label="操作范围"></select>
+        </label>
+        <span class="row" id="bulk-dur-group" style="gap:8px">
+          <label class="row" style="gap:6px"><input type="radio" name="bulk-dur" id="bulk-perm" checked> 永久</label>
+          <label class="row" style="gap:6px"><input type="radio" name="bulk-dur" id="bulk-temp"> 限时</label>
+        </span>
+      </div>
+      <label class="row hidden" id="bulk-until-field" style="gap:6px"><span class="dim">解除时间</span>
+        <input type="datetime-local" id="bulk-until">
+      </label>
+      <label class="field" id="bulk-reason-field"><span>原因（选填）</span>
+        <input type="text" id="bulk-reason" placeholder="操作原因（记入审计）" autocomplete="off">
+      </label>
+    </div>
+    <!-- N>5 的手打确认闸：输入「确认」两字才解锁主钮 -->
+    <div class="field hidden" id="bulk-gate">
+      <span>所选超过 5 人：输入「确认」以继续</span>
+      <input type="text" id="bulk-typed" autocomplete="off" placeholder="确认">
+    </div>
+    <p class="err" id="bulk-error" role="alert" hidden></p>
+    <div class="row end" style="margin-top:8px">
+      <button type="button" class="btn" id="bulk-cancel">取消</button>
+      <button type="button" class="btn danger" id="bulk-ok">确认执行</button>
+    </div>
+  </div>
+  <div id="bulk-dlg-result" class="hidden">
+    <h2>执行结果</h2>
+    <p class="dim" id="bulk-result-summary"></p>
+    <div class="list" id="bulk-result-list" style="max-height:260px;overflow:auto;margin-top:8px"></div>
+    <div class="row end" style="margin-top:12px">
+      <button type="button" class="btn hidden" id="bulk-retry-failed">重试勾选的失败项</button>
+      <button type="button" class="btn primary" id="bulk-result-close">完成</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- 重置密码的回执层（W3）：一次性临时密码展示，关层即清零 -->
+<dialog class="dlg" id="rp-done" aria-labelledby="rp-done-title">
+  <h2 id="rp-done-title">重置完成</h2>
+  <p class="dim" id="rp-done-hint"></p>
+  <p class="secret-line" style="margin-top:8px"><code class="mono" id="rp-done-pw"></code>
+    <button type="button" class="btn small" id="rp-done-copy">{{icon "copy"}} 复制</button>
+  </p>
+  <div class="row end" style="margin-top:12px">
+    <button type="button" class="btn primary" id="rp-done-close">我已保存</button>
+  </div>
 </dialog>
 {{end}}

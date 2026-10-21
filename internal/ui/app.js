@@ -74,10 +74,13 @@ function fadeOutRow(el, done) {
   setTimeout(done, 180);
 }
 
+/* 时间渲染统一做 0 值防御：0 / 负值 / 字符串 "0" / NaN 一律当「没有时间」，
+   不渲染 1970-01-01 这类纪元日期（服务端对「从未使用/未记录」回 0）。 */
 function fmtTime(ms) {
-  if (!ms) return '—';
-  const d = new Date(Number(ms));
-  const p = n => String(n).padStart(2, '0');
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const d = new Date(n);
+  const p = v => String(v).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
@@ -88,8 +91,9 @@ function todayStr() {
 }
 
 function relTime(ms) {
-  if (!ms) return '—';
-  const diff = Date.now() - Number(ms);
+  const t = Number(ms);
+  if (!Number.isFinite(t) || t <= 0) return '—';
+  const diff = Date.now() - t;
   const min = Math.floor(diff / 60000);
   if (min < 1) return '刚刚';
   if (min < 60) return `${min} 分钟前`;
@@ -99,6 +103,23 @@ function relTime(ms) {
   if (day === 1) return '昨天';
   if (day < 30) return `${day} 天前`;
   return fmtTime(ms);
+}
+
+/* remainTime 是 relTime 的未来向镜像（邀请有效期这类「还有多久」）：relTime 按
+   「过去了多久」算，打在未来的毫秒上恒回「刚刚」——不能拿来显示剩余。
+   同一套梯度（分钟/小时/天），向上取整且至少 1 分钟（「1 分钟内有效」比
+   「不足 1 分钟」好读）；>30 天回绝对时间（与 relTime 的长跨度口径一致）。 */
+function remainTime(ms) {
+  const t = Number(ms);
+  if (!Number.isFinite(t) || t <= 0) return '—';
+  const left = Math.max(0, t - Date.now());
+  const min = Math.ceil(left / 60000);
+  if (min < 60) return `${min} 分钟`;
+  const hour = Math.ceil(min / 60);
+  if (hour < 24) return `${hour} 小时`;
+  const day = Math.ceil(hour / 24);
+  if (day <= 30) return `${day} 天`;
+  return fmtTime(t);
 }
 
 let toastTimer = null;
@@ -121,6 +142,20 @@ function showErr(sel, msg) {
   if (!el) return;
   el.textContent = msg || '';
   el.hidden = !msg;
+}
+
+/* 跨页提示：跳转前把提示存进 sessionStorage，目标页 DOMContentLoaded 时 drain 出来
+   （注销撤销 / 强制改密成功 / 注销已提交都要「跳走之后还看得见一句 toast」）。 */
+function flash(msg) {
+  try { sessionStorage.setItem('auth_flash', msg); } catch (_) { /* 隐私模式等存储不可用：放弃提示，不拦流程 */ }
+}
+function drainFlash() {
+  let msg = '';
+  try {
+    msg = sessionStorage.getItem('auth_flash') || '';
+    if (msg) sessionStorage.removeItem('auth_flash');
+  } catch (_) { return; }
+  if (msg) toast(msg);
 }
 
 function setBusy(btn, busy) {
@@ -339,6 +374,10 @@ const APP_LABEL = (() => {
 })();
 const appLabel = v => APP_LABEL[v] || v;
 
+/* 平台管理员标记：layout 按 Data.IsSuper 渲染 body[data-super]（与管理入口同一份
+   模板层门控依据），JS 侧 super 专属控件读它，不再自查角色。 */
+const IS_SUPER = document.body.hasAttribute('data-super');
+
 /* 管理页守卫：先确认自己真的是管理员，再让各页发起数据请求；
    角色不符直接回概览（数据层的 requireAdmin 还会逐请求再挡一次）。
    W2：admin 与 super 都放行（与 ui.IsAdminRole 同口径），super 标记供角色页等
@@ -402,10 +441,64 @@ function initLogin() {
     });
   });
 
+  // ---- 登录完成回执（W1）：注销撤销提示 + 强制改密步 ----
+  // 四条登录路（密码 / 两步完成 / 邮箱验证码 / Passkey）都收口到这里：
+  // deletePendingCancelled=true → toast 提示（跳走时改存 flash，下一页 drain）；
+  // mustChangePassword=true → 顶替整个卡片进「请设置新密码」步，oldPassword 带
+  // 这次登录实际用过的密码（Passkey/验证码登录没有，传空串——契约已放宽）。
+  // OAuth 续跑（B4）：?tx= 在场时登录完成回授权确认页而不是控制台（tx 是服务端
+  // 一次性事务号，只回站内 /oauth/resume，无开放重定向面）。
+  const oauthTx = new URLSearchParams(location.search).get('tx');
+  const loginLanding = () =>
+    oauthTx ? '/oauth/resume?tx=' + encodeURIComponent(oauthTx) : '/web/console';
+  let forceOldPw = '';
+  function finishLogin(res, pwd) {
+    const cancelled = !!(res && res.deletePendingCancelled);
+    if (res && res.mustChangePassword) {
+      if (cancelled) toast('已撤销账号注销，账号恢复正常');
+      showForcePassword(pwd);
+      return;
+    }
+    if (cancelled) flash('已撤销账号注销，账号恢复正常');
+    location.href = loginLanding();
+  }
+  function showForcePassword(pwd) {
+    forceOldPw = pwd || '';
+    // 步切换沿用既有区块动效；残留报错一并清掉（换步即换语义）
+    $('#login-tabs').classList.add('hidden');
+    ['#pane-password', '#pane-code', '#pane-reset', '#passkey-sep', '#passkey-login']
+      .forEach(sel => { const el = $(sel); if (el) el.classList.add('hidden'); });
+    const step = $('#step-force-pw');
+    step.classList.remove('hidden');
+    showErr('#force-pw-error', '');
+    $('#force-pw-new').value = ''; $('#force-pw-confirm').value = '';
+    swapIn(step);
+    $('#force-pw-new').focus();
+  }
+  $('#step-force-pw').addEventListener('submit', async e => {
+    e.preventDefault();
+    showErr('#force-pw-error', '');
+    const nw = $('#force-pw-new').value, cf = $('#force-pw-confirm').value;
+    if (nw.length < 8) { showErr('#force-pw-error', '新密码至少 8 位'); return; }
+    if (nw !== cf) { showErr('#force-pw-error', '两次输入的新密码不一致'); return; }
+    const btn = $('#force-pw-submit');
+    setBusy(btn, true);
+    try {
+      await api('/auth/change-password', {
+        method: 'POST', body: { oldPassword: forceOldPw, newPassword: nw },
+      });
+      // 服务器已随回执刷新会话 cookie；提示跳走后在控制台 drain 出来。
+      // OAuth 续跑同款：强制改密完成后也回授权确认页（?tx= 在场时）
+      flash('密码已更新');
+      location.href = loginLanding();
+    } catch (err) { showErr('#force-pw-error', err.message); } finally { setBusy(btn, false); }
+  });
+
   // ---- 密码 →（2FA）三模式：验证器码 / 邮箱码 / 恢复码（GitHub 式单输入原地换语义）----
   // 与两个弹框同一个 makeCodeToggle：三态与二态的差别只是配置（多一组邮箱码态、
   // 多两个切换按钮、每态一段 intro），apply 收口的属性同步/清值/清旧报错/聚焦一处不变。
   let loginToken = '';
+  let enteredPw = '';   // 密码登录这一步用过的密码（服务端确认正确后才记），强制改密时作 oldPassword
   const stepPwd = $('#step-password'), stepTotp = $('#step-totp');
   const f2 = makeCodeToggle($('#login-code-2fa'), $('#totp-label'), {
     initial: 'totp',
@@ -466,16 +559,18 @@ function initLogin() {
     setBusy(btn, true);
     try {
       if (!loginToken) {
+        const pwd = $('#login-password').value;
         const res = await api('/web/login/password', {
           method: 'POST',
-          body: { email: $('#login-email').value.trim(), password: $('#login-password').value },
+          body: { email: $('#login-email').value.trim(), password: pwd },
         });
         if (res.status === '2fa_required') {
           loginToken = res.loginToken;
+          enteredPw = pwd;   // 密码已被服务端确认正确：第二步完成后留给强制改密步
           useTotpStep(true);
           return;
         }
-        location.href = '/web/console';
+        finishLogin(res, pwd);
         return;
       }
       // 单输入三选一：按当前模式决定字段（邮箱码 → emailCode，恢复码 → recoveryCode，
@@ -491,8 +586,8 @@ function initLogin() {
       if (fm === 'email') body.emailCode = v;
       else if (fm === 'recovery') body.recoveryCode = v;
       else body.code = v;
-      await api('/web/login/totp', { method: 'POST', body });
-      location.href = '/web/console';
+      const done = await api('/web/login/totp', { method: 'POST', body });
+      finishLogin(done, enteredPw);   // 强制改密时把第一步确认过的密码带上
     } catch (err) {
       showErr('#login-error', err.message);
       // 只有**登录中间态**过期才退回第一步——邮箱码自己的「验证码已过期」不能触发，
@@ -524,11 +619,11 @@ function initLogin() {
     e.preventDefault();
     showErr('#code-error', '');
     try {
-      await api('/web/login/email-code', {
+      const done = await api('/web/login/email-code', {
         method: 'POST',
         body: { email: $('#code-email').value.trim(), code: $('#code-code').value.trim() },
       });
-      location.href = '/web/console';
+      finishLogin(done);   // 验证码登录没有密码可带，强制改密时 oldPassword 传空串
     } catch (err) { showErr('#code-error', err.message); }
   });
 
@@ -564,11 +659,11 @@ function initLogin() {
       try {
         const opts = await api('/webauthn/login/options', { method: 'POST', body: {} });
         const cred = await navigator.credentials.get({ publicKey: decodePKOptions(opts.publicKey) });
-        await api('/webauthn/login/finish', {
+        const done = await api('/webauthn/login/finish', {
           method: 'POST',
           body: { ceremonyId: opts.ceremonyId, response: assertionJSON(cred) },
         });
-        location.href = '/web/console';
+        finishLogin(done);   // Passkey 登录没有密码可带，强制改密时 oldPassword 传空串
       } catch (err) {
         if (err && err.name === 'NotAllowedError') return; // 用户取消不报错
         showErr('#passkey-error', (err && err.message) || 'Passkey 验证失败，请重试');
@@ -755,7 +850,7 @@ function initSessions() {
           $('#kick-title').textContent = '退出该设备全部会话';
           $('#kick-desc').textContent = `将退出「${g.device}」上的 ${others.length} 条会话，该设备下次请求时会退出登录。`;
           $('#kick-ok').textContent = '全部退出';
-          openDialog($('#kick-dialog'));
+          openDialog($('#kick-dialog'), '#kick-cancel');
         });
       }
       $$('.session-row', el).forEach(row => {
@@ -767,7 +862,7 @@ function initSessions() {
           $('#kick-title').textContent = '退出这条会话';
           $('#kick-desc').textContent = `将退出「${g.device}」上的 ${pending.label}，它下次请求时会退出登录。`;
           $('#kick-ok').textContent = '退出会话';
-          openDialog($('#kick-dialog'));
+          openDialog($('#kick-dialog'), '#kick-cancel');
         });
       });
       list.appendChild(el);
@@ -782,7 +877,7 @@ function initSessions() {
       ? `将退出除「本设备」外的 ${others} 条会话，本机保持登录。`
       : '没有其它会话需要退出。';
     $('#kick-ok').textContent = others ? '全部退出' : '知道了';
-    openDialog($('#kick-dialog'));
+    openDialog($('#kick-dialog'), '#kick-cancel');
   });
   $('#kick-cancel').addEventListener('click', () => closeDialog($('#kick-dialog')));
   $('#kick-ok').addEventListener('click', async () => {
@@ -841,12 +936,15 @@ function initPasskeys() {
       }
       list.innerHTML = '';
       rows.forEach(it => {
+        // lastUsedAt<=0/缺失 = 从未用过：只说「从未使用」，不渲染 1970 日期
+        const lastUsed = Number(it.lastUsedAt || 0) > 0
+          ? `最近使用 ${esc(relTime(it.lastUsedAt))}` : '从未使用';
         const el = node(`
           <div class="item" data-id="${it.id}">
             <span class="grow">
               <span class="title pk-name">${esc(it.name)}</span>
               ${it.current ? '<span class="badge on">本机登录所用</span>' : ''}
-              <br><span class="meta">添加于 ${esc(fmtTime(it.createdAt))} · 最近使用 ${esc(relTime(it.lastUsedAt))}</span>
+              <br><span class="meta">添加于 ${esc(fmtTime(it.createdAt))} · ${lastUsed}</span>
             </span>
             <span class="row" style="gap:6px">
               <button type="button" class="btn small" data-act="rename">改名</button>
@@ -857,7 +955,7 @@ function initPasskeys() {
         el.querySelector('[data-act=del]').addEventListener('click', () => {
           pendingDel = it.id;
           $('#del-desc').textContent = `删除「${it.name}」后，这把 Passkey 立即不能再用来登录。`;
-          openDialog($('#del-dialog'));
+          openDialog($('#del-dialog'), '#del-cancel');
         });
         list.appendChild(el);
       });
@@ -875,6 +973,7 @@ function initPasskeys() {
     input.value = it.name;
     input.maxLength = 64;
     input.setAttribute('aria-label', 'Passkey 名称');
+    input.setAttribute('autocomplete', 'off');
     nameEl.replaceWith(input);
     input.focus();
     const commit = async () => {
@@ -994,7 +1093,9 @@ function initSecurity() {
   /* 恢复码下载（参考 GitHub 的 github-recovery-codes.txt 结构：服务名 + 账号 +
      生成日期 + 使用说明 + 码列表——纯码列表落进密码管理器后没人知道它是谁的）。 */
   $('#download-codes').addEventListener('click', () => {
-    const email = $('#topbar-email') ? $('#topbar-email').textContent : '';
+    // 账号邮箱取 title 属性（顶栏显示名已升级为昵称优先，完整邮箱在 title 里）
+    const el = $('#topbar-email');
+    const email = el ? (el.getAttribute('title') || el.textContent) : '';
     const body = [
       'Auth 统一账号服务 —— 恢复码',
       `账号：${email}`,
@@ -1109,7 +1210,7 @@ function initAccount() {
         body: { oldPassword: $('#pw-old').value, newPassword: $('#pw-new').value },
       });
       $('#pw-old').value = ''; $('#pw-new').value = '';
-      toast('密码已更新，其它设备已退出登录');
+      toast('密码已修改');
     } catch (err) { showErr('#pw-old-error', err.message); }
   });
 
@@ -1131,7 +1232,7 @@ function initAccount() {
         body: { code: $('#pw-code').value.trim(), password: $('#pw-code-new').value },
       });
       $('#pw-code').value = ''; $('#pw-code-new').value = '';
-      toast('密码已更新，其它设备已退出登录');
+      toast('密码已修改');
     } catch (err) { showErr('#pw-code-error', err.message); }
   });
 
@@ -1162,34 +1263,401 @@ function initAccount() {
     } catch (err) { showErr('#email-error', err.message); }
   });
 
+  // ---- 注销（W2）：注册邮箱 + 邮箱验证码双确认，7 天反悔期 ----
   $('#start-delete').addEventListener('click', () => {
-    $('#delete-password').value = '';
+    $('#delete-email').value = ''; $('#delete-code').value = '';
     showErr('#delete-error', '');
     openDialog($('#delete-dialog'));
-    $('#delete-password').focus();
+    $('#delete-email').focus();
+  });
+  $('#send-delete-code').addEventListener('click', async () => {
+    showErr('#delete-error', '');
+    const email = $('#delete-email').value.trim();
+    if (!email) { showErr('#delete-error', '请先填写注册邮箱'); return; }
+    try {
+      await api('/auth/send-code', { method: 'POST', body: { email, purpose: 'delete' } });
+      cooldown($('#send-delete-code'), 60);
+      toast('验证码已发送，没收到可查看垃圾箱');
+    } catch (err) { showErr('#delete-error', err.message); }
   });
   $('#delete-cancel').addEventListener('click', () => closeDialog($('#delete-dialog')));
   $('#delete-form').addEventListener('submit', async e => {
     e.preventDefault();
     showErr('#delete-error', '');
+    const email = $('#delete-email').value.trim();
+    const code = $('#delete-code').value.trim();
+    if (!email) { showErr('#delete-error', '请先填写注册邮箱'); return; }
+    if (!code) { showErr('#delete-error', '请输入邮箱验证码'); return; }
     const btn = $('#delete-form').querySelector('.btn.danger');
     setBusy(btn, true);
     try {
-      await api('/auth/delete', { method: 'POST', body: { password: $('#delete-password').value } });
+      await api('/auth/delete', { method: 'POST', body: { email, code } });
       closeDialog($('#delete-dialog'));
+      // 登出回登录页：会话多半已随注销失效，登不成也不拦跳转
+      try { await api('/web/logout', { method: 'POST', body: {} }); } catch (_) { /* 已登出也要跳 */ }
+      flash('注销已提交，7 天内登录可撤销');
       location.href = '/web/login';
     } catch (err) { showErr('#delete-error', err.message); setBusy(btn, false); }
   });
+}
+
+/* ---------- 账号资料（B5）：头像 / 昵称 / 头像色 ----------
+   PUT /api/profile 是**全量替换**语义（三字段每次都得提交完整），所以这里持一份
+   本地档案副本，保存时整份提交；avatarImage 与两个日记 App 同口径：**裸 base64**
+   （无 data: 前缀，标准字母表带 padding）——canvas toDataURL 产物剥掉前缀即是。 */
+function initProfile() {
+  const avatarEl = $('#pf-avatar');
+  if (!avatarEl) return;
+  const fileInput = $('#pf-avatar-file');
+  const saveBtn = $('#pf-save');
+  const email = $('#topbar-email') ? $('#topbar-email').getAttribute('title') : '';
+  let pf = { nickname: '', avatarColor: 0, avatarImage: '' };
+  let loaded = { nickname: '', avatarColor: 0, avatarImage: '' };
+
+  // 色板来自服务端注入的 JSON（internal/ui avatarPalette，与两 App AvatarPalette 同值）
+  const PALETTE = (() => {
+    try {
+      const el = document.getElementById('avatar-palette');
+      const list = JSON.parse(el ? el.textContent : '[]');
+      return Array.isArray(list) && list.length ? list : ['#5B8DEF'];
+    } catch (_) { return ['#5B8DEF']; }
+  })();
+
+  // 首字回退链与服务端 initialFor 同源：昵称首字符 → 邮箱前缀首字符
+  function avatarInitial() {
+    const src = (pf.nickname || '').trim() || (email || '').split('@')[0] || '';
+    const runes = Array.from(src);
+    return runes.length ? runes[0].toUpperCase() : '?';
+  }
+
+  function renderAvatar(fade) {
+    const bg = PALETTE[Number(pf.avatarColor)] || PALETTE[0];
+    avatarEl.style.background = bg;
+    avatarEl.style.color = avatarInk(bg); // 首字墨色与底色成对（.avatar 不写死白墨）
+    const wantImg = !!pf.avatarImage;
+    const curImg = avatarEl.querySelector('img');
+    if (wantImg) {
+      const src = 'data:image/jpeg;base64,' + pf.avatarImage;
+      if (curImg) {
+        if (curImg.src !== src) { curImg.src = src; if (fade) crossFade(avatarEl); }
+      } else {
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = '';
+        avatarEl.replaceChildren(img);
+        if (fade) crossFade(avatarEl);
+      }
+    } else if (curImg) {
+      avatarEl.textContent = avatarInitial();
+      if (fade) crossFade(avatarEl);
+    } else {
+      avatarEl.textContent = avatarInitial();
+    }
+    $('#pf-clear-avatar').classList.toggle('hidden', !wantImg);
+  }
+
+  function renderNick() {
+    $('#pf-nick-view').textContent = pf.nickname || '未设置（显示邮箱前缀）';
+  }
+
+  function renderPalette() {
+    const box = $('#pf-palette');
+    box.innerHTML = '';
+    PALETTE.forEach((hex, i) => {
+      const chip = node(`<button type="button" class="pf-chip${i === Number(pf.avatarColor) ? ' on' : ''}"
+        style="background:${esc(hex)}" aria-pressed="${i === Number(pf.avatarColor)}" aria-label="头像底色 ${i + 1}"></button>`);
+      chip.addEventListener('click', () => {
+        if (Number(pf.avatarColor) === i) return;
+        pf.avatarColor = i;
+        $$('.pf-chip', box).forEach((c, j) => {
+          c.classList.toggle('on', j === i);
+          c.setAttribute('aria-pressed', String(j === i));
+        });
+        renderAvatar(false);
+        refreshDirty();
+      });
+      box.appendChild(chip);
+    });
+  }
+
+  function dirty() {
+    return pf.nickname !== loaded.nickname ||
+      Number(pf.avatarColor) !== Number(loaded.avatarColor) ||
+      pf.avatarImage !== loaded.avatarImage;
+  }
+  function nickTooLong() {
+    return Array.from((pf.nickname || '').trim()).length > 64;
+  }
+  function refreshDirty() {
+    saveBtn.disabled = !dirty() || nickTooLong();
+  }
+
+  function applyProfile(p) {
+    pf = {
+      nickname: p.nickname || '',
+      avatarColor: Number(p.avatarColor) || 0,
+      avatarImage: p.avatarImage || '',
+    };
+    loaded = Object.assign({}, pf);
+    const mailEl = $('#pf-email');
+    if (mailEl) mailEl.textContent = email;
+    renderNick();
+    renderAvatar(false);
+    renderPalette();
+    refreshDirty();
+  }
+
+  async function load() {
+    try {
+      applyProfile(await api('/api/profile'));
+    } catch (err) { showErr('#pf-error', err.message); }
+  }
+
+  // ---- 昵称行内编辑：≤64 字符（按字符计），超长即时提示且不可保存 ----
+  $('#pf-nick-edit').addEventListener('click', () => {
+    $('#pf-nick-view').classList.add('hidden');
+    $('#pf-nick-edit').classList.add('hidden');
+    const field = $('#pf-nick-field');
+    field.classList.remove('hidden');
+    $('#pf-nick-input').value = pf.nickname;
+    swapIn(field);
+    $('#pf-nick-input').focus();
+  });
+  function closeNickEdit() {
+    $('#pf-nick-field').classList.add('hidden');
+    $('#pf-nick-view').classList.remove('hidden');
+    $('#pf-nick-edit').classList.remove('hidden');
+    showErr('#pf-nick-err', '');
+  }
+  $('#pf-nick-input').addEventListener('input', e => {
+    pf.nickname = e.target.value;
+    const over = nickTooLong();
+    showErr('#pf-nick-err', over ? '昵称最多 64 个字，请精简后重试' : '');
+    renderNick();
+    renderAvatar(false);
+    refreshDirty();
+  });
+  $('#pf-nick-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); closeNickEdit(); }
+    if (e.key === 'Escape') { e.preventDefault(); pf.nickname = loaded.nickname; $('#pf-nick-input').value = pf.nickname; renderNick(); renderAvatar(false); refreshDirty(); closeNickEdit(); }
+  });
+
+  // ---- 头像上传：方形裁剪（按短边居中裁）→ JPEG 0.85；解码后 >700KB 降质重压 ----
+  $('#pf-avatar-edit').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (!file) return;
+    showErr('#pf-error', '');
+    try {
+      pf.avatarImage = await cropAvatar(file);
+      renderAvatar(true);
+      refreshDirty();
+    } catch (err) { showErr('#pf-error', err.message || '图片处理失败，请换一张试试'); }
+  });
+  $('#pf-clear-avatar').addEventListener('click', () => {
+    if (!pf.avatarImage) return;
+    pf.avatarImage = '';
+    renderAvatar(true);
+    refreshDirty();
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    showErr('#pf-error', '');
+    setBusy(saveBtn, true);
+    try {
+      // 全量替换：三字段整份提交（漏哪个等于清哪个）
+      applyProfile(await api('/api/profile', {
+        method: 'PUT',
+        body: { nickname: pf.nickname.trim(), avatarColor: pf.avatarColor, avatarImage: pf.avatarImage },
+      }));
+      toast('资料已更新');
+      // 顶栏胶囊同源更新（昵称显示名 + 头像），不整页刷新
+      const topName = $('#topbar-email');
+      if (topName) {
+        topName.textContent = (pf.nickname || '').trim() || (email || '').split('@')[0] || '';
+        topName.setAttribute('title', email);
+      }
+      updateTopbarAvatar();
+    } catch (err) { showErr('#pf-error', err.message); } finally { setBusy(saveBtn, false); }
+  });
+
+  function updateTopbarAvatar() {
+    const top = $('#me-avatar');
+    if (!top) return;
+    const bg = PALETTE[Number(pf.avatarColor)] || PALETTE[0];
+    top.style.background = bg;
+    top.style.color = avatarInk(bg); // 首字墨色与底色成对（.avatar 不写死白墨）
+    if (pf.avatarImage) {
+      const img = document.createElement('img');
+      img.src = 'data:image/jpeg;base64,' + pf.avatarImage;
+      img.alt = '';
+      top.replaceChildren(img);
+    } else {
+      top.textContent = avatarInitial();
+    }
+  }
+
+  load();
+}
+
+/* ---------- 新设备登录提醒开关（W1，账号页登录提醒卡） ----------
+   PUT /api/profile 是全量替换语义：这里先 GET 整份档案，再带上 loginNotify 整份
+   PUT——只发 {loginNotify} 会把昵称/头像清空。失败回滚勾选态并 toast 原因。 */
+function initLoginNotify() {
+  const box = $('#login-notify');
+  if (!box) return;
+  let loaded = null;
+  async function load() {
+    try {
+      const p = await api('/api/profile');
+      loaded = !!p.loginNotify;
+      box.checked = loaded;
+    } catch (err) { toast(err.message, true); }
+  }
+  box.addEventListener('change', async () => {
+    const want = box.checked;
+    box.disabled = true;
+    try {
+      const p = await api('/api/profile');
+      await api('/api/profile', {
+        method: 'PUT',
+        body: {
+          nickname: p.nickname || '', avatarColor: Number(p.avatarColor) || 0,
+          avatarImage: p.avatarImage || '', loginNotify: want,
+        },
+      });
+      loaded = want;
+      toast(want ? '已开启新设备登录提醒' : '已关闭新设备登录提醒');
+    } catch (err) {
+      box.checked = loaded === null ? !want : loaded;
+      toast(err.message, true);
+    } finally { box.disabled = false; }
+  });
+  load();
+}
+
+/* 头像换新交叉淡入（B5）：旧内容淡出 → 换新 → 淡入，只动 opacity/transform；
+   reduced-motion 直接切（与 fadeOutRow 同一套门禁）。 */
+function crossFade(el) {
+  if (!el || reducedMotion() || typeof el.animate !== 'function') return;
+  try {
+    el.animate([{ opacity: 1 }, { opacity: 0.2 }, { opacity: 1 }],
+      { duration: 200, easing: 'cubic-bezier(.2, 0, 0, 1)' });
+  } catch (_) { /* 浏览器不支持就静默 */ }
+}
+
+/* 方形裁剪 + JPEG 压缩：按短边居中裁成正方形（输出上限 512px），toDataURL(0.85)；
+   解码后 >700KB（服务端 maxAvatarImageBytes）就逐档降质（0.85→0.35），仍超再缩画布。
+   回**裸 base64**（剥 data: 前缀）——与日记客户端 Base64.NO_WRAP 的产物同形。 */
+const AVATAR_MAX_DECODED = 700 * 1024;
+async function cropAvatar(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve(im);
+      im.onerror = () => reject(new Error('图片无法解码，请换一张'));
+      im.src = url;
+    });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    if (!side) throw new Error('图片尺寸异常，请换一张');
+    let size = Math.min(side, 512);
+    const sx = (img.naturalWidth - side) / 2;
+    const sy = (img.naturalHeight - side) / 2;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      canvas.getContext('2d').drawImage(img, sx, sy, side, side, 0, 0, size, size);
+      for (let q = 0.85; q >= 0.3; q -= 0.1) {
+        const b64 = canvas.toDataURL('image/jpeg', q).split(',')[1] || '';
+        // base64 长度 ≈ 解码字节数 × 4/3：直接按字符数估即可，不必真解一遍
+        if (Math.floor(b64.length * 3 / 4) <= AVATAR_MAX_DECODED) return b64;
+      }
+      size = Math.floor(size * 0.7); // 最低档仍超：缩小画布再来一轮
+    }
+    throw new Error('图片过大，请换一张更小的图');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 /* ---------- 后台：用户（含原角色管理，合并页） ---------- */
 /* 角色徽标与授权文案的术语表：super→平台管理员、admin→项目管理员、user→普通用户；
    授权列只给计数文案，不列 app 名。 */
 const ROLE_LABEL = { super: '平台管理员', admin: '项目管理员', user: '普通用户' };
+
+/* 头像渲染（B5，列表/抽屉/会话总览共用）：avatarImage 有值用图，无图回退色块+首字
+   （首字取昵称首字符，再退邮箱前缀首字符；底色取 avatarColor 下标对应的色板值、
+   首字墨色按 avatarInk(底色) 择黑/白——色板来自服务端注入的 JSON，与 internal/ui
+   avatarPalette 及两 App 同一份值）。 */
+function avatarPalette() {
+  try {
+    const el = document.getElementById('avatar-palette');
+    const list = JSON.parse(el ? el.textContent : '[]');
+    return Array.isArray(list) && list.length ? list : ['#5B8DEF'];
+  } catch (_) { return ['#5B8DEF']; }
+}
+function avatarInitial(nickname, email) {
+  const src = (nickname || '').trim() || (email || '').split('@')[0] || '';
+  const runes = Array.from(src);
+  return runes.length ? esc(runes[0].toUpperCase()) : '?';
+}
+function avatarHex(index) {
+  const p = avatarPalette();
+  const i = Number(index);
+  return p[Number.isInteger(i) && i >= 0 && i < p.length ? i : 0];
+}
+/* 首字墨色：按 WCAG 相对亮度取白墨/黑墨中对比更高的一支——与 Go 侧 ui.avatarInkFor
+   及两 App AvatarPalette.inkFor 同式（.avatar 不再写死白墨：白墨对 8 色色板实测只有
+   1.92~4.49:1，全数低于 4.5:1；黑墨全数 ≥4.5，实测表见 ui.go avatarInkFor 注释，
+   TestAvatarInkContrast 钉住 Go 侧——改规则请同 PR 同步两处）。 */
+function avatarInk(bg) {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(String(bg || '').trim());
+  if (!m) return '#000000'; // 走不到（底色只来自常量色板），兜底黑墨 = 8 色全达标的那支
+  const n = parseInt(m[1], 16);
+  const lin = c => { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+  const l = 0.2126 * lin(n >> 16 & 255) + 0.7152 * lin(n >> 8 & 255) + 0.0722 * lin(n & 255);
+  return 1.05 / (l + 0.05) >= (l + 0.05) / 0.05 ? '#ffffff' : '#000000';
+}
+function avatarHTML(u, px) {
+  const size = `width:${px}px;height:${px}px;font-size:${Math.round(px * 0.42)}px`;
+  if (u.avatarImage) {
+    return `<span class="avatar" style="${size}" aria-hidden="true"><img src="data:image/jpeg;base64,${esc(u.avatarImage)}" alt=""></span>`;
+  }
+  const bg = avatarHex(u.avatarColor);
+  return `<span class="avatar" style="${size};background:${esc(bg)};color:${avatarInk(bg)}" aria-hidden="true">${avatarInitial(u.nickname, u.email)}</span>`;
+}
+/* 身份堆叠（头像+昵称+邮箱，Qualytics 形态）：列表与抽屉头部同款。 */
+function userCell(u, px) {
+  const name = (u.nickname || '').trim() || u.email;
+  return `<span class="user-cell">${avatarHTML(u, px)}
+    <span class="grow"><span class="title">${esc(name)}</span>${u.nickname ? `<br><span class="meta wrap-cell">${esc(u.email)}</span>` : ''}</span></span>`;
+}
 function scopeSummary(u) {
   if (u.role === 'super') return '管理全部项目';
   const n = Number(u.scopeCount || 0);
   return n > 0 ? `已授权 ${n} 个项目` : '未授权任何项目';
+}
+
+/* 封禁范围选项：平台管理员 = 全局 + 注册表全部项目；项目管理员 = 仅自己授权的
+   项目（GET /admin/projects 只回自己范围内的，前端不再裁；永远没有全局项）。 */
+async function banScopeOptions() {
+  if (IS_SUPER) {
+    return [{ key: '*', label: '全部项目（全局）' }]
+      .concat(knownApps().map(a => ({ key: a.key, label: a.label })));
+  }
+  try {
+    const res = await api('/admin/projects');
+    return (res.projects || []).map(p => ({ key: p.app, label: p.name }));
+  } catch (_) { return []; }
+}
+
+/* 限时封禁的最早解除时间：当前 + 5 分钟（datetime-local 的本地格式）。 */
+function banMinStr() {
+  const d = new Date(Date.now() + 5 * 60 * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function initAdminUsers() {
@@ -1199,16 +1667,17 @@ function initAdminUsers() {
   const pager = makePager({ prev: '#users-prev', next: '#users-next', label: '#users-page', limit: 20 });
 
   // 确认弹窗：一次挂一个待执行动作 + 它的成功提示，确认后走 reauth 闸
-  //（api() 401 自动弹重验框）——提示按操作分说，不统一糊一句「已生效」
+  //（api() 401 自动弹重验框）——提示按操作分说，不统一糊一句「已生效」。
+  // after 可选：拿回执干收尾活（重置密码的一次性密码展示层走它）。
   let pending = null;
   let lastDetail = { uid: 0, email: '' };
-  function confirmAction(title, desc, done, fn, danger) {
-    pending = { fn, done };
+  function confirmAction(title, desc, done, fn, danger, after) {
+    pending = { fn, done, after };
     $('#ud-dlg-title').textContent = title;
     $('#ud-dlg-desc').textContent = desc;
     $('#ud-dlg-ok').classList.toggle('danger', !!danger);
     showErr('#ud-dlg-error', '');
-    openDialog($('#user-dialog'));
+    openDialog($('#user-dialog'), '#ud-dlg-cancel');
   }
   $('#ud-dlg-cancel').addEventListener('click', () => { pending = null; closeDialog($('#user-dialog')); });
   $('#user-dlg-form').addEventListener('submit', async e => {
@@ -1218,12 +1687,254 @@ function initAdminUsers() {
     closeDialog($('#user-dialog'));
     if (!job) return;
     try {
-      await job.fn();
+      const res = await job.fn();
+      // after 可以是异步的（邀请撤销先等行淡出播完再重取列表），所以 await
+      if (job.after) await job.after(res);
       toast(job.done);
-      await load();
+      await Promise.all([load(), loadInvites()]);
       if (lastDetail.uid) openDetail(lastDetail.uid, lastDetail.email);
     } catch (err) { toast(err.message, true); }
   });
+
+  // ---- 一次性临时密码展示层（W3）：等宽展示 + 复制，关层即清零 ----
+  let tempPassword = '';
+  function showTempPassword(pw, notify) {
+    tempPassword = pw || '';
+    $('#rp-done-pw').textContent = tempPassword;
+    $('#rp-done-hint').textContent = notify
+      ? '此密码仅显示一次，关闭后无法再次查看。邮件已发送给用户。'
+      : '此密码仅显示一次，关闭后无法再次查看。请通过其它渠道转告用户。';
+    openDialog($('#rp-done'));
+  }
+  $('#rp-done-copy').addEventListener('click', async () => {
+    if (!tempPassword) return;
+    await copyText(tempPassword);
+    toast('密码已复制');
+  });
+  $('#rp-done-close').addEventListener('click', () => closeDialog($('#rp-done')));
+  // Esc / 关闭都会落到 close 事件：变量与展示一并清零
+  $('#rp-done').addEventListener('close', () => {
+    tempPassword = '';
+    $('#rp-done-pw').textContent = '';
+  });
+
+  // ---- 选择集与批量工具条（B9）：Map<uid,email>，跨翻页保留（批量本就要跨页选人）；
+  // 清空是显式动作。N 实时刷新，工具条在 N=0 时整条收起。 ----
+  const selected = new Map();
+  function refreshBulkBar() {
+    const n = selected.size;
+    $('#bulk-bar').classList.toggle('hidden', n === 0);
+    $('#bulk-count').textContent = `已选 ${n} 人`;
+    const boxes = $$('#users-body .row-sel');
+    $('#users-selall').checked = boxes.length > 0 && boxes.every(b => b.checked);
+  }
+  function syncSelection(cb) {
+    const uid = Number(cb.dataset.uid);
+    if (cb.checked) selected.set(uid, cb.dataset.email); else selected.delete(uid);
+    refreshBulkBar();
+  }
+
+  // ---- 邀请记录（B9）：四态徽标（pending 主色 / accepted 绿 / revoked·expired 灰）、
+  // 行内重发与撤销；过滤复用用户搜索框的同一查询串（少一个输入框）。 ----
+  let inviteQuery = '';
+  const INVITE_BADGE = {
+    pending: '<span class="badge on">待接受</span>',
+    accepted: '<span class="badge ok">已接受</span>',
+    revoked: '<span class="badge off">已撤销</span>',
+    expired: '<span class="badge off">已过期</span>',
+  };
+  async function loadInvites() {
+    const tbody = $('#invites-body');
+    if (!tbody) return;
+    try {
+      const res = await api('/admin/users/invites?query=' + encodeURIComponent(inviteQuery));
+      const list = res.invites || [];
+      $('#invites-count').textContent = list.length ? `· 共 ${list.length} 条` : '';
+      if (!list.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="empty">${inviteQuery ? '没有匹配的邀请' : '还没有发出过邀请'}</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = '';
+      list.forEach(it => {
+        // 还能动手的行（待接受/已过期可重发与撤销）才渲染行内按钮；
+        // 已接受/已撤销是不可逆事实，只留状态（业务层对它们的重发/撤销也一律 400）
+        const live = it.state === 'pending' || it.state === 'expired';
+        const validity = it.state === 'pending'
+          ? `剩余 ${esc(remainTime(it.expiresAt))}` : `至 ${esc(fmtTime(it.expiresAt))}`;
+        const tr = node(`
+          <tr data-invite="${esc(it.id)}">
+            <td class="wrap-cell">${esc(it.email)}</td>
+            <td>${it.app ? esc(appLabel(it.app)) : '<span class="dim">不限项目</span>'}</td>
+            <td>${INVITE_BADGE[it.state] || esc(it.state)}</td>
+            <td>${validity}</td>
+            <td>${live ? `<span class="row" style="gap:6px">
+                <button type="button" class="btn small" data-resend>重发</button>
+                <button type="button" class="btn small danger" data-revoke>撤销</button>
+              </span>` : ''}</td>
+          </tr>`);
+        const resend = tr.querySelector('[data-resend]');
+        if (resend) resend.addEventListener('click', async () => {
+          setBusy(resend, true);
+          try {
+            // 重发 = 换新 token + 续 24h，旧链接即刻失效（文案要说清「去打开新的那封」）
+            await api(`/admin/users/invite/${encodeURIComponent(it.id)}/resend`, { method: 'POST', body: {} });
+            toast(`邀请已重新发送至 ${it.email}，旧链接已失效`);
+            await loadInvites();
+          } catch (err) { toast(err.message, true); }
+          finally { setBusy(resend, false); }
+        });
+        const revoke = tr.querySelector('[data-revoke]');
+        if (revoke) revoke.addEventListener('click', () => {
+          confirmAction(
+            '撤销邀请',
+            `将撤销发给 ${it.email} 的邀请链接，对方再打开会看到「已被撤销」；需要时可重新发起邀请。`,
+            `已撤销发给 ${it.email} 的邀请`,
+            () => api(`/admin/users/invite/${encodeURIComponent(it.id)}/revoke`, { method: 'POST', body: {} }),
+            true,
+            // 成功后先让本行淡出（.leaving / fadeOutRow 配方），再由外层重取列表
+            () => new Promise(done => fadeOutRow(tr, done)));
+        });
+        tbody.appendChild(tr);
+      });
+    } catch (err) {
+      $('#invites-count').textContent = '';
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">读取失败：${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  // ---- 批量操作（B9）：确认视图 = 所选邮箱清单（可滚动）+ 后果逐条 + 一次配置；
+  // N>5 手打「确认」解锁主钮；执行中 busy 禁用；结果视图逐项成败，失败项可勾选
+  // 只重跑子集。临时密码**不进**结果面板（凭证只随逐用户邮件走）。 ----
+  const BULK_TITLE = { password_reset: '批量重置密码', ban: '批量封禁', unban: '批量解除封禁' };
+  const BULK_CONSEQUENCES = {
+    password_reset: [
+      '为每位所选用户生成一个 16 位临时密码，并要求其下次登录时修改',
+      '新密码邮件通知到各自的登录邮箱（临时密码不进本面板，也不进日志）',
+      '这些账号的现有登录会被全部吊销，已登录设备需重新登录',
+    ],
+    ban: [
+      '所选用户在下方所选范围内无法登录，该范围内已登录的设备立即被退出',
+      '重复封禁按本次配置覆盖既有记录；限时到期自动解除，永久需手动解封',
+      '一次配置（范围/时长/原因）套用到全部所选用户',
+    ],
+    unban: [
+      '解除所选用户在下方所选范围内的封禁，该范围随即恢复登录',
+      '解封是幂等的：没有生效中封禁的用户同样回执成功',
+      '只解除所选范围，不影响同一账号其它项目的封禁',
+    ],
+  };
+  let bulkJob = null;    // {kind, uids}
+  let bulkState = null;  // {kind, results: Map<uid,{ok,message}>}
+  let bulkEmails = new Map(); // 开批时的 uid→email 快照（结果面板的称呼不随选择集漂）
+
+  // bulkRequest 组装请求体：password_reset 只有 kind+uids；ban 带范围/时长/原因；
+  // unban 只带范围（业务层 AdminUnban 只吃 app）。
+  function bulkRequest(kind, uids) {
+    const body = { kind, uids };
+    if (kind === 'ban' || kind === 'unban') {
+      body.app = $('#bulk-app').value;
+      if (kind === 'ban') {
+        body.until = $('#bulk-temp').checked && $('#bulk-until').value
+          ? new Date($('#bulk-until').value).getTime() : 0;
+        body.reason = $('#bulk-reason').value.trim();
+      }
+    }
+    return body;
+  }
+
+  function syncBulkGate() {
+    const needGate = !$('#bulk-gate').classList.contains('hidden');
+    $('#bulk-ok').disabled = needGate && $('#bulk-typed').value.trim() !== '确认';
+  }
+
+  function renderBulkResults() {
+    const st = bulkState;
+    const items = Array.from(st.results.entries());
+    const failed = items.filter(([, r]) => !r.ok);
+    $('#bulk-result-summary').textContent =
+      `共 ${items.length} 人：成功 ${items.length - failed.length}，失败 ${failed.length}` +
+      (failed.length ? '。勾选失败项后可只重试子集。' : '。');
+    const list = $('#bulk-result-list');
+    list.innerHTML = items.map(([uid, r]) => {
+      const email = bulkEmails.get(uid) || `uid ${uid}`;
+      return `<div class="item">
+        <span class="grow"><span class="title">${esc(email)}</span><br>
+          <span class="meta">${r.ok ? '已完成' : esc(r.message || '操作失败')}</span></span>
+        ${r.ok ? '<span class="badge ok">成功</span>' : '<span class="badge warn">失败</span>'}
+        ${r.ok ? '' : `<label class="row" style="gap:6px;font-size:13px"><input type="checkbox" class="bulk-retry-sel" data-uid="${esc(uid)}" checked> 重试</label>`}
+      </div>`;
+    }).join('') || '<div class="empty">没有结果</div>';
+    $$('#bulk-result-list .bulk-retry-sel').forEach(cb =>
+      cb.addEventListener('change', syncRetryBtn));
+    const retry = $('#bulk-retry-failed');
+    retry.classList.toggle('hidden', !failed.length);
+    syncRetryBtn();
+  }
+  function syncRetryBtn() {
+    const any = $$('#bulk-result-list .bulk-retry-sel').some(cb => cb.checked);
+    $('#bulk-retry-failed').disabled = !any;
+  }
+
+  async function openBulk(kind) {
+    const uids = Array.from(selected.keys());
+    if (!uids.length) return;
+    bulkJob = { kind, uids };
+    bulkEmails = new Map(selected);
+    $('#bulk-dlg-result').classList.add('hidden');
+    $('#bulk-dlg-confirm').classList.remove('hidden');
+    showErr('#bulk-error', '');
+    $('#bulk-typed').value = '';
+    $('#bulk-dlg-title').textContent = BULK_TITLE[kind];
+    $('#bulk-dlg-desc').textContent = `将对所选 ${uids.length} 位用户执行：`;
+    $('#bulk-dlg-list').innerHTML = uids.map(uid => `
+      <div class="item" style="padding:8px 12px">
+        <span class="grow"><span class="title">${esc(bulkEmails.get(uid) || 'uid ' + uid)}</span></span>
+        <span class="mono dim">${esc(uid)}</span>
+      </div>`).join('');
+    $('#bulk-dlg-cons').innerHTML = BULK_CONSEQUENCES[kind].map(t => `<li>${esc(t)}</li>`).join('');
+    const needCfg = kind !== 'password_reset';
+    $('#bulk-dlg-config').classList.toggle('hidden', !needCfg);
+    if (needCfg) {
+      const opts = await banScopeOptions();
+      $('#bulk-app').innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('')
+        || '<option value="">无可用范围</option>';
+      const isBan = kind === 'ban';
+      $('#bulk-dur-group').classList.toggle('hidden', !isBan);
+      $('#bulk-reason-field').classList.toggle('hidden', !isBan);
+      $('#bulk-until-field').classList.add('hidden');
+      $('#bulk-perm').checked = true;
+      $('#bulk-until').value = '';
+      $('#bulk-until').min = banMinStr();
+      $('#bulk-reason').value = '';
+    }
+    $('#bulk-gate').classList.toggle('hidden', uids.length <= 5);
+    syncBulkGate();
+    openDialog($('#bulk-dialog'), '#bulk-cancel');
+  }
+
+  async function openInvite() {
+    showErr('#invite-error', '');
+    $('#invite-email').value = '';
+    const sel = $('#invite-app');
+    sel.innerHTML = '<option value="">加载中…</option>';
+    openDialog($('#invite-dialog'), '#invite-cancel');
+    // super：全部项目 +「不限项目」；项目管理员：仅其授权项目且必选
+    //（用户页当前是平台管理员页，这条支路是接口口径的前端对齐，不另开页面）
+    let opts;
+    if (IS_SUPER) {
+      opts = [{ key: '', label: '不限项目' }]
+        .concat(knownApps().map(a => ({ key: a.key, label: a.label })));
+    } else {
+      opts = [];
+      try {
+        const res = await api('/admin/projects');
+        opts = (res.projects || []).map(p => ({ key: p.app, label: p.name }));
+      } catch (_) { /* 拿不到授权清单就空着，提交时按必选拦 */ }
+    }
+    sel.innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('')
+      || '<option value="">无可邀请的项目</option>';
+    $('#invite-email').focus();
+  }
 
   async function load() {
     showErr('#users-error', '');
@@ -1235,13 +1946,15 @@ function initAdminUsers() {
       pager.set(res.total, res.items.length);
       body.innerHTML = '';
       if (!res.items.length) {
-        body.innerHTML = '<tr><td colspan="8" class="empty">暂无匹配的用户</td></tr>';
+        body.innerHTML = '<tr><td colspan="9" class="empty">暂无匹配的用户</td></tr>';
+        $('#users-selall').checked = false;
         return;
       }
       res.items.forEach(u => {
         const tr = node(`
           <tr>
-            <td class="wrap-cell">${esc(u.email)}</td>
+            <td><input type="checkbox" class="row-sel" data-uid="${esc(u.uid)}" data-email="${esc(u.email)}" aria-label="选择 ${esc(u.email)}"${selected.has(Number(u.uid)) ? ' checked' : ''}></td>
+            <td class="wrap-cell">${userCell(u, 32)}</td>
             <td class="mono">${esc(u.uid)}</td>
             <td>${u.role === 'user' ? `<span class="badge">${ROLE_LABEL.user}</span>` : `<span class="badge on">${esc(ROLE_LABEL[u.role] || u.role)}</span>`}</td>
             <td>${esc(scopeSummary(u))}</td>
@@ -1253,9 +1966,12 @@ function initAdminUsers() {
         tr.querySelector('button').addEventListener('click', () => openDetail(u.uid, u.email));
         body.appendChild(tr);
       });
+      $$('#users-body .row-sel').forEach(cb => cb.addEventListener('change', () => syncSelection(cb)));
+      refreshBulkBar();
     } catch (err) {
       showErr('#users-error', err.message);
-      body.innerHTML = '<tr><td colspan="8" class="empty">读取失败</td></tr>';
+      body.innerHTML = '<tr><td colspan="9" class="empty">读取失败</td></tr>';
+      refreshBulkBar();
     }
   }
 
@@ -1265,11 +1981,15 @@ function initAdminUsers() {
     const wasHidden = panel.classList.contains('hidden');
     panel.classList.remove('hidden');
     if (wasHidden) slideIn(panel);   // 首次展开做钻取滑入，重绘不重复播
-    $('#ud-title').textContent = email;
+    $('#ud-title').innerHTML = `<span class="user-cell">${avatarHTML({ email }, 48)}
+      <span class="grow"><span class="title">${esc(email)}</span><br><span class="meta">用户详情</span></span></span>`;
     $('#ud-body').innerHTML = '<div class="empty">读取中…</div>';
     panel.scrollIntoView({ block: 'nearest' });
     try {
       const d = await api('/admin/users/' + uid);
+      // 头部按全量档案重绘（48px 头像 + 昵称 + 邮箱）
+      $('#ud-title').innerHTML = `<span class="user-cell">${avatarHTML(d, 48)}
+        <span class="grow"><span class="title">${esc((d.nickname || '').trim() || d.email)}</span><br><span class="meta wrap-cell">${esc(d.email)}</span></span></span>`;
       const scopes = d.scopes || [];
       const sessions = (d.sessions || []).map(s => `
         <div class="item">
@@ -1279,6 +1999,13 @@ function initAdminUsers() {
         </div>`).join('') || '<div class="empty">暂无活跃会话</div>';
       const passkeys = (d.passkeys || []).map(p =>
         `<li>${esc(p.name)} · ${esc(fmtTime(p.createdAt))}</li>`).join('') || '<li>未添加</li>';
+      // 封禁列表（W3）：全局/项目名 + 永久或解除时间 + 原因 + 解除按钮
+      const banRows = (d.bans || []).map(b => `
+        <div class="item">
+          <span class="grow"><span class="title">${b.app === '*' ? '全局' : esc(appLabel(b.app))}</span>
+          <br><span class="meta">${Number(b.until) > 0 ? `将于 ${esc(fmtTime(b.until))} 解除` : '永久'}${b.reason ? ` · ${esc(b.reason)}` : ''}</span></span>
+          <button type="button" class="btn small danger" data-unban="${esc(b.app)}">解除</button>
+        </div>`).join('') || '<div class="empty">当前没有生效中的封禁。</div>';
       const isSelf = d.uid === window.__meUid;
       const roleCtl = `
         <label class="row" style="gap:8px"><span class="dim">角色</span>
@@ -1314,6 +2041,60 @@ function initAdminUsers() {
         <div class="row" style="gap:8px;flex-wrap:wrap">${roleCtl}</div>
         <p class="hint">授予项目即成为项目管理员；全部项目都回收后角色自动降回普通用户。平台管理员的授予/撤销仅平台管理员可操作。</p>
         <div class="list">${scopeList}</div>
+        <h3>重置密码</h3>
+        <div class="row" style="gap:8px">
+          <span class="app-switch" role="group" aria-label="重置密码方式">
+            <button type="button" class="app-chip on" data-rp-mode="generate" aria-pressed="true">自动生成</button>
+            <button type="button" class="app-chip" data-rp-mode="manual" aria-pressed="false">手动输入</button>
+          </span>
+        </div>
+        <label class="field hidden" id="ud-rp-pw-field"><span>指定的新密码（至少 8 位）</span>
+          <input type="text" id="ud-rp-pw" autocomplete="off" placeholder="输入要设为登录密码的新密码">
+        </label>
+        <div class="row" style="gap:8px;margin-top:8px">
+          <label class="row" style="gap:6px"><input type="checkbox" id="ud-rp-force" checked> 下次登录必须修改密码</label>
+          <label class="row" style="gap:6px"><input type="checkbox" id="ud-rp-notify" checked> 邮件通知用户</label>
+        </div>
+        <label class="field"><span>原因（选填）</span>
+          <input type="text" id="ud-rp-reason" placeholder="操作原因（记入审计）" autocomplete="off">
+        </label>
+        <p class="err" id="ud-rp-error" role="alert" hidden></p>
+        <div class="row"><button type="button" class="btn danger" id="ud-rp-go">重置密码</button></div>
+        <h3>更换邮箱</h3>
+        <p class="hint">当前邮箱 <span class="mono">${esc(d.email)}</span>。更换后用户立即用新邮箱登录，现会话不受影响；新旧邮箱都会收到通知。</p>
+        <label class="field"><span>新邮箱</span>
+          <input type="email" id="ud-email-new" autocomplete="off" placeholder="输入新的登录邮箱">
+        </label>
+        <label class="field"><span>原因（选填）</span>
+          <input type="text" id="ud-email-reason" placeholder="操作原因（记入审计）" autocomplete="off">
+        </label>
+        <p class="err" id="ud-email-error" role="alert" hidden></p>
+        <div class="row"><button type="button" class="btn danger" id="ud-email-go">更换邮箱</button></div>
+        <h3>重置资料</h3>
+        <p class="hint">重置头像后回退为「色块 + 首字母」，重置昵称后显示回退为邮箱前缀。不影响登录与会话。</p>
+        <div class="row" style="gap:8px">
+          <button type="button" class="btn" id="ud-reset-avatar"${d.hasAvatar || d.avatarColor ? '' : ' disabled'}>重置头像</button>
+          <button type="button" class="btn" id="ud-reset-nickname"${d.nickname ? '' : ' disabled'}>重置昵称</button>
+        </div>
+        <h3>封禁</h3>
+        <div class="list">${banRows}</div>
+        <div class="detail">
+          <div class="row" style="gap:8px">
+            <label class="row" style="gap:6px"><span class="dim">范围</span>
+              <select id="ud-ban-app" aria-label="封禁范围"></select>
+            </label>
+            <label class="row" style="gap:6px"><input type="radio" name="ud-ban-dur" id="ud-ban-perm" checked> 永久</label>
+            <label class="row" style="gap:6px"><input type="radio" name="ud-ban-dur" id="ud-ban-temp"> 限时</label>
+            <label class="row hidden" id="ud-ban-until-field" style="gap:6px"><span class="dim">解除时间</span>
+              <input type="datetime-local" id="ud-ban-until">
+            </label>
+          </div>
+          <label class="field"><span>原因（选填）</span>
+            <input type="text" id="ud-ban-reason" placeholder="填写封禁原因（记入审计）" autocomplete="off">
+          </label>
+          <p class="err" id="ud-ban-error" role="alert" hidden></p>
+          <div class="row"><button type="button" class="btn danger" id="ud-ban-go">封禁</button></div>
+        </div>
         <h3>Passkey</h3><ul>${passkeys}</ul>
         <h3>活跃会话</h3><div class="list">${sessions}</div>
         <div class="detail row">
@@ -1361,6 +2142,122 @@ function initAdminUsers() {
           () => api(`/admin/users/${uid}/revoke-sessions`, { method: 'POST', body: {} }),
           true);
       });
+
+      // ---- 重置密码（W3）：方式切换 + 两个勾选 + 原因；确认后展示一次性密码 ----
+      let rpMode = 'generate';
+      $$('#ud-body [data-rp-mode]').forEach(chip => chip.addEventListener('click', () => {
+        rpMode = chip.dataset.rpMode;
+        $$('#ud-body [data-rp-mode]').forEach(c => {
+          const on = c.dataset.rpMode === rpMode;
+          c.classList.toggle('on', on);
+          c.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+        const field = $('#ud-rp-pw-field');
+        field.classList.toggle('hidden', rpMode !== 'manual');
+        if (rpMode === 'manual') { swapIn(field); $('#ud-rp-pw').focus(); }   // 分段切换：crossfade + 上浮
+        showErr('#ud-rp-error', '');
+      }));
+      $('#ud-rp-go').addEventListener('click', () => {
+        showErr('#ud-rp-error', '');
+        const password = $('#ud-rp-pw').value;
+        if (rpMode === 'manual' && password.length < 8) {
+          showErr('#ud-rp-error', '手动输入的密码至少 8 位');
+          return;
+        }
+        const forceChange = $('#ud-rp-force').checked;
+        const notify = $('#ud-rp-notify').checked;
+        const reason = $('#ud-rp-reason').value.trim();
+        const body = { mode: rpMode, forceChange, notify, reason };
+        if (rpMode === 'manual') body.password = password;
+        confirmAction(
+          '重置密码',
+          `将重置 ${email} 的登录密码${forceChange ? '，并要求其下次登录时修改' : ''}${notify ? '，新密码会邮件通知该用户' : '，请通过其它渠道转告该用户'}。`,
+          `已重置 ${email} 的密码`,
+          () => api(`/admin/users/${uid}/password`, { method: 'POST', body }),
+          true,
+          res => showTempPassword(res && res.temporaryPassword, notify));
+      });
+
+      // ---- 更换邮箱（B5）：确认点名新旧邮箱，提示必达两封通知 ----
+      $('#ud-email-go').addEventListener('click', () => {
+        showErr('#ud-email-error', '');
+        const next = $('#ud-email-new').value.trim();
+        if (!next) { showErr('#ud-email-error', '请先填写新邮箱'); return; }
+        if (next === d.email) { showErr('#ud-email-error', '新邮箱与当前邮箱相同'); return; }
+        const reason = $('#ud-email-reason').value.trim();
+        confirmAction(
+          '更换邮箱',
+          `将 ${d.email} 的登录邮箱改为 ${next}，新旧邮箱都会收到通知；用户立即改用新邮箱登录，现会话不受影响。`,
+          `已将 ${d.email} 的邮箱改为 ${next}`,
+          () => api(`/admin/users/${uid}/email`, { method: 'POST', body: { email: next, reason } }),
+          true);
+      });
+
+      // ---- 重置资料（B5）：头像/昵称各自点名确认，说清回退效果 ----
+      const resetAvatarBtn = $('#ud-reset-avatar');
+      if (resetAvatarBtn) resetAvatarBtn.addEventListener('click', () => {
+        confirmAction(
+          '重置头像',
+          `将清空 ${d.email} 的头像图与头像色，回退为「色块 + 首字母」显示。`,
+          `已重置 ${d.email} 的头像`,
+          () => api(`/admin/users/${uid}/profile-reset`, { method: 'POST', body: { avatar: true, nickname: false } }),
+          true);
+      });
+      const resetNickBtn = $('#ud-reset-nickname');
+      if (resetNickBtn) resetNickBtn.addEventListener('click', () => {
+        confirmAction(
+          '重置昵称',
+          `将清空 ${d.email} 的昵称，显示回退为邮箱前缀。`,
+          `已重置 ${d.email} 的昵称`,
+          () => api(`/admin/users/${uid}/profile-reset`, { method: 'POST', body: { avatar: false, nickname: true } }),
+          true);
+      });
+
+      // ---- 封禁（W3）：范围（super 见全局+全部项目，项目管理员只见授权项目）----
+      const banSel = $('#ud-ban-app');
+      banScopeOptions().then(opts => {
+        if (banSel) banSel.innerHTML = opts.map(o => `<option value="${esc(o.key)}">${esc(o.label)}</option>`).join('');
+      });
+      const untilField = $('#ud-ban-until-field');
+      const untilInput = $('#ud-ban-until');
+      untilInput.min = banMinStr();
+      $$('#ud-body input[name=ud-ban-dur]').forEach(r => r.addEventListener('change', () => {
+        const temp = $('#ud-ban-temp').checked;
+        untilField.classList.toggle('hidden', !temp);
+        if (temp) { untilInput.min = banMinStr(); swapIn(untilField); }
+        showErr('#ud-ban-error', '');
+      }));
+      $('#ud-ban-go').addEventListener('click', () => {
+        showErr('#ud-ban-error', '');
+        const app = banSel.value;
+        let until = 0;
+        if ($('#ud-ban-temp').checked) {
+          const v = untilInput.value;
+          until = v ? new Date(v).getTime() : 0;
+          if (!until || until < Date.now() + 5 * 60 * 1000) {
+            showErr('#ud-ban-error', '解除时间至少要在 5 分钟之后');
+            return;
+          }
+        }
+        const reason = $('#ud-ban-reason').value.trim();
+        const scopeLabel = app === '*' ? '全部项目（全局）' : appLabel(app);
+        confirmAction(
+          '封禁账号',
+          `将封禁 ${email}：范围「${scopeLabel}」，${until > 0 ? `至 ${fmtTime(until)} 解除` : '永久'}${reason ? `；原因：${reason}` : ''}。封禁期间该账号无法登录。`,
+          `已封禁 ${email}`,
+          () => api(`/admin/users/${uid}/ban`, { method: 'POST', body: { app, until, reason } }),
+          true);
+      });
+      $$('#ud-body [data-unban]').forEach(btn => btn.addEventListener('click', () => {
+        const app = btn.dataset.unban;
+        const scopeLabel = app === '*' ? '全局' : appLabel(app);
+        confirmAction(
+          '解除封禁',
+          `将解除对 ${email} 的「${scopeLabel}」封禁，该范围随即恢复可登录。`,
+          `已解除 ${email} 的封禁`,
+          () => api(`/admin/users/${uid}/ban`, { method: 'DELETE', body: { app } }),
+          false);
+      }));
     } catch (err) {
       $('#ud-body').innerHTML = `<p class="err">${esc(err.message)}</p>`;
     }
@@ -1371,9 +2268,374 @@ function initAdminUsers() {
     e.preventDefault();
     pager.state.query = $('#user-query').value.trim();
     pager.state.offset = 0;
+    inviteQuery = pager.state.query;   // 邀请记录复用同一查询串（邮箱片段）
     load();
+    loadInvites();
   });
   pager.wire(load);
+
+  // ---- 邀请用户（B9）：弹层提交 → 成功 toast + 顺手展开邀请区 ----
+  $('#invite-open').addEventListener('click', openInvite);
+  $('#invite-cancel').addEventListener('click', () => closeDialog($('#invite-dialog')));
+  $('#invite-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = $('#invite-email').value.trim();
+    const app = $('#invite-app').value;
+    if (!email) { showErr('#invite-error', '请先填写被邀请人的邮箱'); return; }
+    if (!IS_SUPER && !app) { showErr('#invite-error', '请先选择要加入的项目'); return; }
+    const btn = $('#invite-ok');
+    setBusy(btn, true);
+    try {
+      const res = await api('/admin/users/invite', { method: 'POST', body: { email, app } });
+      closeDialog($('#invite-dialog'));
+      toast(`邀请已发送至 ${email}，链接 ${remainTime(res.expiresAt)} 内有效`);
+      $('#invites-wrap').open = true;
+      await Promise.all([load(), loadInvites()]);
+    } catch (err) { showErr('#invite-error', err.message); }
+    finally { setBusy(btn, false); }
+  });
+
+  // ---- 批量（B9）：工具条三动作 + 全选 + 清空 ----
+  $('#users-selall').addEventListener('change', e => {
+    $$('#users-body .row-sel').forEach(cb => { cb.checked = e.target.checked; syncSelection(cb); });
+  });
+  $('#bulk-clear').addEventListener('click', () => {
+    selected.clear();
+    $$('#users-body .row-sel').forEach(cb => { cb.checked = false; });
+    refreshBulkBar();
+  });
+  $('#bulk-reset').addEventListener('click', () => openBulk('password_reset'));
+  $('#bulk-ban').addEventListener('click', () => openBulk('ban'));
+  $('#bulk-unban').addEventListener('click', () => openBulk('unban'));
+  $('#bulk-cancel').addEventListener('click', () => { bulkJob = null; closeDialog($('#bulk-dialog')); });
+  $('#bulk-typed').addEventListener('input', syncBulkGate);
+  $$('#bulk-dialog input[name=bulk-dur]').forEach(r => r.addEventListener('change', () => {
+    const temp = $('#bulk-temp').checked;
+    $('#bulk-until-field').classList.toggle('hidden', !temp);
+    if (temp) { $('#bulk-until').min = banMinStr(); swapIn($('#bulk-until-field')); }
+    showErr('#bulk-error', '');
+  }));
+  $('#bulk-ok').addEventListener('click', async () => {
+    const job = bulkJob;
+    if (!job) return;
+    showErr('#bulk-error', '');
+    if ((job.kind === 'ban' || job.kind === 'unban') && !$('#bulk-app').value) {
+      showErr('#bulk-error', '请先选择操作范围');
+      return;
+    }
+    if (job.kind === 'ban' && $('#bulk-temp').checked) {
+      const v = $('#bulk-until').value;
+      const until = v ? new Date(v).getTime() : 0;
+      if (!until || until < Date.now() + 5 * 60 * 1000) {
+        showErr('#bulk-error', '解除时间至少要在 5 分钟之后');
+        return;
+      }
+    }
+    const btn = $('#bulk-ok');
+    setBusy(btn, true);   // 执行中：主钮 busy 禁用（CSS 接管转圈与 pointer-events）
+    try {
+      const res = await api('/admin/users/bulk', { method: 'POST', body: bulkRequest(job.kind, job.uids) });
+      bulkState = { kind: job.kind, results: new Map() };
+      (res.items || []).forEach(it => bulkState.results.set(it.uid, { ok: !!it.ok, message: it.message }));
+      // 回执缺项按失败补记：结果面板宁可多报一条「未返回结果」，不能少报
+      job.uids.forEach(uid => {
+        if (!bulkState.results.has(uid)) {
+          bulkState.results.set(uid, { ok: false, message: '未返回结果，请刷新后重试' });
+        }
+      });
+      $('#bulk-dlg-confirm').classList.add('hidden');
+      $('#bulk-dlg-result').classList.remove('hidden');
+      renderBulkResults();
+      swapIn($('#bulk-dlg-result'));
+      await load();
+    } catch (err) {
+      showErr('#bulk-error', err.message);
+    } finally { setBusy(btn, false); }
+  });
+  $('#bulk-retry-failed').addEventListener('click', async () => {
+    const job = bulkJob;
+    if (!job || !bulkState) return;
+    const uids = $$('#bulk-result-list .bulk-retry-sel')
+      .filter(cb => cb.checked).map(cb => Number(cb.dataset.uid));
+    if (!uids.length) return;
+    const btn = $('#bulk-retry-failed');
+    setBusy(btn, true);
+    try {
+      const res = await api('/admin/users/bulk', { method: 'POST', body: bulkRequest(bulkState.kind, uids) });
+      (res.items || []).forEach(it => {
+        bulkState.results.set(it.uid, { ok: !!it.ok, message: it.message });
+      });
+      renderBulkResults();
+      toast('已重试勾选的失败项');
+      await load();
+    } catch (err) { toast(err.message, true); }
+    finally { setBusy(btn, false); }
+  });
+  $('#bulk-result-close').addEventListener('click', () => {
+    closeDialog($('#bulk-dialog'));
+    if (bulkState) {
+      // 全成 → 清空选择；仍有失败 → 只留失败项在选择集里（改完直接再跑一次）
+      const failed = new Set(Array.from(bulkState.results.entries())
+        .filter(([, r]) => !r.ok).map(([uid]) => uid));
+      Array.from(selected.keys()).forEach(uid => {
+        if (!failed.size || !failed.has(uid)) selected.delete(uid);
+      });
+      refreshBulkBar();
+    }
+    bulkJob = null;
+  });
+
+  refreshBulkBar();
+  load();
+  loadInvites();
+}
+
+/* ---------- 后台：项目访问（W4）——每项目一张卡：登录范围开关 + 登录名单 ---------- */
+const EMPTY_MEMBERS_HINT = '名单为空：开启限制后将只有管理员可以登录该项目。';
+function initAdminAccess() {
+  const wrap = $('#access-list');
+  if (!wrap) return;
+  let pending = null;
+
+  // 通用确认弹层：一次挂一个待执行动作 + 它的成功提示（与用户页 confirmAction 同构）
+  function confirmAccess(title, desc, danger, done, fn) {
+    pending = { done, fn };
+    $('#access-dlg-title').textContent = title;
+    $('#access-dlg-desc').textContent = desc;
+    $('#access-dlg-ok').classList.toggle('danger', !!danger);
+    openDialog($('#access-dlg'), '#access-dlg-cancel');
+  }
+  $('#access-dlg-cancel').addEventListener('click', () => { pending = null; closeDialog($('#access-dlg')); });
+  $('#access-dlg-ok').addEventListener('click', async () => {
+    const job = pending;
+    pending = null;
+    closeDialog($('#access-dlg'));
+    if (!job) return;
+    const btn = $('#access-dlg-ok');
+    setBusy(btn, true);
+    try {
+      await job.fn();
+      toast(job.done);
+    } catch (err) { toast(err.message, true); } finally { setBusy(btn, false); }
+  });
+
+  // ---- OAuth Secret 一次性展示层（照抄用户页临时密码配方：mono + 复制 + 关层清零）----
+  let oauthSecret = '';
+  function showOAuthSecret(secret) {
+    oauthSecret = secret || '';
+    $('#oauth-secret-val').textContent = oauthSecret;
+    openDialog($('#oauth-secret-dlg'));
+  }
+  $('#oauth-secret-copy').addEventListener('click', async () => {
+    if (!oauthSecret) return;
+    await copyText(oauthSecret);
+    toast('Secret 已复制');
+  });
+  $('#oauth-secret-close').addEventListener('click', () => closeDialog($('#oauth-secret-dlg')));
+  // Esc / 关闭都落到 close 事件：变量与展示一并清零
+  $('#oauth-secret-dlg').addEventListener('close', () => {
+    oauthSecret = '';
+    $('#oauth-secret-val').textContent = '';
+  });
+
+  async function load() {
+    showErr('#access-error', '');
+    let list = [];
+    try {
+      const res = await api('/admin/projects');
+      list = res.projects || [];
+    } catch (err) {
+      showErr('#access-error', err.message);
+      wrap.innerHTML = '<div class="empty">读取失败，请刷新重试。</div>';
+      return;
+    }
+    wrap.innerHTML = '';
+    if (!list.length) {
+      wrap.innerHTML = '<div class="empty">当前没有可管理的项目。</div>';
+      return;
+    }
+    list.forEach(p => {
+      const card = cardOf(p);
+      wrap.appendChild(card);
+      swapIn(card);   // 新卡片进场沿用区块切换动效（crossfade + 上浮）
+    });
+  }
+
+  function cardOf(p) {
+    const name = p.name || p.app;
+    let restricted = !!p.restricted;
+    const members = p.members || [];
+    const card = node(`
+      <section class="card" data-app="${esc(p.app)}">
+        <div class="row between">
+          <h2>${esc(name)} <span class="badge${restricted ? ' on' : ''}" data-badge>${restricted ? '仅限受邀' : '开放登录'}</span></h2>
+          <span class="app-switch" role="group" aria-label="「${esc(name)}」登录范围">
+            <button type="button" class="app-chip${restricted ? '' : ' on'}" data-restrict="0" aria-pressed="${restricted ? 'false' : 'true'}">开放登录</button>
+            <button type="button" class="app-chip${restricted ? ' on' : ''}" data-restrict="1" aria-pressed="${restricted ? 'true' : 'false'}">仅限受邀</button>
+          </span>
+        </div>
+        <div class="list" data-members style="margin-top:10px"></div>
+        ${members.length ? '' : `<p class="hint" data-empty>${EMPTY_MEMBERS_HINT}</p>`}
+        <form class="row" data-add style="margin-top:10px">
+          <label class="field grow" style="margin:0"><span class="sr-only">要加入「${esc(name)}」登录名单的邮箱</span>
+            <input type="email" placeholder="输入邮箱加入登录名单" autocomplete="off"></label>
+          <button type="submit" class="btn">添加</button>
+        </form>
+        <p class="err" data-add-err role="alert" hidden></p>
+      </section>`);
+    const listEl = card.querySelector('[data-members]');
+
+    function memberRow(email) {
+      const row = node(`
+        <div class="item" data-email="${esc(email)}">
+          <span class="grow"><span class="title mono">${esc(email)}</span></span>
+          <button type="button" class="btn small danger" data-remove>移除</button>
+        </div>`);
+      row.querySelector('[data-remove]').addEventListener('click', () => {
+        confirmAccess('移出登录名单',
+          `将把「${email}」移出「${name}」的登录名单；开启限制后，该邮箱将无法登录该项目。`,
+          true, `已将 ${email} 移出「${name}」登录名单`,
+          async () => {
+            await api(`/admin/projects/${encodeURIComponent(p.app)}/access`, { method: 'DELETE', body: { email } });
+            // 行先淡出下沉，播完再摘行——视觉上是「这条走了」而不是突然消失
+            fadeOutRow(row, () => {
+              row.remove();
+              if (!listEl.children.length && !card.querySelector('[data-empty]')) {
+                listEl.insertAdjacentElement('afterend', node(`<p class="hint" data-empty>${EMPTY_MEMBERS_HINT}</p>`));
+              }
+            });
+          });
+      });
+      return row;
+    }
+    members.forEach(m => listEl.appendChild(memberRow(m.email)));
+
+    // 开关状态就地更新（badge + 两颗 chip），不整卡重绘
+    function setState(next) {
+      restricted = next;
+      $$('.app-chip', card).forEach(chip => {
+        const on = (chip.dataset.restrict === '1') === restricted;
+        chip.classList.toggle('on', on);
+        chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      const badge = card.querySelector('[data-badge]');
+      badge.textContent = restricted ? '仅限受邀' : '开放登录';
+      badge.classList.toggle('on', restricted);
+      popIn(badge);   // 状态翻转：徽标轻浮现
+    }
+    $$('.app-chip', card).forEach(chip => chip.addEventListener('click', () => {
+      const want = chip.dataset.restrict === '1';
+      if (want === restricted) return;
+      confirmAccess('调整登录范围',
+        want
+          ? '开启后，除平台管理员、该项目的管理员和名单内用户外，其他账号将无法登录该项目。'
+          : '开启后所有账号都可登录该项目。',
+        want,
+        want ? `已开启「${name}」仅限受邀登录` : `已关闭「${name}」的登录限制`,
+        async () => {
+          await api(`/admin/projects/${encodeURIComponent(p.app)}/restrict`, { method: 'POST', body: { restricted: want } });
+          setState(want);
+        });
+    }));
+
+    card.querySelector('[data-add]').addEventListener('submit', async e => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const input = $('input', form);
+      const errEl = card.querySelector('[data-add-err]');
+      errEl.textContent = ''; errEl.hidden = true;
+      const email = input.value.trim();
+      if (!email) { errEl.textContent = '请输入邮箱'; errEl.hidden = false; return; }
+      const btn = $('button[type=submit]', form);
+      setBusy(btn, true);
+      try {
+        await api(`/admin/projects/${encodeURIComponent(p.app)}/access`, { method: 'POST', body: { email } });
+        input.value = '';
+        const emptyEl = card.querySelector('[data-empty]');
+        if (emptyEl) emptyEl.remove();
+        const row = memberRow(email);
+        listEl.appendChild(row);
+        popIn(row);   // 成功行内插入：轻浮现
+        toast(`已将 ${email} 加入「${name}」登录名单`);
+      } catch (err) {
+        errEl.textContent = err.status === 404 ? '该邮箱不存在' : err.message;
+        errEl.hidden = false;
+      } finally { setBusy(btn, false); }
+    });
+
+    // ---- Web 接入（B4 OAuth 跳转授权）：clientId 展示 + 回跳地址编辑 + Secret 一次性回执 ----
+    let clientId = p.clientId || '';
+    const webSec = node(`
+      <div class="detail" data-webaccess>
+        <h3>Web 接入</h3>
+        <p class="hint">开启后，第三方网页应用可通过跳转授权让用户用本项目账号登录；回跳地址需与应用登记的逐字一致。</p>
+        <div data-webaccess-id></div>
+        <label class="field"><span>回跳地址（一行一个，需完整的 https 地址）</span>
+          <textarea data-webaccess-uris rows="3" spellcheck="false" autocapitalize="off"
+            placeholder="example.com/oauth/callback"></textarea></label>
+        <p class="err" data-webaccess-err role="alert" hidden></p>
+        <div class="row">
+          <button type="button" class="btn primary" data-webaccess-save>保存回跳地址</button>
+          <button type="button" class="btn danger" data-webaccess-rotate>生成 / 重置 Secret</button>
+        </div>
+      </div>`);
+    card.appendChild(webSec);
+    const waId = webSec.querySelector('[data-webaccess-id]');
+    const waURIs = webSec.querySelector('[data-webaccess-uris]');
+    const waErr = webSec.querySelector('[data-webaccess-err]');
+    const waRotate = webSec.querySelector('[data-webaccess-rotate]');
+    waURIs.value = (p.redirectUris || []).join('\n');
+
+    function renderWebAccess() {
+      if (clientId) {
+        waId.innerHTML = `
+          <div class="item">
+            <span class="grow"><span class="title mono">${esc(clientId)}</span><br>
+            <span class="meta">client_id</span></span>
+            <button type="button" class="btn small" data-webaccess-copy>复制</button>
+          </div>`;
+        waId.querySelector('[data-webaccess-copy]').addEventListener('click', async () => {
+          await copyText(clientId);
+          toast('client_id 已复制');
+        });
+      } else {
+        waId.innerHTML = '<p class="hint" style="margin:4px 0">尚未开通：填写回跳地址后点「生成 / 重置 Secret」即可开通。</p>';
+      }
+    }
+    renderWebAccess();
+
+    function webAccessURIs() {
+      return waURIs.value.split('\n').map(s => s.trim()).filter(Boolean);
+    }
+    async function saveOAuth(rotate, btn) {
+      waErr.textContent = ''; waErr.hidden = true;
+      setBusy(btn, true);
+      try {
+        const res = await api(`/admin/projects/${encodeURIComponent(p.app)}/oauth`, {
+          method: 'POST', body: { redirectUris: webAccessURIs(), rotateSecret: !!rotate },
+        });
+        clientId = res.clientId || clientId;
+        waURIs.value = (res.redirectUris || webAccessURIs()).join('\n');
+        renderWebAccess();
+        if (res.secret) showOAuthSecret(res.secret);
+        toast(rotate ? '已生成新的 Client Secret' : '回跳地址已保存');
+      } catch (err) {
+        waErr.textContent = err.message;
+        waErr.hidden = false;
+        throw err;   // 上抛：确认弹层据此不误报成功
+      } finally { setBusy(btn, false); }
+    }
+    webSec.querySelector('[data-webaccess-save]').addEventListener('click', e =>
+      saveOAuth(false, e.currentTarget).catch(() => {}));
+    waRotate.addEventListener('click', () => {
+      confirmAccess('生成 / 重置 Secret',
+        `将为「${name}」${clientId ? '重置' : '生成'} Client Secret；${clientId ? '重置后旧 Secret 立即失效，正在使用它的应用将无法换 token。' : '开通后跳转授权即可使用。'}Secret 只显示这一次。`,
+        true, clientId ? '已重置 Client Secret' : '已开通 Web 接入',
+        () => saveOAuth(true, waRotate));
+    });
+    return card;
+  }
+
   load();
 }
 
@@ -1397,7 +2659,7 @@ function initAdminSessions() {
       // 按 uid 聚合成本页的用户行
       const map = new Map();
       (res.items || []).forEach(s => {
-        const cur = map.get(s.uid) || { uid: s.uid, email: s.email, count: 0, last: 0 };
+        const cur = map.get(s.uid) || { uid: s.uid, email: s.email, nickname: s.nickname, avatarColor: s.avatarColor, count: 0, last: 0 };
         cur.count += 1;
         cur.last = Math.max(cur.last, Number(s.lastSeenAt || 0));
         map.set(s.uid, cur);
@@ -1416,7 +2678,7 @@ function initAdminSessions() {
       users.forEach(u => {
         const tr = node(`
           <tr>
-            <td class="wrap-cell">${esc(u.email)}</td>
+            <td class="wrap-cell">${userCell(u, 32)}</td>
             <td class="mono">${esc(u.uid)}</td>
             <td>${u.count}</td>
             <td>${esc(relTime(u.last))}</td>
@@ -1612,7 +2874,7 @@ function initAdminConfig() {
                 <br><span class="meta">${stateText}</span>
               </span>
               <span class="row" style="gap:6px">
-                <input type="text" style="min-width:200px" aria-label="新的值" placeholder="${it.secret ? '输入新值替换' : '留空则不修改'}">
+                <input type="text" style="min-width:200px" aria-label="新的值" autocomplete="off" placeholder="${it.secret ? '输入新值替换' : '留空则不修改'}">
                 <button type="button" class="btn small primary" data-act="save">保存</button>
                 ${it.configured ? '<button type="button" class="btn small danger" data-act="clear">清除</button>' : ''}
               </span>
@@ -1634,7 +2896,7 @@ function initAdminConfig() {
               pendingClear = it.key;
               $('#cfg-desc').textContent = `将清除配置键 ${it.key}（值会从库里删除）。`;
               showErr('#cfg-dialog-error', '');
-              openDialog($('#cfg-dialog'));
+              openDialog($('#cfg-dialog'), '#cfg-cancel');
             });
           }
           stack.appendChild(row);
@@ -1856,7 +3118,7 @@ function initAdminAI() {
         items.filter(it => byKey[it.key] && it.configured)
           .forEach(it => { $(byKey[it.key].sel).value = it.value; });
       } catch (_) { /* 预填失败不拦打开：可直接填新值 */ }
-      openDialog($('#quota-dialog'));
+      openDialog($('#quota-dialog'), '#q-input-rate');
     });
     $('#quota-cancel').addEventListener('click', () => closeDialog($('#quota-dialog')));
     $('#quota-form').addEventListener('submit', async e => {
@@ -1911,9 +3173,14 @@ async function copyText(text) {
   }
 }
 
-function openDialog(dlg) {
+/* openDialog 打开弹层并把初始焦点钉在**安全侧控件**（WAI-ARIA APG：破坏性对话框
+   的初始焦点不得落在危险提交钮上）。focusSel 缺省时靠 DOM 顺序（取消钮在危险钮前）
+   兜底——显式传参把这件事从「恰好如此」变成「规定如此」。原生 showModal 的模态性
+   同时保证 Tab 循环留在弹层内。 */
+function openDialog(dlg, focusSel) {
   if (!dlg) return;
   if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
+  if (focusSel) { const el = typeof focusSel === 'string' ? $(focusSel) : focusSel; if (el) el.focus(); }
 }
 
 function closeDialog(dlg) {
@@ -1942,6 +3209,7 @@ function wireTabs() {
 
 /* ---------- 入口 ---------- */
 document.addEventListener('DOMContentLoaded', () => {
+  drainFlash();   // 跨页提示先出（注销撤销 / 强制改密成功 / 注销已提交）
   wireReauth();
   wireTabs();
   initAdminGuard();
@@ -1952,7 +3220,10 @@ document.addEventListener('DOMContentLoaded', () => {
   initPasskeys();
   initSecurity();
   initAccount();
+  initProfile();
+  initLoginNotify();
   initAdminUsers();
+  initAdminAccess();
   initAdminSessions();
   initAdminAudit();
   initAdminConfig();

@@ -1,13 +1,17 @@
 package ui
 
 import (
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 // 所有页面共用 layout 骨架：<head> 必须带三件套 link 与 theme-color，
-// 顶栏品牌区挂 favicon.svg（透明底 + #3482FF 裸蓝 hexagon，与站点 favicon 同源）。
+// 顶栏品牌区挂 favicon.svg（透明底 + #3482FF 裸蓝素盾 shield，与站点 favicon 同源）。
 func TestLayoutHeadHasIconLinks(t *testing.T) {
 	raw, err := files.ReadFile("templates/layout.html")
 	if err != nil {
@@ -54,10 +58,10 @@ func TestStaticAssetRegistry(t *testing.T) {
 	}
 }
 
-// 页面模板一个不缺：路由层登记了 11 个页面，模板缺一个就启动即炸（ui.go 的
+// 页面模板一个不缺：路由层登记了 12 个页面，模板缺一个就启动即炸（ui.go 的
 // Has 会被 cmd/server 逐个查），这里在包内先钉住数量与关键页。
 func TestPageTemplatesPresent(t *testing.T) {
-	for _, name := range []string{"login", "console", "admin-config", "admin-ai"} {
+	for _, name := range []string{"login", "console", "admin-access", "admin-config", "admin-ai"} {
 		if !Has(name) {
 			t.Errorf("页面模板缺失: %s", name)
 		}
@@ -152,8 +156,11 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	for _, want := range []string{
 		`{{if .IsAdmin}}<a class="btn small admin-entry" href="{{if .InAdmin}}/web/console{{else if .IsSuper}}/web/admin{{else}}/web/admin/sessions{{end}}" id="admin-entry">`,
 		`{{if .InAdmin}}返回控制台{{else}}管理后台{{end}}`,
-		`<span class="acct-email" id="topbar-email">{{.Email}}</span>`,
-		`<span class="avatar" id="me-avatar" aria-hidden="true">{{.Initial}}</span>`,
+		// B5：顶栏账号胶囊升级为头像（图/色块+首字）+ 昵称（回退邮箱前缀，完整邮箱在 title）
+		`id="topbar-email" title="{{.Email}}"`,
+		`id="me-avatar"`,
+		`{{if .AvatarSrc}}<img src="{{.AvatarSrc}}" alt="">{{else}}{{.Initial}}{{end}}`,
+		`{{.AcctName}}`,
 	} {
 		if !strings.Contains(head, want) {
 			t.Errorf("layout 顶栏缺 %s", want)
@@ -183,7 +190,8 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 }
 
 // W2 项目切换器与角色页：切换器 markup 在 layout、SwitchApps 按角色分叉、
-// 403 页模板齐备、导航按 super 分叉（角色管理已并入用户页，导航只剩五项）。
+// 403 页模板齐备、导航按 super 分叉（角色管理已并入用户页；W4 加「项目访问」，
+// super 六项 / app-admin 四项）。
 func TestAppSwitchAndRolesPage(t *testing.T) {
 	// 1. layout 带切换器容器（在 admin-entry 与 acct 之间）
 	raw, err := files.ReadFile("templates/layout.html")
@@ -228,14 +236,27 @@ func TestAppSwitchAndRolesPage(t *testing.T) {
 		t.Error("页面模板缺失: denied")
 	}
 
-	// 4. AdminNav 按角色分叉：super 五项（用户/会话/审计/配置/AI），app-admin 三项
+	// 4. AdminNav 按角色分叉：super 六项（用户/项目访问/会话/审计/配置/AI），
+	// app-admin 四项（项目访问/会话/审计/AI）；项目访问页两级都开
+	//（super 见全部项目、app-admin 只见授权项目，数据在服务端裁）
 	navS := AdminNav("", true)
 	navA := AdminNav("", false)
-	if len(navS) != 5 {
-		t.Errorf("super 导航应五项，得到 %d", len(navS))
+	if len(navS) != 6 {
+		t.Errorf("super 导航应六项，得到 %d", len(navS))
 	}
-	if len(navA) != 3 {
-		t.Errorf("app-admin 导航应三项，得到 %d", len(navA))
+	if len(navA) != 4 {
+		t.Errorf("app-admin 导航应四项，得到 %d", len(navA))
+	}
+	for _, list := range [][]NavItem{navS, navA} {
+		n := 0
+		for _, it := range list {
+			if it.Href == "/web/admin/access" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("导航应恰有一项「项目访问」入口，得到 %d", n)
+		}
 	}
 	for _, it := range navA {
 		if it.Href == "/web/admin" || it.Href == "/web/admin/config" || it.Href == "/web/admin/roles" {
@@ -291,6 +312,150 @@ func TestDangerZoneIsolatedFromSettings(t *testing.T) {
 		if !strings.Contains(rule, frag) {
 			t.Errorf(".danger-zone 缺 %s（error 描边/淡底）", frag)
 		}
+	}
+}
+
+// 授权页（B4 authorize 模板）：确认态带项目名/回跳域名/继续取消双钮（同表单
+// decision 分流），错误态是同卡片语言的变体；两态都走 Minimal 壳。
+func TestAuthorizeTemplateRendersBothVariants(t *testing.T) {
+	if !Has("authorize") {
+		t.Fatal("页面模板缺失: authorize")
+	}
+	raw, err := files.ReadFile("templates/authorize.html")
+	if err != nil {
+		t.Fatalf("读授权页模板: %v", err)
+	}
+	tpl := string(raw)
+	for _, want := range []string{
+		`method="post" action="/oauth/authorize/confirm"`,
+		`name="decision" value="allow"`, `name="decision" value="deny"`,
+		`name="tx" value=`, `.AppName`, `.RedirectHost`, `.Email`,
+		`.ErrorTitle`, `.ErrorMessage`,
+		`登录到「`, `它将获得你的账号标识与邮箱`,
+	} {
+		if !strings.Contains(tpl, want) {
+			t.Errorf("授权页模板缺 %q", want)
+		}
+	}
+	// 确认态渲染：项目名、回跳域名、账号邮箱都出现在 HTML 里
+	rec := httptest.NewRecorder()
+	data := Data{Title: "授权登录", Minimal: true, OAuth: &OAuthView{
+		Tx: "tx-1", App: "calorie-diary", AppName: "热量日记",
+		RedirectHost: "app.example.com", Email: "u@example.com",
+	}}
+	if err := Render(rec, "authorize", data); err != nil {
+		t.Fatalf("渲染确认页: %v", err)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"热量日记", "app.example.com", "u@example.com", "tx-1", "继续", "取消"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("确认页 HTML 缺 %q", want)
+		}
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("默认应 200，得到 %d", rec.Code)
+	}
+	// 错误态渲染：带状态码起头 + 标题与文案
+	recErr := httptest.NewRecorder()
+	if err := Render(recErr, "authorize", Data{
+		Title: "无法发起授权", Minimal: true, Status: http.StatusBadRequest,
+		OAuth: &OAuthView{ErrorTitle: "无法发起授权", ErrorMessage: "应用未登记，请联系应用管理员在控制台开通后再试"},
+	}); err != nil {
+		t.Fatalf("渲染错误页: %v", err)
+	}
+	if recErr.Code != http.StatusBadRequest {
+		t.Errorf("错误页应以 400 起头，得到 %d", recErr.Code)
+	}
+	for _, want := range []string{"无法发起授权", "应用未登记"} {
+		if !strings.Contains(recErr.Body.String(), want) {
+			t.Errorf("错误页 HTML 缺 %q", want)
+		}
+	}
+}
+
+// 接受邀请页（B9 invite 模板）：与 authorize 同款「同模板双变体」——确认态渲染
+// 表单（邮箱只读 + new-password/username/nickname autocomplete + 隐藏 token，零 JS），
+// 错误态整卡替换并以 400 起头；AppLabel 与页面里的项目名同源。
+func TestInviteTemplateRendersBothVariants(t *testing.T) {
+	if !Has("invite") {
+		t.Fatal("页面模板缺失: invite")
+	}
+	raw, err := files.ReadFile("templates/invite.html")
+	if err != nil {
+		t.Fatalf("读邀请页模板: %v", err)
+	}
+	tpl := string(raw)
+	for _, want := range []string{
+		`method="post" action="/web/invite"`,
+		`name="token" value=`, `name="password"`, `name="nickname"`,
+		`autocomplete="new-password"`, `autocomplete="username"`, `autocomplete="nickname"`,
+		`readonly`, `minlength="8"`,
+		`.ErrorTitle`, `.ErrorMessage`, `.Error`, `.Email`, `.AppName`,
+	} {
+		if !strings.Contains(tpl, want) {
+			t.Errorf("邀请页模板缺 %q", want)
+		}
+	}
+
+	// 表单变体：邮箱、项目名、隐藏 token 都进 HTML（200）
+	rec := httptest.NewRecorder()
+	if err := Render(rec, "invite", Data{
+		Title: "接受邀请", Minimal: true,
+		Invite: &InviteView{Token: "tok-123", Email: "invitee@example.com",
+			App: "calorie-diary", AppName: AppLabel("calorie-diary")},
+	}); err != nil {
+		t.Fatalf("渲染表单变体: %v", err)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"invitee@example.com", "tok-123", "热量日记", "设置密码并完成注册"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("表单变体 HTML 缺 %q", want)
+		}
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("默认应 200，得到 %d", rec.Code)
+	}
+
+	// 错误变体：400 起头 + 标题文案，且不再渲染提交表单
+	recErr := httptest.NewRecorder()
+	if err := Render(recErr, "invite", Data{
+		Title: "无法接受邀请", Minimal: true, Status: http.StatusBadRequest,
+		Invite: &InviteView{ErrorTitle: "无法接受邀请", ErrorMessage: "邀请链接已过期（24 小时内有效），请联系邀请人重新发送"},
+	}); err != nil {
+		t.Fatalf("渲染错误变体: %v", err)
+	}
+	if recErr.Code != http.StatusBadRequest {
+		t.Errorf("错误变体应以 400 起头，得到 %d", recErr.Code)
+	}
+	errBody := recErr.Body.String()
+	for _, want := range []string{"无法接受邀请", "已过期", "前往登录"} {
+		if !strings.Contains(errBody, want) {
+			t.Errorf("错误变体 HTML 缺 %q", want)
+		}
+	}
+	if strings.Contains(errBody, `action="/web/invite"`) {
+		t.Error("错误变体不该渲染提交表单")
+	}
+
+	// 提交被打回：表单 + 字段下就地报错（不是整卡错误变体）
+	recForm := httptest.NewRecorder()
+	if err := Render(recForm, "invite", Data{
+		Title: "接受邀请", Minimal: true, Status: http.StatusBadRequest,
+		Invite: &InviteView{Token: "tok-1", Email: "a@example.com", Error: "密码至少 8 位"},
+	}); err != nil {
+		t.Fatalf("渲染就地报错: %v", err)
+	}
+	if !strings.Contains(recForm.Body.String(), "密码至少 8 位") ||
+		!strings.Contains(recForm.Body.String(), `action="/web/invite"`) {
+		t.Error("业务打回应重渲染表单并在字段下方报错")
+	}
+
+	// AppLabel：注册表内回展示名，未知 slug 回原串，空串回空
+	if AppLabel("calorie-diary") != "热量日记" || AppLabel("expense-diary") != "开支日记" {
+		t.Errorf("AppLabel 应回注册表展示名，得到 %q / %q", AppLabel("calorie-diary"), AppLabel("expense-diary"))
+	}
+	if AppLabel("nope") != "nope" || AppLabel("") != "" {
+		t.Errorf("未知/空 slug 应回原样，得到 %q / %q", AppLabel("nope"), AppLabel(""))
 	}
 }
 
@@ -486,10 +651,13 @@ func TestBrandMarksShareFaviconAndCenter(t *testing.T) {
 			if m == nil {
 				continue // 运行时才补 src（二维码）
 			}
-			if m[1] != "/favicon.svg" {
-				t.Errorf("%s 里有非 favicon 的图片引用 %q——品牌图必须统一成裸蓝矢量，不许带底",
-					e.Name(), m[1])
+			// B5 顶栏档案头像：src 是 Render 拼好的 data URL（{{.AvatarSrc}}），
+			// 不是外链也不是品牌位——放行，其余仍只许站点 favicon
+			if m[1] == "/favicon.svg" || m[1] == "{{.AvatarSrc}}" {
+				continue
 			}
+			t.Errorf("%s 里有非 favicon 的图片引用 %q——品牌图必须统一成裸蓝矢量，不许带底",
+				e.Name(), m[1])
 		}
 	}
 
@@ -531,7 +699,8 @@ func TestBrandMarksShareFaviconAndCenter(t *testing.T) {
 	}
 }
 
-// 换装矩阵（2026-10-20 作者拍板）：**品牌位**走 favicon.svg 的 hexagon，**passkey 功能位**
+// 换装矩阵（2026-10-20 拍板，2026-10-21 品牌字形统一为素盾 shield）：**品牌位**走
+// favicon.svg 的素盾，**passkey 功能位**
 // 一律 key-round——两者不许再撞脸。这里钉住三件事：icons.go 有 key-round 且 path 与 lucide
 // 官方一致、登录页 Passkey 按钮用的就是它、全模板没有 fingerprint 功能位残留（防回潮）。
 func TestPasskeyFunctionalIconIsKeyRound(t *testing.T) {
@@ -543,7 +712,7 @@ func TestPasskeyFunctionalIconIsKeyRound(t *testing.T) {
 		t.Error("key-round 的 path 与 lucide 官方 key-round 不符（字形被改了？）")
 	}
 	if _, dead := icons["fingerprint"]; dead {
-		t.Error("icons.go 不该再有 fingerprint 条目（品牌位已换 hexagon、功能位是 key-round）")
+		t.Error("icons.go 不该再有 fingerprint 条目（品牌位已换素盾 shield、功能位是 key-round）")
 	}
 
 	entries, err := files.ReadDir("templates")
@@ -569,5 +738,132 @@ func TestPasskeyFunctionalIconIsKeyRound(t *testing.T) {
 	}
 	if !strings.Contains(string(login), `{{icon "key-round"}} 使用 Passkey 登录`) {
 		t.Error("登录页 Passkey 按钮应是 {{icon \"key-round\"}} 使用 Passkey 登录")
+	}
+}
+
+// B5 账号资料卡与顶栏升级：账号页渲染出资料卡全套控件（头像/色板/保存/清头像），
+// 顶栏派生数据（显示名/首字/色板 hex/头像 data URL）在 Render 里落地；无昵称时
+// 显示名回退邮箱前缀、首字回退邮箱首字符。
+func TestProfileCardAndTopbarDerivation(t *testing.T) {
+	if !Has("account") {
+		t.Fatal("页面模板缺失: account")
+	}
+	// 账号页带档案渲染：资料卡控件 + palette 注入 + 头像 data URL
+	rec := httptest.NewRecorder()
+	avatar := "aGVsbG8="
+	if err := Render(rec, "account", Data{
+		Title: "账号", Email: "someone@example.com", Nickname: "阿橘",
+		AvatarColor: 3, AvatarImage: avatar,
+	}); err != nil {
+		t.Fatalf("渲染账号页: %v", err)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"账号资料", `id="pf-avatar"`, `id="pf-palette"`, `id="pf-save"`,
+		`id="avatar-palette"`, "阿橘", "data:image/jpeg;base64," + avatar,
+		"someone@example.com", `id="topbar-email" title="someone@example.com"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("账号页缺 %q", want)
+		}
+	}
+
+	// 顶栏派生：无昵称 → 显示名邮箱前缀、首字邮箱首字符；色板越界回退首位
+	rec2 := httptest.NewRecorder()
+	if err := Render(rec2, "console", Data{Title: "概览", Email: "prefix@example.com", AvatarColor: 99}); err != nil {
+		t.Fatalf("渲染概览页: %v", err)
+	}
+	b2 := rec2.Body.String()
+	if !strings.Contains(b2, `id="topbar-email" title="prefix@example.com">prefix<`) {
+		t.Error("无昵称时顶栏显示名应回退邮箱前缀")
+	}
+	if !strings.Contains(b2, ">P<") {
+		t.Error("无昵称时顶栏首字应回退邮箱首字符大写")
+	}
+	if AvatarPaletteHex(99) != AvatarPaletteHex(0) || AvatarPaletteHex(-1) != AvatarPaletteHex(0) {
+		t.Error("色板下标越界应回退首位")
+	}
+	// 色板与两 App AvatarPalette 逐值同序（8 色）
+	wantPalette := []string{"#5B8DEF", "#7C6AF2", "#E2556B", "#FF8A3D", "#2BB673", "#14A8A0", "#E6B422", "#8B7355"}
+	for i, hex := range wantPalette {
+		if AvatarPaletteHex(i) != hex {
+			t.Errorf("色板第 %d 位应 %s，得到 %s", i, hex, AvatarPaletteHex(i))
+		}
+	}
+}
+
+// 头像首字墨色（FX6a 必修1）：8 色色板逐色实测——选中的墨对底色 ≥4.5:1（正文线），
+// 且确实是黑/白两支里对比更高的一支（与两 App AvatarPalette.inkFor 同规则）。写死
+// 白墨的旧实现在这里全线翻车（白墨实测 1.92~4.49）。同时钉住三个注入点：layout 顶栏
+// 底色+墨色成对、app.js 有 avatarInk 且被各渲染点调用、style.css .avatar 不再写死
+// var(--primary-ink)。
+func TestAvatarInkContrast(t *testing.T) {
+	// 独立复算（不借 prod 的 hexLuminance，防实现与断言同错）：sRGB 线性化 + WCAG 加权
+	lin := func(c uint8) float64 {
+		f := float64(c) / 255
+		if f <= 0.04045 {
+			return f / 12.92
+		}
+		return math.Pow((f+0.055)/1.055, 2.4)
+	}
+	lum := func(hex string) float64 {
+		n, err := strconv.ParseUint(strings.TrimPrefix(hex, "#"), 16, 32)
+		if err != nil {
+			t.Fatalf("解析色值 %q: %v", hex, err)
+		}
+		return 0.2126*lin(uint8(n>>16)) + 0.7152*lin(uint8(n>>8)) + 0.0722*lin(uint8(n))
+	}
+	ratio := func(a, b string) float64 {
+		la, lb := lum(a), lum(b)
+		if la < lb {
+			la, lb = lb, la
+		}
+		return (la + 0.05) / (lb + 0.05)
+	}
+	for _, bg := range avatarPalette {
+		ink := avatarInkFor(bg)
+		if ink != "#000000" && ink != "#ffffff" {
+			t.Errorf("色板 %s 的墨色应是黑/白之一，得到 %q", bg, ink)
+			continue
+		}
+		if got := ratio(ink, bg); got < 4.5 {
+			t.Errorf("色板 %s 的墨 %s 对比度 %0.2f < 4.5:1 正文线", bg, ink, got)
+		}
+		white, black := ratio("#ffffff", bg), ratio("#000000", bg)
+		best := "#000000"
+		if white >= black { // 平手取白，与 app.js avatarInk / 两 App inkFor 同 tie-break
+			best = "#ffffff"
+		}
+		if ink != best {
+			t.Errorf("色板 %s 应取对比更高的 %s（白 %0.2f / 黑 %0.2f），得到 %s", bg, best, white, black, ink)
+		}
+	}
+	// 顶栏渲染：底色与墨色成对进同一行内 style（无档案头像时才出色块；#E6B422 = 下标 6）
+	rec := httptest.NewRecorder()
+	if err := Render(rec, "console", Data{Title: "概览", Email: "ink@example.com", AvatarColor: 6}); err != nil {
+		t.Fatalf("渲染概览页: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), `style="background:#E6B422;color:#000000"`) {
+		t.Error("顶栏色块应成对注入底色与墨色（background+color 同一 style）")
+	}
+	// style.css .avatar：不再写死白墨 var(--primary-ink)（默认兜底黑墨）
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	rule, ok := cssRule(string(cssBytes), ".avatar")
+	if !ok {
+		t.Fatal("style.css 缺 .avatar 规则")
+	}
+	if strings.Contains(rule, "--primary-ink") {
+		t.Error(".avatar 不该再写死白墨 var(--primary-ink)（白墨对色板全数 <4.5:1）")
+	}
+	// app.js avatarInk：定义 + 三处调用（avatarHTML / 资料卡 renderAvatar / 顶栏 updateTopbarAvatar）
+	jsBytes, err := files.ReadFile("app.js")
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	if n := strings.Count(string(jsBytes), "avatarInk("); n < 4 {
+		t.Errorf("app.js 应定义并三处调用 avatarInk，只找到 %d 处", n)
 	}
 }

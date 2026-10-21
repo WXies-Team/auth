@@ -16,7 +16,7 @@ import (
 // W2 分级授权在页面层的三道收口（与 /admin/* 数据端点同源判定）：
 //   - gateSuper 页（用户/角色/配置）app-admin 直接 302 去会话总览——入口不渲染
 //     是模板层的事，直接敲 URL 也进不来；
-//   - 后台导航按角色分叉（super 六项 / app-admin 三项），非 super 的 HTML 里
+//   - 后台导航按角色分叉（super 六项 / app-admin 四项），非 super 的 HTML 里
 //     没有 users/roles/config 的入口；
 //   - 数据三页的 ?app= 越权直接 403 页（友好文案），不让越权过滤器落到 JS 层
 //     才报错。
@@ -53,6 +53,7 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 		{"/web/console/security", "security", "两步验证", gateAuth},
 		{"/web/console/account", "account", "账号", gateAuth},
 		{"/web/admin", "admin-users", "用户", gateSuper},
+		{"/web/admin/access", "admin-access", "项目访问", gateAdmin},
 		{"/web/admin/sessions", "admin-sessions", "会话总览", gateAdmin},
 		{"/web/admin/audit", "admin-audit", "审计日志", gateAdmin},
 		{"/web/admin/config", "admin-config", "配置中心", gateSuper},
@@ -67,6 +68,22 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 		mux.Handle("GET "+d.path, pageHandler(svc, d.name, d.title, d.gate))
 	}
 
+	// 接受邀请页（B9，公开页）：token 即凭证，验过才渲染表单；无效/过期/已用渲染
+	// 同模板的错误变体（400 起头，学 authorize 的双变体）。限流 unauthed 15/分/IP
+	//（与 POST 共用 web-invite 桶：一张表单页 + 一次提交是正常配额）。
+	//
+	// **不挂 pageGate**：发邀请的管理员多半正登录着，若按 gatePublic 把已登录者
+	// 302 去控制台，等于「打开邀请链接被弹走」；接受成功时 AcceptInvite 另建会话并
+	// 覆写 cookie，登录态在这里没有需要保护的语义。
+	if !ui.Has("invite") {
+		slog.Error("页面模板缺失", "name", "invite")
+		os.Exit(1)
+	}
+	mux.Handle("GET /web/invite", withLogging(limitN("web-invite", 15,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			renderInvitePage(svc, w, r.URL.Query().Get("token"), "")
+		}))))
+
 	// /web 根：有会话进控制台，没有进登录页；/web/ 子树的未匹配路径也归到这里
 	mux.Handle("GET /web", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if webSessionOK(svc, r) {
@@ -80,11 +97,13 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 	}))
 }
 
-// registerStaticRoutes 挂静态资产（favicon 三件套）与根路径重定向。
+// registerStaticRoutes 挂静态资产（favicon 三件套 + 品牌 logo）与根路径重定向。
 //
-// 三个文件都随二进制内嵌（internal/ui 的 embed），不依赖磁盘布局：部署产物就一个
-// 二进制。Cache-Control 7 天——指纹图标极低频改动，换图属于发版动作，客户端晚几天
-// 拿到无伤；no-store 反而会让每次进站都多一次往返。
+// 三个 favicon 与全部品牌 logo 都随二进制内嵌（internal/ui 的 embed），不依赖磁盘
+// 布局：部署产物就一个二进制。favicon Cache-Control 7 天——品牌图标极低频改动，
+// 换图属于发版动作，客户端晚几天拿到无伤；no-store 反而会让每次进站都多一次往返。
+// 品牌 logo 走 **immutable 长缓存**：文件名自带版本段（<slug>-v1.png），换图 =
+// 新文件名，旧 URL 永不改内容。
 //
 // `/` 现状是 404（真实入口都在 /web 与 /auth），按定案 302 到登录页：浏览器手敲
 // 域名不该撞一堵墙。**只匹配根路径本身**（`/{$}` 精确匹配），不做全站兜底——
@@ -103,6 +122,17 @@ func registerStaticRoutes(mux *http.ServeMux) {
 			_, _ = w.Write(data)
 		}))
 	}
+	mux.Handle("GET /brand/{name}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ctype, ok := ui.BrandStatic(r.PathValue("name"))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", ctype)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write(data)
+	}))
 	mux.Handle("GET /{$}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/web/login", http.StatusFound)
 	}))
@@ -206,12 +236,24 @@ func pageHandler(svc *auth.Service, name, title string, gate pageGate) http.Hand
 		// 顶栏账号胶囊与「管理后台」入口的渲染依据：邮箱取自现查过的会话身份，
 		// 管理入口按 users.role 判定（ui.IsAdminRole 与后台闸同一口径）——
 		// 非管理员的 HTML 里根本没有这个按钮，不是前端藏一下。
-		if err := ui.Render(w, name, ui.Data{
+		// B5：顶栏升级为头像+昵称，档案三件套随页渲染（GetProfile 无行回默认值，
+		// 查失败只降级为「色块+邮箱首字」形态，不拦页面——顶栏装饰不该 500 整页）。
+		d := ui.Data{
 			Title: title, Nav: nav, Minimal: gate == gatePublic,
 			Email: email, IsAdmin: haveC && ui.IsAdminRole(wc.Role),
 			IsSuper: isSuper, InAdmin: gate == gateAdmin || gate == gateSuper,
 			Apps: apps, CurrentApp: curApp,
-		}); err != nil {
+		}
+		if haveC {
+			if prof, perr := svc.GetProfile(wc.UID); perr == nil {
+				d.Nickname = prof.Nickname
+				d.AvatarColor = prof.AvatarColor
+				if prof.AvatarImage != nil {
+					d.AvatarImage = *prof.AvatarImage
+				}
+			}
+		}
+		if err := ui.Render(w, name, d); err != nil {
 			// 头多半已经写出（Execute 中途失败），只能记日志让 500 兜底
 			slog.Error("渲染页面失败", "page", name, "err", err)
 		}
@@ -237,5 +279,39 @@ func renderDenied(w http.ResponseWriter, app string) {
 		Title: "无权访问", Minimal: true, DeniedApp: app,
 	}); err != nil {
 		slog.Error("渲染 403 页失败", "err", err)
+	}
+}
+
+// renderInvitePage 渲染接受邀请页（GET /web/invite 与 POST /web/invite 被打回时
+// 共用一处）。token 验不过 → 同模板的错误变体（400）；formErr 非空 → token 仍有效，
+// 重渲染表单并在字段下方就地报错（密码不合规这类可修正的错，不该把人踢去错误页）。
+func renderInvitePage(svc *auth.Service, w http.ResponseWriter, token, formErr string) {
+	inv, err := svc.InviteLookup(token)
+	if err != nil {
+		renderInviteError(w, errText(err))
+		return
+	}
+	status := 0
+	if formErr != "" {
+		status = http.StatusBadRequest
+	}
+	if err := ui.Render(w, "invite", ui.Data{
+		Title: "接受邀请", Minimal: true, Status: status,
+		Invite: &ui.InviteView{
+			Token: token, Email: inv.Email, App: inv.App,
+			AppName: ui.AppLabel(inv.App), Error: formErr,
+		},
+	}); err != nil {
+		slog.Error("渲染接受邀请页失败", "err", err)
+	}
+}
+
+// renderInviteError 渲染接受邀请页的错误变体（token 无效/过期/已用、表单体读不动）。
+func renderInviteError(w http.ResponseWriter, message string) {
+	if err := ui.Render(w, "invite", ui.Data{
+		Title: "无法接受邀请", Minimal: true, Status: http.StatusBadRequest,
+		Invite: &ui.InviteView{ErrorTitle: "无法接受邀请", ErrorMessage: message},
+	}); err != nil {
+		slog.Error("渲染接受邀请错误页失败", "err", err)
 	}
 }

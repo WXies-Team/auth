@@ -2,8 +2,8 @@ package main
 
 // 图标光栅化与序列化：超椭圆底 + 白色/蓝色描边字形。两种画法：
 //
-//	品牌画法（邮件 CID 图标）：**纯色 miuix 品牌蓝 #3482FF 实底**（2026-10-20 作者
-//	拍板重做：去掉渐变，起始色既非品牌蓝也非启动图标渐变）+ 白色 lucide 矢量前景，
+//	品牌画法（/brand/ 品牌邮件 logo）：**纯色 miuix 品牌蓝 #3482FF 实底**（2026-10-20
+//	作者拍板重做：去掉渐变，起始色既非品牌蓝也非启动图标渐变）+ 白色 lucide 矢量前景，
 //	iOS 超椭圆（squircle）圆角，不透明。
 //	站点画法（favicon 三件套）：**透明底 + #3482FF 描边本体**，不铺任何底色。
 //
@@ -39,12 +39,12 @@ type iconSpec struct {
 	paths      []string
 	// transparentBlue = 站点 favicon 三件套的画法（2026-10-20 作者拍板）：
 	// **透明底 + miuix 蓝 #3482FF 的描边本体**，与页面内 lucide .ico 图标同款，
-	// 不带任何背景。false = 品牌画法（**纯色 #3482FF 实底** + 白矢量，邮件 CID 图标用）。
+	// 不带任何背景。false = 品牌画法（**纯色 #3482FF 实底** + 白矢量，品牌邮件 logo 用）。
 	transparentBlue bool
 }
 
 // transformFor 把字形外包盒缩放居中到 size×size 画布，返回 (scale, tx, ty)。
-// 按字形实际外包盒归一化（而不是按 24 的 viewBox）——火焰、收据、指纹三者的
+// 按字形实际外包盒归一化（而不是按 24 的 viewBox）——火焰、收据、素盾三者的
 // 有效图形大小不同，不归一化会一枚大一枚小。
 func transformFor(size, boxFrac float64, segs []seg) (s, tx, ty float64) {
 	min, max := bboxOf(segs)
@@ -58,7 +58,7 @@ func transformFor(size, boxFrac float64, segs []seg) (s, tx, ty float64) {
 }
 
 // strokePx 是描边在像素空间的宽度：小尺寸要**光学加粗**——16px 下按 5% 只有 0.8px，
-// 等于把指纹糊成灰点。
+// 等于把素盾的细线糊成灰点。
 func strokePxFor(size int) float64 {
 	return math.Max(float64(size)*0.05, 1.35)
 }
@@ -212,7 +212,7 @@ func encodePNG(spec iconSpec) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// faviconSVG 生成 favicon.svg：**透明底 + #3482FF 的 hexagon 描边本体**
+// faviconSVG 生成 favicon.svg：**透明底 + #3482FF 的 shield 素盾描边本体**
 //（2026-10-20 作者拍板，去掉蓝渐变 squircle 底）。stroke-width=2 与页面内
 // lucide .ico 图标同款语义，缩放交给 transform；矢量直接用 lucide 原始 path data。
 func faviconSVG(size float64, paths []string) (string, error) {
@@ -232,6 +232,49 @@ func faviconSVG(size float64, paths []string) (string, error) {
 <title>Auth</title>
 <g transform="translate(%.3f %.3f) scale(%.5f)" fill="none" stroke="#%02X%02X%02X" stroke-width="%.3f" stroke-linecap="round" stroke-linejoin="round">
 `, size, size, size, size, tx, ty, s, miuixBlue.R, miuixBlue.G, miuixBlue.B, strokePxFor(int(size))/s)
+	for _, d := range paths {
+		fmt.Fprintf(&b, "<path d=\"%s\"/>\n", d)
+	}
+	b.WriteString("</g>\n</svg>\n")
+	return b.String(), nil
+}
+
+// brandSVG 生成品牌邮件 logo 的矢量源：**纯色 #3482FF 超椭圆实底 + 白描边字形**，
+// 与 encodePNG 的品牌画法同款（squircle 用 128 点采样折线逼近——SVG 里没有
+// 超椭圆原语，折线在 64px 设计尺寸下看不出棱角）。
+func brandSVG(size float64, label string, paths []string) (string, error) {
+	var all []seg
+	for _, d := range paths {
+		got, err := flatten(d)
+		if err != nil {
+			return "", err
+		}
+		all = append(all, got...)
+	}
+	if len(all) == 0 {
+		return "", fmt.Errorf("字形路径为空")
+	}
+	half := size / 2
+	var sq strings.Builder
+	const pts = 128
+	for i := 0; i < pts; i++ {
+		theta := 2 * math.Pi * float64(i) / pts
+		u := math.Copysign(math.Pow(math.Abs(math.Cos(theta)), 2/squircleN), math.Cos(theta))
+		v := math.Copysign(math.Pow(math.Abs(math.Sin(theta)), 2/squircleN), math.Sin(theta))
+		if i > 0 {
+			sq.WriteString("L")
+		}
+		fmt.Fprintf(&sq, "%.3f %.3f ", half+u*half, half+v*half)
+	}
+	sq.WriteString("Z")
+
+	s, tx, ty := transformFor(size, 0.76, all)
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %g %g" width="%g" height="%g" role="img" aria-label="%s">
+<title>%s</title>
+<path d="M%s" fill="#3482FF"/>
+<g transform="translate(%.3f %.3f) scale(%.5f)" fill="none" stroke="#FFFFFF" stroke-width="%.3f" stroke-linecap="round" stroke-linejoin="round">
+`, size, size, size, size, label, label, strings.TrimSpace(sq.String()), tx, ty, s, strokePxFor(int(size))/s)
 	for _, d := range paths {
 		fmt.Fprintf(&b, "<path d=\"%s\"/>\n", d)
 	}

@@ -11,8 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -42,8 +44,26 @@ type Data struct {
 	Minimal bool // 登录页这类无导航的壳
 	Email   string
 	Initial string // 账号胶囊头像占位首字母（无档案头像时的兜底）
-	IsAdmin bool
-	IsSuper bool
+	// B5 资料三件套（顶栏头像/昵称升级的渲染数据）：Nickname 空 = 未设置（顶栏回退
+	// 邮箱前缀）；AvatarImage 非空 = 档案头像 base64（无 data: 前缀，与两 App 存储
+	// 格式同源）；AvatarColor 是色板下标（AvatarPalette 同序，0 回退首位）。
+	Nickname    string
+	AvatarColor int
+	AvatarImage string
+	// AcctName 是顶栏账号胶囊的显示名：昵称优先，无昵称回退邮箱前缀（@ 前）。
+	// Render 里派生，页面层不用填。
+	AcctName string
+	// AvatarColorHex / AvatarInkHex / AvatarSrc 是 Render 派生的渲染成品：色块底色
+	// hex、**首字墨色**（avatarInkFor 按底色亮度挑的黑/白墨——顶栏不再写死白墨，
+	// 白墨对 8 色色板只有 1.92~4.49:1，全线低于 4.5:1 正文线）、头像图的 data URL
+	//（空 = 无图走色块回退）。AvatarSrc 用 template.URL 是因为 html/template 会把
+	// data: URL 刷成 #ZgotmplZ——内容是服务端拼的 base64（validateProfile 只收标准
+	// 字母表），无注入面。
+	AvatarColorHex string
+	AvatarInkHex   string
+	AvatarSrc      template.URL
+	IsAdmin        bool
+	IsSuper        bool
 	// InAdmin = 本页在管理后台区内：顶栏入口此时应显示「返回控制台」而不是
 	// 「管理后台」（pageHandler 按 gate 传入）。
 	InAdmin bool
@@ -52,12 +72,25 @@ type Data struct {
 	CurrentApp string
 	// DeniedApp 是 403 页上点名的越权应用（denied 模板用，其余页面忽略）
 	DeniedApp string
+	// OAuth 是授权页（authorize 模板）的渲染上下文：确认态带项目/回跳域名/事务号，
+	// 错误态带标题与下一步文案（同一张卡片语言，cmd/server/oauth.go 填）。
+	OAuth *OAuthView
+	// Invite 是接受邀请页（invite 模板）的渲染上下文（cmd/server 的
+	// GET/POST /web/invite 填）：Token 原样回填表单隐藏域（它就是凭证，URL 里已有），
+	// ErrorTitle 非空 = 同模板的错误变体（token 无效/过期/已用，400 起头），
+	// Error 非空 = 表单下方的就地报错（提交被业务打回时连表单一起重渲染）。
+	Invite *InviteView
+	// Status 非零时以该状态码起头（授权错误页要 400/403；0 = 200）
+	Status int
 	// AppsJSON 是服务端 knownApps 注册表的 JSON（template.JS 直出进
 	// <script type="application/json">），前端 appLabel/应用授权开关从它取
 	// 清单——app 清单只此一份（Go 侧 knownApps），JS 不再硬编码。
 	AppsJSON template.JS
-	Style    template.CSS
-	Script   template.JS
+	// PaletteJSON 是头像色板的 JSON（B5 账号资料卡的色块 chips 从它取色，
+	// 与 Go avatarPalette / 两 App AvatarPalette 同一份值）。
+	PaletteJSON template.JS
+	Style       template.CSS
+	Script      template.JS
 }
 
 var (
@@ -75,6 +108,22 @@ var staticTypes = map[string]string{
 }
 
 var staticFiles = map[string][]byte{}
+
+// brandFiles 是 /brand/ 下的品牌 logo 资产（scripts/genicons 生成、随二进制内嵌）：
+// 文件名 → 内容。init 里现读 embed 目录登记，缺品牌资产就在启动时炸。
+var brandFiles = map[string][]byte{}
+
+// brandContentType 按扩展名给 /brand/ 资产定 Content-Type（清单式，不猜）。
+func brandContentType(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".png"):
+		return "image/png"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml; charset=utf-8"
+	default:
+		return "application/octet-stream"
+	}
+}
 
 func init() {
 	css, err := files.ReadFile("style.css")
@@ -95,6 +144,26 @@ func init() {
 			panic(fmt.Errorf("读静态资产 %s: %w", name, err))
 		}
 		staticFiles[name] = data
+	}
+
+	// 品牌邮件 logo（/brand/<slug>-v1.png + 矢量源 <slug>.svg）：邮件以绝对 URL 引用
+	// （见 internal/auth 的 brand.logoURL），这里登记成可挂载的静态资产。
+	brandEntries, berr := files.ReadDir("static/brand")
+	if berr != nil {
+		panic(fmt.Errorf("列品牌 logo: %w", berr))
+	}
+	for _, e := range brandEntries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := files.ReadFile("static/brand/" + e.Name())
+		if err != nil {
+			panic(fmt.Errorf("读品牌 logo %s: %w", e.Name(), err))
+		}
+		brandFiles[e.Name()] = data
+	}
+	if len(brandFiles) == 0 {
+		panic("ui: static/brand/ 下没有品牌 logo——先跑 go run ./scripts/genicons")
 	}
 
 	layout, err := files.ReadFile("templates/layout.html")
@@ -145,6 +214,44 @@ type AppChoice struct {
 	Key    string
 	Label  string
 	Active bool
+}
+
+// OAuthView 是授权页（authorize.html）的渲染上下文（cmd/server/oauth.go 填）：
+// Tx 是一次性授权事务号（确认表单回传）；ErrorTitle 非空 = 同模板的错误页变体。
+// AppName/RedirectHost/Email 都是服务端已验过的值（模板自动转义）。
+type OAuthView struct {
+	Tx           string
+	App          string
+	AppName      string
+	RedirectHost string
+	Email        string
+	ErrorTitle   string
+	ErrorMessage string
+}
+
+// InviteView 是接受邀请页（invite 模板）的渲染上下文（cmd/server 的
+// GET/POST /web/invite 填）：与 authorize 同一套「同模板双变体」做法——
+// ErrorTitle 非空 = 错误变体整卡替换（token 无效/过期/已用），否则渲染表单，
+// Error 只做表单下方的就地报错（提交被业务打回后连表单一起重渲染）。
+type InviteView struct {
+	Token        string
+	Email        string
+	App          string
+	AppName      string // App 的展示名（空 = 账号级邀请，文案不点名项目）
+	Error        string
+	ErrorTitle   string
+	ErrorMessage string
+}
+
+// AppLabel 返回项目 slug 的展示名（invite 页文案用）：未知 slug 回原串，'' 回 ""。
+// 展示名唯一来源是 knownApps 注册表——与序列化进页面的 AppsJSON 同一份值。
+func AppLabel(key string) string {
+	for _, a := range knownApps {
+		if a.key == key {
+			return a.label
+		}
+	}
+	return key
 }
 
 // knownApps 是项目切换器/应用授权开关的展示名（与 auth.allowedApps 同源的两 app；
@@ -201,6 +308,76 @@ func SwitchApps(super bool, scopes []string, currentApp string) []AppChoice {
 	return out
 }
 
+// avatarPalette 是头像色板（B5，与两个日记 App 的 AvatarPalette.kt **逐值同序**：
+// #5B8DEF #7C6AF2 #E2556B #FF8A3D #2BB673 #14A8A0 #E6B422 #8B7355）。档案里的
+// avatarColor 存的是这里的下标，0（或越界）回退首位——与 App 侧 colorAt 同口径。
+var avatarPalette = []string{
+	"#5B8DEF", "#7C6AF2", "#E2556B", "#FF8A3D",
+	"#2BB673", "#14A8A0", "#E6B422", "#8B7355",
+}
+
+// AvatarPaletteHex 返回色板下标对应的 hex（越界回退首位，与 App 的 colorAt 一致）。
+func AvatarPaletteHex(index int) string {
+	if index < 0 || index >= len(avatarPalette) {
+		return avatarPalette[0]
+	}
+	return avatarPalette[index]
+}
+
+// PaletteJSON 把色板序列化成 JSON 数组——前端色板 chips 与首字回退从这里取色，
+// 色值不进 JS 硬编码（与 knownApps 同一「服务端唯一清单」口径）。
+func PaletteJSON() template.JS {
+	b, err := json.Marshal(avatarPalette)
+	if err != nil {
+		panic(fmt.Errorf("序列化头像色板: %w", err))
+	}
+	return template.JS(b) //nolint:gosec // 自有静态色值，无用户输入
+}
+
+// avatarInkFor 给固定底色挑**首字墨色**：按 WCAG 相对亮度取白墨/黑墨里对比更高
+// 的那一支（与两个日记 App 的 AvatarPalette.inkFor 同规则，参考其取色审计注释——
+// 不用 0.5 亮度阈值：阈值会把 #E6B422 判成「深色」给白墨，实测仅 1.92:1）。
+//
+// 色板 8 色实测对比度（白墨 / 黑墨，2026-10-21 头像取色审计）：
+//
+//	#5B8DEF 3.23/6.50 · #7C6AF2 4.04/5.20 · #E2556B 3.66/5.75 · #FF8A3D 2.35/8.95
+//	#2BB673 2.61/8.04 · #14A8A0 2.94/7.14 · #E6B422 1.92/10.92 · #8B7355 4.49/4.68
+//
+// 白墨全数低于 4.5:1 正文线（其中 4 色连 3:1 大字线都不过），黑墨全数 ≥4.5——
+// 本色板实际全取黑墨，但规则按亮度自选（换色板仍成立）。TestAvatarInkContrast
+// 钉住「每色 ≥4.5:1」；app.js avatarInk 是同式镜像（JS 侧无单测，改规则请同 PR 同步）。
+func avatarInkFor(bg string) string {
+	l, ok := hexLuminance(bg)
+	if !ok {
+		// 走不到（底色只来自常量色板）；兜底黑墨 = 8 色里全部 ≥4.5:1 的那一支
+		return "#000000"
+	}
+	if white := 1.05 / (l + 0.05); white >= (l+0.05)/0.05 {
+		return "#ffffff"
+	}
+	return "#000000"
+}
+
+// hexLuminance 解 #RRGGBB 的 WCAG 相对亮度：sRGB 通道线性化（≤0.04045 走除 12.92，
+// 否则 (c+0.055)/1.055 的 2.4 次方）后按 0.2126/0.7152/0.0722 加权。
+func hexLuminance(hex string) (float64, bool) {
+	if len(hex) != 7 || hex[0] != '#' {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(hex[1:], 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	lin := func(c uint8) float64 {
+		f := float64(c) / 255
+		if f <= 0.04045 {
+			return f / 12.92
+		}
+		return math.Pow((f+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(uint8(n>>16)) + 0.7152*lin(uint8(n>>8)) + 0.0722*lin(uint8(n)), true
+}
+
 // initialOf 取邮箱首字符做账号胶囊的头像占位字（无档案头像时的兜底）；
 // 空邮箱（登录页等 Minimal 壳）回空串，模板里就不渲染这颗字母。
 func initialOf(email string) string {
@@ -208,6 +385,26 @@ func initialOf(email string) string {
 		return strings.ToUpper(string(r))
 	}
 	return ""
+}
+
+// initialFor 是 B5 的首字回退链：昵称首字符优先，无昵称退邮箱首字符
+//（与前端 avatarInitial 同一逻辑，两处口径都钉在各自测试里）。
+func initialFor(nickname, email string) string {
+	if s := strings.TrimSpace(nickname); s != "" {
+		for _, r := range s {
+			return strings.ToUpper(string(r))
+		}
+	}
+	return initialOf(email)
+}
+
+// emailPrefix 是邮箱 @ 前的本地名（顶栏无昵称时的显示名回退）。
+func emailPrefix(email string) string {
+	local, _, ok := strings.Cut(strings.TrimSpace(email), "@")
+	if !ok {
+		return strings.TrimSpace(email)
+	}
+	return local
 }
 
 // StaticNames 列出可挂载的静态资产文件名（定序），路由层据此逐个挂 `GET /<name>`。
@@ -229,6 +426,17 @@ func Static(name string) ([]byte, string, bool) {
 	return staticFiles[name], ctype, true
 }
 
+// BrandStatic 取一份品牌 logo 资产（/brand/ 下的文件名）的内容与 Content-Type；
+// 名单外回 ("", "", false)。文件名带 -v1 版本段：换图 = 新文件名 + 新 brand.logoPath，
+// 旧 URL 恒可用（immutable 缓存的前提）。
+func BrandStatic(name string) ([]byte, string, bool) {
+	data, ok := brandFiles[name]
+	if !ok {
+		return nil, "", false
+	}
+	return data, brandContentType(name), true
+}
+
 // Render 渲染一个页面。响应一律 no-store：页面本身会内嵌登录态相关的骨架，
 // 让中间层缓存住带状态的 HTML 是给自己找麻烦。
 func Render(w http.ResponseWriter, name string, data Data) error {
@@ -240,13 +448,34 @@ func Render(w http.ResponseWriter, name string, data Data) error {
 	if data.AppsJSON == "" {
 		data.AppsJSON = knownAppsJSON()
 	}
+	if data.PaletteJSON == "" {
+		data.PaletteJSON = PaletteJSON()
+	}
+	// B5 顶栏账号胶囊的派生数据：显示名（昵称 > 邮箱前缀）、首字（昵称首字符 >
+	// 邮箱首字符）、色块底色、头像图 data URL（有图则顶栏用图，无图走色块+首字）
+	if data.AcctName == "" {
+		if n := strings.TrimSpace(data.Nickname); n != "" {
+			data.AcctName = n
+		} else {
+			data.AcctName = emailPrefix(data.Email)
+		}
+	}
 	if data.Initial == "" {
-		data.Initial = initialOf(data.Email)
+		data.Initial = initialFor(data.Nickname, data.Email)
+	}
+	data.AvatarColorHex = AvatarPaletteHex(data.AvatarColor)
+	data.AvatarInkHex = avatarInkFor(data.AvatarColorHex) // 首字墨色与底色成对注入
+	if img := strings.TrimSpace(data.AvatarImage); img != "" {
+		data.AvatarSrc = template.URL("data:image/jpeg;base64," + img) //nolint:gosec // 内容是服务端校验过的标准 base64（validateProfile 只收该字母表），无注入面
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	// Status 非零 = 以该状态码起头（必须在 Execute 写体之前，晚了头就作废）
+	if data.Status != 0 {
+		w.WriteHeader(data.Status)
+	}
 	return t.Execute(w, data)
 }
 
@@ -273,16 +502,18 @@ func ConsoleNav(active string) []NavItem {
 	}
 }
 
-// AdminNav 是后台入口（key 与页面名对应），按角色分叉（W2）：
+// AdminNav 是后台入口（key 与页面名对应），按角色分叉（W2/W4）：
 //
-//	super     用户 / 会话总览 / 审计日志 / 配置中心 / AI 用量 五项；
-//	app-admin 只有会话总览 / 审计日志 / AI 用量 三项（已按 scope 过滤的数据页）——
-//	          用户目录、配置是平台级功能，入口在它的 HTML 里根本不出现。
+//	super     用户 / 项目访问 / 会话总览 / 审计日志 / 配置中心 / AI 用量 六项；
+//	app-admin 项目访问 / 会话总览 / 审计日志 / AI 用量 四项（已按 scope 过滤的数据页
+//	          ——项目访问页它也只拿到自己授权的项目；用户目录、配置是平台级功能，
+//	          入口在它的 HTML 里根本不出现）。
 //（原「角色管理」页已并入用户页：详情面板内直接改角色与应用授权。）
 func AdminNav(active string, isSuper bool) []NavItem {
 	if isSuper {
 		return []NavItem{
 			{Href: "/web/admin", Label: "用户", Icon: "users", Active: active == "admin-users"},
+			{Href: "/web/admin/access", Label: "项目访问", Icon: "lock", Active: active == "admin-access"},
 			{Href: "/web/admin/sessions", Label: "会话总览", Icon: "monitor", Active: active == "admin-sessions"},
 			{Href: "/web/admin/audit", Label: "审计日志", Icon: "scroll-text", Active: active == "admin-audit"},
 			{Href: "/web/admin/config", Label: "配置中心", Icon: "sliders-horizontal", Active: active == "admin-config"},
@@ -290,8 +521,9 @@ func AdminNav(active string, isSuper bool) []NavItem {
 		}
 	}
 	return []NavItem{
+		{Href: "/web/admin/access", Label: "项目访问", Icon: "lock", Active: active == "admin-access"},
 		{Href: "/web/admin/sessions", Label: "会话总览", Icon: "monitor", Active: active == "admin-sessions"},
 		{Href: "/web/admin/audit", Label: "审计日志", Icon: "scroll-text", Active: active == "admin-audit"},
-		{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai-usage"},
+		{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai"},
 	}
 }
