@@ -8,6 +8,7 @@ package ui
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -43,13 +44,20 @@ type Data struct {
 	Initial string // 账号胶囊头像占位首字母（无档案头像时的兜底）
 	IsAdmin bool
 	IsSuper bool
-	Apps    []AppChoice // 非空 = 顶栏渲染项目切换器
+	// InAdmin = 本页在管理后台区内：顶栏入口此时应显示「返回控制台」而不是
+	// 「管理后台」（pageHandler 按 gate 传入）。
+	InAdmin bool
+	Apps    []AppChoice // 非空 = 顶栏渲染项目切换器（只有消费 ?app= 的数据页给值）
 	// CurrentApp 是 ?app= 的当前取值（切换器高亮 + 数据页过滤器），空 = 全部/默认
 	CurrentApp string
 	// DeniedApp 是 403 页上点名的越权应用（denied 模板用，其余页面忽略）
 	DeniedApp string
-	Style     template.CSS
-	Script    template.JS
+	// AppsJSON 是服务端 knownApps 注册表的 JSON（template.JS 直出进
+	// <script type="application/json">），前端 appLabel/应用授权开关从它取
+	// 清单——app 清单只此一份（Go 侧 knownApps），JS 不再硬编码。
+	AppsJSON template.JS
+	Style    template.CSS
+	Script   template.JS
 }
 
 var (
@@ -139,11 +147,29 @@ type AppChoice struct {
 	Active bool
 }
 
-// knownApps 是项目切换器的展示名（与 auth.allowedApps 同源的两 app；新应用
-// 加这里 + allowedApps 两处）。定序即展示序。
+// knownApps 是项目切换器/应用授权开关的展示名（与 auth.allowedApps 同源的两 app；
+// 新应用加这里 + allowedApps 两处）。定序即展示序。前端不存第二份清单——
+// Render 把它序列化成 JSON 注进页面（Data.AppsJSON），JS 从那里读。
 var knownApps = []struct{ key, label string }{
 	{"calorie-diary", "热量日记"},
 	{"expense-diary", "开支日记"},
+}
+
+// knownAppsJSON 把注册表序列化成 [{key,label},...]——模板/JS 唯一的 app 清单来源。
+func knownAppsJSON() template.JS {
+	type entry struct {
+		Key   string `json:"key"`
+		Label string `json:"label"`
+	}
+	out := make([]entry, 0, len(knownApps))
+	for _, a := range knownApps {
+		out = append(out, entry{Key: a.key, Label: a.label})
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		panic(fmt.Errorf("序列化应用注册表: %w", err))
+	}
+	return template.JS(b) //nolint:gosec // 自有静态数据，无用户输入
 }
 
 // SwitchApps 生成项目切换器的选项：
@@ -211,6 +237,9 @@ func Render(w http.ResponseWriter, name string, data Data) error {
 		return fmt.Errorf("页面模板不存在: %s", name)
 	}
 	data.Style, data.Script = styleCSS, appJS
+	if data.AppsJSON == "" {
+		data.AppsJSON = knownAppsJSON()
+	}
 	if data.Initial == "" {
 		data.Initial = initialOf(data.Email)
 	}
@@ -246,18 +275,18 @@ func ConsoleNav(active string) []NavItem {
 
 // AdminNav 是后台入口（key 与页面名对应），按角色分叉（W2）：
 //
-//	super     用户 / 角色管理 / 会话总览 / 审计日志 / 配置中心 / AI 用量 六项；
+//	super     用户 / 会话总览 / 审计日志 / 配置中心 / AI 用量 五项；
 //	app-admin 只有会话总览 / 审计日志 / AI 用量 三项（已按 scope 过滤的数据页）——
-//	          用户目录、角色、配置是平台级功能，入口在它的 HTML 里根本不出现。
+//	          用户目录、配置是平台级功能，入口在它的 HTML 里根本不出现。
+//（原「角色管理」页已并入用户页：详情面板内直接改角色与应用授权。）
 func AdminNav(active string, isSuper bool) []NavItem {
 	if isSuper {
 		return []NavItem{
 			{Href: "/web/admin", Label: "用户", Icon: "users", Active: active == "admin-users"},
-			{Href: "/web/admin/roles", Label: "角色", Icon: "shield-check", Active: active == "admin-roles"},
 			{Href: "/web/admin/sessions", Label: "会话总览", Icon: "monitor", Active: active == "admin-sessions"},
 			{Href: "/web/admin/audit", Label: "审计日志", Icon: "scroll-text", Active: active == "admin-audit"},
 			{Href: "/web/admin/config", Label: "配置中心", Icon: "sliders-horizontal", Active: active == "admin-config"},
-			{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai-usage"},
+			{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai"},
 		}
 	}
 	return []NavItem{

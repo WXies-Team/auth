@@ -112,24 +112,37 @@ func TestNarrowScreenShellReady(t *testing.T) {
 	}
 }
 
-// 设备页：本设备行不可踢——kick 按钮只在 it.current 为假时渲染（JS 源码级钉住，
-// 无 DOM 的单测拿不到渲染结果；服务端语义另由 TestSessionLifecycle 钉 current 标记）。
+// 设备页：本设备会话行不可退出——退出按钮只在 it.current 为假时渲染（JS 源码级
+// 钉住，无 DOM 的单测拿不到渲染结果；服务端语义另由 TestSessionLifecycle 钉 current 标记）。
 func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 	jsBytes, err := files.ReadFile("app.js")
 	if err != nil {
 		t.Fatalf("读 app.js: %v", err)
 	}
 	js := string(jsBytes)
-	if !strings.Contains(js, "${it.current ? '' : '<button type=\"button\" class=\"btn small danger\">退出它</button>'}") {
-		t.Error("本设备行不该渲染踢出按钮（it.current 分支应为空串）")
+	if !strings.Contains(js, "${it.current ? '' : '<button type=\"button\" class=\"btn small danger\">退出</button>'}") {
+		t.Error("本设备会话行不该渲染退出按钮（it.current 分支应为空串）")
 	}
 	if !strings.Contains(js, "'<span class=\"badge on\">本设备</span>'") {
-		t.Error("本设备行应带「本设备」徽标")
+		t.Error("本设备会话行应带「本设备」徽标")
+	}
+	// 会话 id 一律按字符串处理（雪花 id 的 JS 精度陷阱）：列表请求的回执是
+	// {sessions:[...]}，且踢人路径用 sessTag/字符串拼接
+	if !strings.Contains(js, "res.sessions || []") {
+		t.Error("会话列表应从 {sessions:[...]} 回执取数组")
+	}
+	if !strings.Contains(js, "const sessTag = id => 'session' + String(id).slice(-4)") {
+		t.Error("会话条目应有 session+末4位 的字符串短标识")
+	}
+	// 按设备分组 + 组级批量退出走 revoke-many
+	if !strings.Contains(js, "/api/sessions/revoke-many") {
+		t.Error("设备组级退出应调 POST /api/sessions/revoke-many")
 	}
 }
 
 // 顶栏账号胶囊与管理后台入口都在 layout 里，且管理入口由 .IsAdmin 门控
 //（role 判定发生在 cmd/server 的 pageHandler，非管理员的 HTML 里没有这个按钮）。
+// 进入后台后入口变「返回控制台」（.InAdmin 门控）。
 func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	raw, err := files.ReadFile("templates/layout.html")
 	if err != nil {
@@ -137,7 +150,8 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	}
 	head := string(raw)
 	for _, want := range []string{
-		`{{if .IsAdmin}}<a class="btn small admin-entry" href="{{if .IsSuper}}/web/admin{{else}}/web/admin/sessions{{end}}" id="admin-entry">`,
+		`{{if .IsAdmin}}<a class="btn small admin-entry" href="{{if .InAdmin}}/web/console{{else if .IsSuper}}/web/admin{{else}}/web/admin/sessions{{end}}" id="admin-entry">`,
+		`{{if .InAdmin}}返回控制台{{else}}管理后台{{end}}`,
 		`<span class="acct-email" id="topbar-email">{{.Email}}</span>`,
 		`<span class="avatar" id="me-avatar" aria-hidden="true">{{.Initial}}</span>`,
 	} {
@@ -148,6 +162,14 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	// 登录页（Minimal）没有顶栏：管理入口与账号胶囊都包在 not Minimal 里
 	if !strings.Contains(head, "{{if not .Minimal}}\n<!-- 顶栏常驻") {
 		t.Error("顶栏应整体由 not Minimal 门控（登录页无顶栏）")
+	}
+	// 登录页/403 页也不渲染底部 footer（整体 not Minimal 门控，连容器都不出）
+	if !strings.Contains(head, "{{if not .Minimal}}\n<footer class=\"foot\">") {
+		t.Error("footer 应整体由 not Minimal 门控（Minimal 页无页脚）")
+	}
+	// 服务端应用注册表 JSON 注入点存在
+	if !strings.Contains(head, `<script type="application/json" id="known-apps">{{.AppsJSON}}</script>`) {
+		t.Error("layout 应注入 known-apps 应用注册表 JSON")
 	}
 	if got := initialOf("someone@example.com"); got != "S" {
 		t.Errorf("账号胶囊首字母应取邮箱首字符大写，得到 %q", got)
@@ -161,7 +183,7 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 }
 
 // W2 项目切换器与角色页：切换器 markup 在 layout、SwitchApps 按角色分叉、
-// 角色/403 页模板齐备、导航按 super 分叉。
+// 403 页模板齐备、导航按 super 分叉（角色管理已并入用户页，导航只剩五项）。
 func TestAppSwitchAndRolesPage(t *testing.T) {
 	// 1. layout 带切换器容器（在 admin-entry 与 acct 之间）
 	raw, err := files.ReadFile("templates/layout.html")
@@ -198,18 +220,19 @@ func TestAppSwitchAndRolesPage(t *testing.T) {
 		}
 	}
 
-	// 3. 新模板齐备
-	for _, name := range []string{"admin-roles", "denied"} {
-		if !Has(name) {
-			t.Errorf("页面模板缺失: %s", name)
-		}
+	// 3. 角色管理模板已删（并入用户页），403 页仍在
+	if Has("admin-roles") {
+		t.Error("admin-roles 模板应已删除（角色管理并入用户页）")
+	}
+	if !Has("denied") {
+		t.Error("页面模板缺失: denied")
 	}
 
-	// 4. AdminNav 按角色分叉
+	// 4. AdminNav 按角色分叉：super 五项（用户/会话/审计/配置/AI），app-admin 三项
 	navS := AdminNav("", true)
 	navA := AdminNav("", false)
-	if len(navS) != 6 {
-		t.Errorf("super 导航应六项，得到 %d", len(navS))
+	if len(navS) != 5 {
+		t.Errorf("super 导航应五项，得到 %d", len(navS))
 	}
 	if len(navA) != 3 {
 		t.Errorf("app-admin 导航应三项，得到 %d", len(navA))
@@ -217,6 +240,12 @@ func TestAppSwitchAndRolesPage(t *testing.T) {
 	for _, it := range navA {
 		if it.Href == "/web/admin" || it.Href == "/web/admin/config" || it.Href == "/web/admin/roles" {
 			t.Errorf("app-admin 导航不该有平台级入口 %q", it.Href)
+		}
+	}
+	// super 导航不该再有独立的角色页入口
+	for _, it := range navS {
+		if it.Href == "/web/admin/roles" {
+			t.Error("角色管理已并入用户页，super 导航不该再有 /web/admin/roles")
 		}
 	}
 
@@ -325,7 +354,7 @@ func TestMotionSystem(t *testing.T) {
 		".content > *:nth-child(3) { animation-delay: 210ms; }",
 		".content > #toast, .content > dialog { animation: none; }",
 		"tbody tr:nth-child(-n+10)",
-		".item.leaving",
+		".leaving",
 		".dlg[open]",
 		".btn[aria-busy=true]::after",
 	} {

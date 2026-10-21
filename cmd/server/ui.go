@@ -52,8 +52,7 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 		{"/web/console/passkeys", "passkeys", "Passkey", gateAuth},
 		{"/web/console/security", "security", "两步验证", gateAuth},
 		{"/web/console/account", "account", "账号", gateAuth},
-		{"/web/admin", "admin-users", "用户管理", gateSuper},
-		{"/web/admin/roles", "admin-roles", "角色管理", gateSuper},
+		{"/web/admin", "admin-users", "用户", gateSuper},
 		{"/web/admin/sessions", "admin-sessions", "会话总览", gateAdmin},
 		{"/web/admin/audit", "admin-audit", "审计日志", gateAdmin},
 		{"/web/admin/config", "admin-config", "配置中心", gateSuper},
@@ -195,7 +194,11 @@ func pageHandler(svc *auth.Service, name, title string, gate pageGate) http.Hand
 				}
 			}
 			nav = ui.AdminNav(name, isSuper)
-			apps = ui.SwitchApps(isSuper, scopes, curApp)
+			// 项目切换器只给**真正消费 ?app= 的数据页**渲染：用户/配置页不读这个
+			// 参数，摆一颗点了没反应的死控件只会让人以为坏了。
+			if scopedPages[name] {
+				apps = ui.SwitchApps(isSuper, scopes, curApp)
+			}
 		} else {
 			nav = ui.ConsoleNav(name)
 		}
@@ -206,7 +209,8 @@ func pageHandler(svc *auth.Service, name, title string, gate pageGate) http.Hand
 		if err := ui.Render(w, name, ui.Data{
 			Title: title, Nav: nav, Minimal: gate == gatePublic,
 			Email: email, IsAdmin: haveC && ui.IsAdminRole(wc.Role),
-			IsSuper: isSuper, Apps: apps, CurrentApp: curApp,
+			IsSuper: isSuper, InAdmin: gate == gateAdmin || gate == gateSuper,
+			Apps: apps, CurrentApp: curApp,
 		}); err != nil {
 			// 头多半已经写出（Execute 中途失败），只能记日志让 500 兜底
 			slog.Error("渲染页面失败", "page", name, "err", err)

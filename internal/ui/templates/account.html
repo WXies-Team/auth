@@ -34,7 +34,7 @@
     <p class="err" id="pw-code-error" role="alert" hidden></p>
     <button type="submit" class="btn primary">更新密码</button>
   </form>
-  <p class="hint" style="margin-top:10px">改密码会把其它设备全部登出，本机保持登录。</p>
+  <p class="hint" style="margin-top:10px">改密码会把其它设备全部退出，本机保持登录。</p>
 </section>
 
 <!-- 改邮箱 -->
@@ -55,20 +55,20 @@
   </label>
   <p class="err" id="email-error" role="alert" hidden></p>
   <button type="button" class="btn primary" id="change-email">更新邮箱</button>
-  <p class="hint" style="margin-top:10px">改绑不会把其它设备登出，新旧邮箱都会收到通知。</p>
+  <p class="hint" style="margin-top:10px">改绑不会退出其它设备，新旧邮箱都会收到通知。</p>
 </section>
 
 <!-- 注销：独立危险区——error 描边 + 淡底，与上面两项常规设置视觉隔离 -->
 <section class="danger-zone" aria-labelledby="del-title">
   <h2 id="del-title">注销账号</h2>
-  <p class="hint">注销会删除本服务的账号与登录记录，并通知两个日记服务清除各自保存的业务数据。<strong>此操作不可撤销。</strong></p>
+  <p class="hint">注销会删除本服务的账号与登录记录，并通知关联的业务服务清除各自保存的业务数据。<strong>此操作不可撤销。</strong></p>
   <button type="button" class="btn danger" id="start-delete">清除数据并注销</button>
 </section>
 
 <dialog class="dlg" id="delete-dialog" aria-labelledby="dd-title">
   <form method="dialog" id="delete-form">
     <h2 id="dd-title">确认注销账号</h2>
-    <p class="dim">输入当前密码以确认。注销后无法恢复，两个日记服务里的记录会被一并清除。</p>
+    <p class="dim">输入当前密码以确认。注销后无法恢复，关联业务服务里保存的记录会被一并清除。</p>
     <label class="field"><span>当前密码</span>
       <input type="password" id="delete-password" autocomplete="current-password">
     </label>

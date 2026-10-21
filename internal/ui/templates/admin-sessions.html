@@ -4,31 +4,45 @@
   <span class="dim" id="sess-total"></span>
 </div>
 
-<form class="row" id="sess-filter-form">
-  <label class="field grow" style="margin:0"><span class="sr-only">按 uid 过滤</span>
-    <input type="text" id="sess-uid" placeholder="按 uid 过滤（留空看全部）" inputmode="numeric" autocomplete="off">
-  </label>
-  <button type="submit" class="btn">筛选</button>
-  <button type="button" class="btn ghost" id="sess-reset">看全部</button>
-</form>
+<p class="hint">先按用户列出活跃会话；点击某个用户的「查看会话」进入该用户的会话列表，可逐条退出。项目切换器（顶部）只过滤授权范围内的会话。</p>
 
-<p class="err" id="sess-error" role="alert" hidden></p>
+<!-- 层级一：用户列表 -->
+<div id="sess-users-view">
+  <form class="row" id="sess-user-search-form" role="search">
+    <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
+      <input type="text" id="sess-user-query" placeholder="按邮箱片段或 uid 搜索" autocomplete="off">
+    </label>
+    <button type="submit" class="btn">{{icon "search"}} 搜索</button>
+  </form>
 
-<div class="table-wrap">
-  <table>
-    <caption class="sr-only">全站活跃会话</caption>
-    <thead>
-      <tr><th>邮箱</th><th>uid</th><th>应用</th><th>设备</th><th>IP</th><th>最近活跃</th><th></th></tr>
-    </thead>
-    <tbody id="sess-body">
-      <tr><td colspan="7" class="empty">读取中…</td></tr>
-    </tbody>
-  </table>
+  <p class="err" id="sess-error" role="alert" hidden></p>
+
+  <div class="table-wrap">
+    <table>
+      <caption class="sr-only">有活跃会话的用户</caption>
+      <thead>
+        <tr><th>邮箱</th><th>uid</th><th>会话数</th><th>最近活跃</th><th></th></tr>
+      </thead>
+      <tbody id="sess-users-body">
+        <tr><td colspan="5" class="empty">读取中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="row" style="justify-content:flex-end;margin-top:10px">
+    <button type="button" class="btn small" id="sess-prev">上一页</button>
+    <span class="dim" id="sess-page">—</span>
+    <button type="button" class="btn small" id="sess-next">下一页</button>
+  </div>
 </div>
 
-<div class="row" style="justify-content:flex-end;margin-top:10px">
-  <button type="button" class="btn small" id="sess-prev">上一页</button>
-  <span class="dim" id="sess-page">—</span>
-  <button type="button" class="btn small" id="sess-next">下一页</button>
-</div>
+<!-- 层级二：单用户会话列表（页内滑入） -->
+<section class="card detail hidden" id="sess-detail" aria-labelledby="sd-title" aria-live="polite">
+  <div class="row between">
+    <h2 id="sd-title">用户会话</h2>
+    <button type="button" class="btn ghost" id="sd-close">返回用户列表</button>
+  </div>
+  <p class="hint" id="sd-meta"></p>
+  <div class="list" id="sd-body"></div>
+</section>
 {{end}}

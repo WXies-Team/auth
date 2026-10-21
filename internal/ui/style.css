@@ -240,7 +240,7 @@ p.hint { margin: 6px 0; }
 /* ---- 表单 ---- */
 .field { display: grid; gap: 6px; margin: 12px 0; }
 .field > span { font-size: 13px; color: var(--dim); }
-input[type=text], input[type=email], input[type=password], input[number], select {
+input[type=text], input[type=email], input[type=password], select {
   width: 100%; min-height: var(--tap); padding: 8px 14px;
   border: 1px solid var(--line); border-radius: var(--radius-ctl);
   background: var(--card); color: var(--ink); font: inherit;
@@ -309,13 +309,14 @@ input:disabled { opacity: .6; }
               border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
 /* 退场：淡出 + 轻微下沉（transform，不碰 height/margin —— 不做折叠高度动画防抖动）。
-   末行 .item.leaving:hover 特异性更高：悬停中被踢的行也照退场，不被抬升规则抢走。 */
-.item.leaving { opacity: 0; transform: translateY(-4px); }
+   选择器只认 .leaving 本身（.item 与 .session-row 共用），逐条退出的会话行也走它。
+   末行 .leaving:hover 特异性更高：悬停中被踢的行也照退场，不被抬升规则抢走。 */
+.leaving { opacity: 0; transform: translateY(-4px); }
 /* 悬停轻抬（仅 hover 设备；触屏没有 hover，不给它） */
 @media (hover: hover) {
   .item:hover { transform: translateY(-2px); box-shadow: var(--shadow-1); }
 }
-.item.leaving:hover { opacity: 0; transform: translateY(-4px); box-shadow: none; }
+.leaving:hover { opacity: 0; transform: translateY(-4px); box-shadow: none; }
 .item .grow { flex: 1 1 220px; min-width: 0; }
 .item .title { font-weight: 500; }
 .item .meta { color: var(--dim); font-size: 13px; }
@@ -388,6 +389,44 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 }
 .secret-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .secret-line code { font-family: var(--mono); word-break: break-all; }
+
+/* 「使用恢复码」次级切换链接：幽灵小按钮形态，不与主输入抢视觉 */
+.toggle-recovery { align-self: start; margin: -6px 0 10px; padding-left: 0; }
+
+/* ---- 会话页：设备分组卡（外层设备 + 内层会话行）---- */
+.device-group { flex-wrap: wrap; align-items: flex-start; padding-top: 16px; }
+.device-group > .btn { margin-left: auto; }
+.device-group .sub-list {
+  flex: 1 1 100%; display: grid; gap: 8px; margin-top: 10px;
+  padding-top: 10px; border-top: 1px dashed var(--line);
+}
+.session-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: var(--radius-ctl);
+  transition: background-color var(--dur-1) var(--ease), opacity var(--dur-2) var(--ease),
+              transform var(--dur-2) var(--ease);
+}
+.session-row:hover { background: var(--canvas); }
+.session-row.current { background: var(--primary-soft); }
+.session-row .grow { flex: 1 1 200px; min-width: 0; }
+.sess-tag { font-size: 13px; }
+
+/* ---- AI 用量：KPI 卡与 7 天 sparkline ---- */
+.kpi-row { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.card.kpi { display: grid; gap: 2px; align-content: start; padding: 16px 18px; }
+.card.kpi strong { font-size: 24px; font-weight: 500; line-height: 1.3; }
+.card.kpi .hint { font-size: 12px; }
+.spark { display: flex; align-items: flex-end; gap: 3px; height: 36px; margin-top: 6px; }
+.spark i {
+  flex: 1; min-width: 4px; border-radius: 3px 3px 0 0;
+  background: var(--primary); opacity: .85;
+  transition: height var(--dur-3) var(--ease);
+}
+.ai-user-row { cursor: pointer; }
+.ai-user-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* ---- 审计详情的键值排版 ---- */
+.detail-cell .kv { display: inline-block; margin-right: 10px; white-space: nowrap; }
 
 /* ---- 概览三行安全状态 ---- */
 .stat { display: flex; align-items: center; gap: 12px; }

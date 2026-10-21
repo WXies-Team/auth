@@ -34,14 +34,14 @@
     </div>
   </div>
 
-  <!-- 恢复码（只显示这一次） -->
+  <!-- 恢复码（只显示这一次）：等宽网格 + 下载/复制/已保存 -->
   <div id="codes-panel" class="detail hidden" aria-labelledby="codes-title">
     <h3 id="codes-title">恢复码</h3>
     <p class="hint">10 个一次性恢复码，验证器不在身边时靠它登录。<strong>关闭本页后无法再查看</strong>，请先保存。</p>
     <div class="codes" id="codes-list"></div>
     <div class="row" style="margin-top:10px">
-      <button type="button" class="btn" id="download-codes">{{icon "download"}} 下载为 txt</button>
-      <button type="button" class="btn" id="copy-codes">复制全部</button>
+      <button type="button" class="btn" id="download-codes">{{icon "download"}} 下载 txt</button>
+      <button type="button" class="btn" id="copy-codes">{{icon "copy"}} 复制全部</button>
       <button type="button" class="btn primary" id="saved-codes">我已保存</button>
     </div>
   </div>
@@ -51,21 +51,24 @@
 <section class="card" id="totp-on" hidden aria-labelledby="on-title">
   <h2 id="on-title">两步验证已开启</h2>
   <p class="hint" id="totp-since"></p>
+  <p class="hint" id="recovery-state">开启两步验证时已生成 10 个恢复码；剩余数量无法查询，需要时可重新生成。</p>
   <div class="row" style="margin-top:10px">
     <button type="button" class="btn" id="regen-codes">重生成恢复码</button>
     <button type="button" class="btn danger" id="disable-totp">{{icon "ban"}} 关闭两步验证</button>
   </div>
-  <p class="hint" style="margin-top:8px">关闭与重生成都需要输入当前验证码或一个恢复码；关闭同时会让其它设备退出登录。</p>
+  <p class="hint" style="margin-top:8px">重生成：旧的 10 个恢复码全部作废，需要输入当前两步验证码或一个恢复码。</p>
+  <p class="hint">关闭：作废验证器绑定与全部恢复码，关闭后登录只需密码，其它设备保持登录状态；同样需要输入当前两步验证码或一个恢复码。</p>
 </section>
 
-<!-- 通用：要一个码 -->
+<!-- 通用：要一个码（GitHub 式单输入，「使用恢复码」切换语义） -->
 <dialog class="dlg" id="code-dialog" aria-labelledby="code-title">
   <form method="dialog" id="code-form">
     <h2 id="code-title">验证身份</h2>
     <p class="dim" id="code-desc"></p>
-    <label class="field"><span>验证码（6 位）或恢复码</span>
-      <input type="text" id="code-input" autocomplete="one-time-code">
+    <label class="field"><span id="code-input-label">两步验证码（6 位）</span>
+      <input type="text" id="code-input" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入验证器上的 6 位验证码">
     </label>
+    <button type="button" class="btn ghost small toggle-recovery" id="code-toggle-recovery">使用恢复码</button>
     <p class="err" id="code-error" role="alert" hidden></p>
     <div class="row end">
       <button type="button" class="btn" id="code-cancel">取消</button>

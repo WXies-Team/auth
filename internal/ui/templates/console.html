@@ -1,13 +1,14 @@
 {{define "content"}}
 <div class="page-head">
   <h1>概览</h1>
-  <span class="badge" id="role-badge" hidden>管理员</span>
+  <!-- 徽标的 display:inline-flex 盖过 UA 的 [hidden]，显隐一律走 .hidden 类 -->
+  <span class="badge hidden" id="role-badge">管理员</span>
 </div>
 
 <section class="card" aria-labelledby="who-title">
   <h2 id="who-title">账号</h2>
   <p><span class="dim">邮箱</span> <strong id="me-email">读取中…</strong></p>
-  <p class="hint" id="me-meta">登录态为空闲 7 天 / 绝对 90 天过期，可在设备页随时踢出某台。</p>
+  <p class="hint" id="me-meta">可随时在「登录会话」页退出某台设备。</p>
   <div class="row" style="margin-top:12px">
     <a class="btn" href="/web/console/sessions">{{icon "monitor-smartphone"}} 管理已登录设备</a>
     <button type="button" class="btn danger" id="logout">{{icon "log-out"}} 退出登录</button>

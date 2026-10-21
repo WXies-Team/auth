@@ -1,24 +1,23 @@
 {{define "content"}}
 <div class="page-head">
   <h1>登录会话</h1>
-  <button type="button" class="btn danger" id="revoke-others">退出其它所有设备</button>
+  <button type="button" class="btn danger" id="revoke-others">退出其它所有会话</button>
 </div>
 
-<p class="hint-box">每台登录过的设备都会在这里留一条会话；<strong>同一台设备可能出现多条</strong>
-（网页与两个日记 App 各自登录各算一条）。被踢的设备会在下一次请求时退出登录。</p>
+<p class="hint-box">这里按<strong>设备</strong>分组展示：同一台设备上网页与各项目的登录各算一条会话，可整组退出也可单条退出。被退出的会话会在下一次请求时失效。</p>
 
-<p class="hint">看到不认识的设备？<a href="/web/console/account">退出它并修改密码</a>——改密码会把其它设备全部登出。</p>
+<p class="hint">看到不认识的设备？<a href="/web/console/account">去账号页修改密码</a>，改密码会把其它会话全部退出。</p>
 
 <div class="list" id="session-list" aria-live="polite">
   <div class="empty">读取中…</div>
 </div>
 
 <dialog class="dlg" id="kick-dialog" aria-labelledby="kick-title">
-  <h2 id="kick-title">踢出这台设备</h2>
+  <h2 id="kick-title">退出会话</h2>
   <p id="kick-desc" class="dim"></p>
   <form method="dialog" class="row end" style="margin-top:12px">
     <button type="button" class="btn" id="kick-cancel">取消</button>
-    <button type="button" class="btn danger" id="kick-ok">踢出设备</button>
+    <button type="button" class="btn danger" id="kick-ok">确认退出</button>
   </form>
 </dialog>
 {{end}}

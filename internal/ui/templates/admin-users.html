@@ -4,6 +4,8 @@
   <span class="dim" id="users-total"></span>
 </div>
 
+<p class="hint">授予任一项目的管理权即成为项目管理员（只能管理授权范围内的会话、用量与审计）；平台管理员管全部项目、用户目录与全局配置。只有平台管理员能调整角色与授权。</p>
+
 <form class="row" id="user-search-form" role="search">
   <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
     <input type="text" id="user-query" placeholder="按邮箱片段或 uid 搜索" autocomplete="off">
@@ -17,10 +19,10 @@
   <table>
     <caption class="sr-only">用户列表</caption>
     <thead>
-      <tr><th>邮箱</th><th>uid</th><th>角色</th><th>两步验证</th><th>Passkey</th><th>注册时间</th><th></th></tr>
+      <tr><th>邮箱</th><th>uid</th><th>角色</th><th>项目授权</th><th>两步验证</th><th>Passkey</th><th>注册时间</th><th></th></tr>
     </thead>
     <tbody id="users-body">
-      <tr><td colspan="7" class="empty">读取中…</td></tr>
+      <tr><td colspan="8" class="empty">读取中…</td></tr>
     </tbody>
   </table>
 </div>
@@ -31,7 +33,7 @@
   <button type="button" class="btn small" id="users-next">下一页</button>
 </div>
 
-<!-- 详情面板：会话、凭证、角色与踢人 -->
+<!-- 详情面板：凭证摘要 + 角色调整 + 应用授权开关 + 会话管理 -->
 <section class="card detail hidden" id="user-detail" aria-labelledby="ud-title" aria-live="polite">
   <div class="row between">
     <h2 id="ud-title">用户详情</h2>
@@ -39,4 +41,16 @@
   </div>
   <div id="ud-body"></div>
 </section>
+
+<dialog class="dlg" id="user-dialog" aria-labelledby="ud-dlg-title">
+  <form method="dialog" id="user-dlg-form">
+    <h2 id="ud-dlg-title">确认操作</h2>
+    <p class="dim" id="ud-dlg-desc"></p>
+    <p class="err" id="ud-dlg-error" role="alert" hidden></p>
+    <div class="row end">
+      <button type="button" class="btn" id="ud-dlg-cancel">取消</button>
+      <button type="submit" class="btn primary" id="ud-dlg-ok">确认</button>
+    </div>
+  </form>
+</dialog>
 {{end}}
