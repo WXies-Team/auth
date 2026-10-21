@@ -31,9 +31,17 @@ func TestSessionDeviceLabel(t *testing.T) {
 		{"calorie-diary/1.2.3 (Android; Pixel 8)", "Pixel 8"},
 		{"expense-diary/2.0.1 (iOS; iPhone 15 Pro)", "iPhone 15 Pro"},
 		{"calorie-diary/1.0 (Android)", "Android"},
-		// 裸库名 UA（无平台段 / 头部不是产品名版本）与脚本 UA：未知设备，不存原文
+		// 品牌+型号的含空格机型：括号段第 2 段整段是机型，按空格再切会把品牌切掉
+		{"calorie-diary/1.2.3 (Android; Xiaomi 23127PN0CC)", "Xiaomi 23127PN0CC"},
+		// 浏览器 UA 带含空格机型：Mozilla 挡板让 parseAppUA 不接手，走 classifyUA 出
+		//「系统 · 机型」而不是裸机型
+		{"Mozilla/5.0 (Linux; Android 14; Xiaomi 23127PN0CC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+			"Android · Xiaomi 23127PN0CC"},
+		// 裸库名 UA（无平台段 / 头部不是产品名版本）与脚本 UA：未知设备，不存原文；
+		// ktor-client/2.0 是存量行 device 列里的真实坏快照原文，钉住现算不吃它
 		{"curl/8.4.0", "未知设备"},
 		{"okhttp/4.12.0", "未知设备"},
+		{"ktor-client/2.0", "未知设备"},
 		{"Ktor client/2.0", "未知设备"},
 		{"", "未知设备"},
 	}
@@ -55,6 +63,70 @@ func TestSessionDeviceLabel(t *testing.T) {
 // sidStr 把 int64 的 sid 换成列表回执里的十进制字符串形态（本批起 SessionInfo.ID
 // 一律以字符串输出，避免 63 位雪花被浏览器 JSON.parse 抹圆）。
 func sidStr(id int64) string { return strconv.FormatInt(id, 10) }
+
+// 存量行自愈：老服务端时期认不出库名 UA，device 列快照存了 UA 原文
+//（ktor-client/2.0）。展示改为读取时按 user_agent 现算后，同一行在用户端
+// ListSessions 与管理端 AdminListSessions 都回现算结果；device 列本身不动
+//（零迁移，历史快照/排障照旧）。
+func TestSessionDeviceLabelHealsLegacyRows(t *testing.T) {
+	svc, _ := newTestService(t)
+	const legacyUA = "ktor-client/2.0"
+	const appUA = "calorie-diary/1.2.3 (Android; Xiaomi 23127PN0CC)"
+	const uid = int64(8801234)
+	now := time.Now().UnixMilli()
+	if _, err := svc.pool.Exec(
+		"INSERT INTO users (id, email, created_at, token_version) VALUES (?,?,?,1)", uid, "sess-heal@example.com", now); err != nil {
+		t.Fatalf("落用户: %v", err)
+	}
+	// 两行的 device 列都是「坏快照」（存 UA 原文），user_agent 才是现算的输入
+	rows := []struct {
+		id int64
+		ua string
+	}{
+		{now + 1, legacyUA},
+		{now + 2, appUA},
+	}
+	for _, r := range rows {
+		if _, err := svc.pool.Exec(
+			"INSERT INTO sessions (id, user_id, app, device, ip, user_agent, created_at, last_seen_at)"+
+				" VALUES (?,?,?,?,?,?,?,?)",
+			r.id, uid, "calorie-diary", legacyUA, "127.0.0.1", r.ua, now, now); err != nil {
+			t.Fatalf("落会话: %v", err)
+		}
+	}
+	want := map[string]string{
+		sidStr(now + 1): "未知设备",              // 库名 UA 现算不出设备
+		sidStr(now + 2): "Xiaomi 23127PN0CC", // 品牌 + 含空格型号整段为机型
+	}
+	items, err := svc.ListSessions(uid, 0, nil)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("取设备列表: %v（%d 行）", err, len(items))
+	}
+	for _, it := range items {
+		if it.Device != want[it.ID] {
+			t.Errorf("用户端会话 %s 的展示设备应为 %q（按 user_agent 现算），得到 %q",
+				it.ID, want[it.ID], it.Device)
+		}
+	}
+	admin, _, _, err := svc.AdminListSessions(uid, nil, "", 10, 0)
+	if err != nil || len(admin) != 2 {
+		t.Fatalf("管理端取会话: %v（%d 行）", err, len(admin))
+	}
+	for _, it := range admin {
+		if it.Device != want[it.ID] {
+			t.Errorf("管理端会话 %s 的展示设备应为 %q（与用户端同源现算），得到 %q",
+				it.ID, want[it.ID], it.Device)
+		}
+	}
+	// 读不写：device 列的坏快照原样保留（历史快照/排障，零迁移）
+	var stored string
+	if err := svc.pool.QueryRow("SELECT device FROM sessions WHERE id = ?", now+1).Scan(&stored); err != nil {
+		t.Fatalf("读 device 快照列: %v", err)
+	}
+	if stored != legacyUA {
+		t.Errorf("device 快照列不该被展示逻辑改写，得到 %q", stored)
+	}
+}
 
 // 会话生命周期：登录建行 → 列表含 current 与解析出的设备标签 → 踢目标（被踢 401、
 // 其它仍 200）→ revoke-others 只剩 current → 踢自己幂等 → logout 两层一起吊销。

@@ -564,7 +564,8 @@ func (s *Service) resolveRootSuper() {
 
 // AdminListSessions 列活跃会话；uid > 0 时只看该用户；apps 非空时只回这些
 // app 的行（app-admin 的数据边界——sessions.app 列天然承载归属，过滤成本一次
-// 条件而已），空 = 不限（super 的全量视图）。
+// 条件而已），空 = 不限（super 的全量视图）。展示的 device 与 ListSessions 同源：
+// 读取时按 user_agent 现算（shortDevice），device 列快照不参与展示。
 //
 // query 是搜索框的**服务端**口径（A4#3）：纯数字按 uid 精确匹配，其余按邮箱片段
 // LIKE，与 AdminSearchUsers 同一套分流——在前端拿到的本页数据上本地过滤会漏掉
@@ -611,7 +612,7 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query string, limi
 	}
 	listArgs := append(append([]any{}, args...), limit, offset)
 	rows, err := s.pool.QueryContext(context.Background(),
-		"SELECT s.id, s.user_id, u.email, s.app, s.device, s.ip, s.created_at, s.last_seen_at,"+
+		"SELECT s.id, s.user_id, u.email, s.app, s.user_agent, s.ip, s.created_at, s.last_seen_at,"+
 			" COALESCE(p.nickname, ''), COALESCE(p.avatar_color, 0)"+
 			from+" ORDER BY s.last_seen_at DESC, s.id DESC LIMIT ? OFFSET ?", listArgs...)
 	if err != nil {
@@ -622,11 +623,13 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query string, limi
 	for rows.Next() {
 		var it AdminSession
 		var id int64
-		if err := rows.Scan(&id, &it.UID, &it.Email, &it.App, &it.Device, &it.IP,
+		var ua string
+		if err := rows.Scan(&id, &it.UID, &it.Email, &it.App, &ua, &it.IP,
 			&it.CreatedAt, &it.LastSeenAt, &it.Nickname, &it.AvatarColor); err != nil {
 			return nil, 0, 0, fmt.Errorf("读会话行: %w", err)
 		}
 		it.ID = strconv.FormatInt(id, 10)
+		it.Device = shortDevice(ua)
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {

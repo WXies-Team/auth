@@ -176,6 +176,8 @@ type EnsureUserResult struct {
 // 的 id 再来踢人只会 404「该会话不存在」。字符串 id 原样回传即可（路径与请求体里
 // 的会话 id 同样一律按字符串传）。
 // Current 标出发起本次请求的那台——踢谁都行，踢掉自己等于本地登出。
+// Device 是服务端 shortDevice(user_agent) 的**读取时现算**结果（与库中 device
+// 快照列解耦，那列只留历史/排障）；字段名与形态不变。
 type SessionInfo struct {
 	ID         string `json:"id"`
 	App        string `json:"app"`

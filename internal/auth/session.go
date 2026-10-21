@@ -97,6 +97,10 @@ func (s *Service) sessionAlive(userID, sid int64) (bool, error) {
 // current 标出发起本请求的那台——客户端据此判断哪些能踢、哪台是自己。
 // apps 非空 = 只回这些 app 的行；空 = 不限（见文件顶部的会话作用域注释）。
 //
+// 展示的 device 是**读取时按 user_agent 现算**（shortDevice），不读 device 列：
+// 那列是插入时快照，老服务端时期认不出的库名 UA（ktor-client/2.0）被当设备名
+// 存了进去，现算让存量行随解析规则升级自愈，零迁移；列本身保留作历史快照/排障。
+//
 // ID 以**十进制字符串**回出（见 protocol.SessionInfo 的注释：63 位雪花过不了
 // 浏览器 JSON.parse 的 53 位精度）。
 func (s *Service) ListSessions(userID, currentSID int64, apps []string) ([]protocol.SessionInfo, error) {
@@ -109,7 +113,7 @@ func (s *Service) ListSessions(userID, currentSID int64, apps []string) ([]proto
 		}
 	}
 	rows, err := s.pool.QueryContext(context.Background(),
-		"SELECT id, app, device, ip, created_at, last_seen_at FROM sessions"+cond+
+		"SELECT id, app, user_agent, ip, created_at, last_seen_at FROM sessions"+cond+
 			" ORDER BY last_seen_at DESC, id DESC", args...)
 	if err != nil {
 		return nil, fmt.Errorf("查登录会话: %w", err)
@@ -121,11 +125,13 @@ func (s *Service) ListSessions(userID, currentSID int64, apps []string) ([]proto
 		var (
 			it protocol.SessionInfo
 			id int64
+			ua string
 		)
-		if err := rows.Scan(&id, &it.App, &it.Device, &it.IP, &it.CreatedAt, &it.LastSeenAt); err != nil {
+		if err := rows.Scan(&id, &it.App, &ua, &it.IP, &it.CreatedAt, &it.LastSeenAt); err != nil {
 			return nil, fmt.Errorf("读登录会话: %w", err)
 		}
 		it.ID = strconv.FormatInt(id, 10)
+		it.Device = shortDevice(ua)
 		it.Current = id == currentSID
 		out = append(out, it)
 	}
@@ -258,6 +264,10 @@ func revokeUserSessions(ctx context.Context, ex execer, userID, keepSID int64, a
 // 第 ③ 条是本批收紧的：早先认不出就存 UA 原文，于是 Ktor/OkHttp 这类**库名 UA**
 // 被当成设备名显示（「ktor-client/2.0」根本不是一台设备）。原文不丢——完整 UA
 // 仍按 512 字截断落在 user_agent 列，排障时照查。
+//
+// 调用口径：**展示时现算**——ListSessions / AdminListSessions 读取时按 user_agent
+// 调它（存量行随规则升级自愈，device 列快照不参与展示）；插入时（createSessionOn /
+// websession）也调同一个函数落快照，新行两处天然一致。
 func shortDevice(ua string) string {
 	if strings.TrimSpace(ua) == "" {
 		return "未知设备"
@@ -286,7 +296,8 @@ func shortDevice(ua string) string {
 }
 
 // parseAppUA 识别 App 上报的规范 User-Agent：`产品名/版本 (系统; 机型)`。
-// 返回 ok 及平台段的系统与机型两段（任一可缺省）。
+// 返回 ok 及平台段的系统与机型两段（任一可缺省）。机型段按分号拆，**段内空格
+// 保留**——`Xiaomi 23127PN0CC` 整段就是机型，按空格再切会把品牌切掉。
 //
 // 认定条件（缺一即不是 App UA）：头部必须是 `字母数字连字符/数点版本`，必须带
 // 平台段，且 UA 里不能出现 Mozilla——浏览器 UA 的头部同样是 `名字/版本`

@@ -67,8 +67,9 @@ CREATE TABLE IF NOT EXISTS app_config (
 -- 登录会话：三条登录路（注册即登录 / 密码登录 / 验证码登录）与改密换发各建一行，
 -- token 的 sid claim 指向它——「已登录设备」列表与踢人就作用在这张表上。
 --
--- id 是雪花（s.ids 签发，不自增；与 users.id 的 7 位随机号段无关）；device 是从 UA 尽力解析出的短标签
---（解析不出存 UA 原文截断），user_agent 留原文以便下次解析规则变好后回填口径。
+-- id 是雪花（s.ids 签发，不自增；与 users.id 的 7 位随机号段无关）；device 是**插入时** shortDevice(UA) 的
+-- 展示快照（认不出即「未知设备」，仅供排障兜底）——展示一律读取时用 user_agent 现算（legacy 行存过
+-- 库名 UA 原文），user_agent 才是设备名的唯一真相源，解析规则变好存量行自动受益。
 -- revoked_at 非空 = 已登出/被踢：列表只回 IS NULL 的行；踢人不改 token_version，
 -- 所以被踢设备的 token 靠 /internal/verify 的会话校验当场失效。
 -- last_seen_at 由 verify 节流回写（旧于 60 秒才写），按它倒序排设备列表。
