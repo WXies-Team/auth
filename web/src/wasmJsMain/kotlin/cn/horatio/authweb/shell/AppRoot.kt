@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -15,9 +16,29 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.unit.dp
 import cn.horatio.authweb.component.liquid.IosLiquidGlassNavigationBar
 import cn.horatio.authweb.nav.HistoryBridge
+import cn.horatio.authweb.nav.LocalNav
 import cn.horatio.authweb.nav.NavController
 import cn.horatio.authweb.nav.Navigator
 import cn.horatio.authweb.nav.Route
+import cn.horatio.authweb.screens.AccountScreen
+import cn.horatio.authweb.screens.AuthorizeScreen
+import cn.horatio.authweb.screens.DeleteCancelScreen
+import cn.horatio.authweb.screens.InviteScreen
+import cn.horatio.authweb.screens.LoginScreen
+import cn.horatio.authweb.screens.ConsoleScreen
+import cn.horatio.authweb.screens.PasskeysScreen
+import cn.horatio.authweb.screens.SessionsScreen
+import cn.horatio.authweb.screens.TwoFactorScreen
+import cn.horatio.authweb.screens.admin.AdminAccessScreen
+import cn.horatio.authweb.screens.admin.AdminAiScreen
+import cn.horatio.authweb.screens.admin.AdminAuditScreen
+import cn.horatio.authweb.screens.admin.AdminConfigScreen
+import cn.horatio.authweb.screens.admin.AdminSessionsScreen
+import cn.horatio.authweb.screens.admin.AdminUserDetailScreen
+import cn.horatio.authweb.screens.admin.AdminUserSessionsScreen
+import cn.horatio.authweb.screens.admin.AdminUsersScreen
+import cn.horatio.authweb.shell.ReauthDialog
+import top.yukonga.miuix.kmp.basic.SnackbarHost
 import top.yukonga.miuix.kmp.basic.NavigationRail
 import top.yukonga.miuix.kmp.basic.NavigationRailItem
 import top.yukonga.miuix.kmp.basic.NavigationRailValue
@@ -59,6 +80,7 @@ fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
     val expandRail = shouldExpandNavigationRail()
     val navCornerRadius = rememberNavSystemCornerRadius()
 
+    CompositionLocalProvider(LocalNav provides nav) {
     Row(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
         if (wide) {
             val railState = rememberNavigationRailState(
@@ -99,24 +121,28 @@ fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
                     backdropColor = MiuixTheme.colorScheme.surface,
                 ),
             ) {
-                entry<Route.Login> { PlaceholderScreen("登录") }
-                entry<Route.Authorize> { PlaceholderScreen("授权登录") }
-                entry<Route.Invite> { PlaceholderScreen("接受邀请") }
-                entry<Route.DeleteCancel> { PlaceholderScreen("撤销注销") }
-                entry<Route.Console> { PlaceholderScreen("概览") }
-                entry<Route.Sessions> { PlaceholderScreen("登录会话") }
-                entry<Route.Passkeys> { PlaceholderScreen("Passkey") }
-                entry<Route.TwoFactor> { PlaceholderScreen("两步验证") }
-                entry<Route.Account> { PlaceholderScreen("账号") }
-                entry<Route.AdminUsers> { PlaceholderScreen("用户") }
-                entry<Route.AdminUserDetail> { PlaceholderScreen("用户详情") }
-                entry<Route.AdminAccess> { PlaceholderScreen("项目访问") }
-                entry<Route.AdminSessions> { PlaceholderScreen("会话总览") }
-                entry<Route.AdminUserSessions> { PlaceholderScreen("会话明细") }
-                entry<Route.AdminAudit> { PlaceholderScreen("审计日志") }
-                entry<Route.AdminConfig> { PlaceholderScreen("配置中心") }
-                entry<Route.AdminAi> { PlaceholderScreen("AI 用量") }
+                entry<Route.Login> { LoginScreen() }
+                entry<Route.Authorize> { route -> AuthorizeScreen(route.q) }
+                entry<Route.Invite> { route -> InviteScreen(route.token) }
+                entry<Route.DeleteCancel> { route -> DeleteCancelScreen(route.token) }
+                entry<Route.Console> { ConsoleScreen() }
+                entry<Route.Sessions> { SessionsScreen() }
+                entry<Route.Passkeys> { PasskeysScreen() }
+                entry<Route.TwoFactor> { TwoFactorScreen() }
+                entry<Route.Account> { AccountScreen() }
+                entry<Route.AdminUsers> { AdminUsersScreen() }
+                entry<Route.AdminUserDetail> { route -> AdminUserDetailScreen(route.uid) }
+                entry<Route.AdminAccess> { AdminAccessScreen() }
+                entry<Route.AdminSessions> { AdminSessionsScreen() }
+                entry<Route.AdminUserSessions> { route -> AdminUserSessionsScreen(route.uid) }
+                entry<Route.AdminAudit> { AdminAuditScreen() }
+                entry<Route.AdminConfig> { AdminConfigScreen() }
+                entry<Route.AdminAi> { AdminAiScreen() }
             }
+            Box(Modifier.align(Alignment.TopCenter)) {
+                SnackbarHost(LocalSnackbarHostState.current)
+            }
+            ReauthDialog()
             if (!wide && tabs.isNotEmpty()) {
                 Box(Modifier.align(Alignment.BottomCenter)) {
                     IosLiquidGlassNavigationBar(
@@ -130,4 +156,5 @@ fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
             }
         }
     }
+}
 }

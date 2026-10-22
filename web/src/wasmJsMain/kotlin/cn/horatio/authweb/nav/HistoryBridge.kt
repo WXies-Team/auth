@@ -20,10 +20,10 @@ object HistoryBridge {
         is Route.Invite -> "/web/invite" + route.token.querySuffix("token")
         is Route.DeleteCancel -> "/web/delete-cancel" + route.token.querySuffix("token")
         Route.Console -> "/web/console"
-        Route.Sessions -> "/web/sessions"
-        Route.Passkeys -> "/web/passkeys"
-        Route.TwoFactor -> "/web/security"
-        Route.Account -> "/web/account"
+        Route.Sessions -> "/web/console/sessions"
+        Route.Passkeys -> "/web/console/passkeys"
+        Route.TwoFactor -> "/web/console/security"
+        Route.Account -> "/web/console/account"
         Route.AdminUsers -> "/web/admin"
         is Route.AdminUserDetail -> "/web/admin/users/${route.uid}"
         Route.AdminAccess -> "/web/admin/access"
@@ -43,10 +43,10 @@ object HistoryBridge {
             pathname == "/web/invite" -> Route.Invite(query["token"] ?: "")
             pathname == "/web/delete-cancel" -> Route.DeleteCancel(query["token"] ?: "")
             pathname == "/web/console" -> Route.Console
-            pathname == "/web/sessions" -> Route.Sessions
-            pathname == "/web/passkeys" -> Route.Passkeys
-            pathname == "/web/security" -> Route.TwoFactor
-            pathname == "/web/account" -> Route.Account
+            pathname == "/web/console/sessions" -> Route.Sessions
+            pathname == "/web/console/passkeys" -> Route.Passkeys
+            pathname == "/web/console/security" -> Route.TwoFactor
+            pathname == "/web/console/account" -> Route.Account
             pathname == "/web/admin" -> Route.AdminUsers
             pathname.startsWith("/web/admin/users/") ->
                 pathname.substringAfterLast("/").toLongOrNull()?.let { Route.AdminUserDetail(it) }

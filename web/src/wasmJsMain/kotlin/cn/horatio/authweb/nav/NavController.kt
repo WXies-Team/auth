@@ -1,6 +1,10 @@
 package cn.horatio.authweb.nav
 
+import androidx.compose.runtime.compositionLocalOf
 import kotlinx.browser.window
+
+/** 页面跳转统一走 LocalNav.current（History 桥自动同步浏览器历史）。 */
+val LocalNav = compositionLocalOf<NavController> { error("AppRoot 未提供 LocalNav") }
 
 /**
  * 面向页面的导航门面：所有程序化跳转都走这里，保证浏览器历史与导航栈同步。
