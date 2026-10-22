@@ -12,21 +12,26 @@
 // **发信身份**：`/users/{upn}` 必须填主邮箱 UPN——别名填进去会得到
 // `ErrorInvalidUser`（实测）。
 //
-// **发件人显示名随信取品牌**：payload 带 `message.from`，地址恒为 sender、Name 是
-// 这封信的品牌名（热量日记 / 开支日记 / Auth），与正文品牌同源。
+// **发件人显示名随信取品牌**：From 落在信封头里（见 buildMIME），地址恒为 sender、
+// 显示名是这封信的品牌名（热量日记 / 开支日记 / Auth），与正文品牌同源。
 // 历史实测（2026-10-08，热量日记服务）Exchange 会把显示名覆盖成邮箱对象的
 // DisplayName：若收件箱仍显示旧名，兜底办法是改邮箱 DisplayName（M365 管理中心 /
 // `Set-Mailbox -DisplayName`），改完即生效。
 //
-// **正文是 multipart/alternative**：text/plain 纯文本降级 + text/html 双部件
-//（见 alternativeBody）。品牌 logo 走 https 托管图（auth.horatio.cn/brand/…），
-// 不再内嵌 CID——早先的 multipart/related + 内嵌 PNG 形态已随之移除。
+// **正文以 raw MIME 实体提交（完整 RFC 5322 信件）**：信封头 + multipart/
+// alternative 双部件（text/plain 降级 + text/html，见 buildMIME），整体 base64 后
+// 走 Graph 的 MIME 提交路径（sendMail + Content-Type: text/plain，官方文档
+// user-sendmail Example 4「Send a new message using MIME format」形态）。
+// **不走 JSON 的 message.body.content**：Graph 不解析塞在 JSON 字符串里的 MIME，
+// 会把 multipart 原文当正文投出去——收件人看到 boundary 串、样式全无
+//（2026-10-22 用户实收证据，本形态即为该次乱码的修复）。
+// 品牌 logo 走 https 托管图（auth.horatio.cn/brand/…），不内嵌 CID。
 package mail
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -34,44 +39,103 @@ import (
 	"net/http"
 	"net/textproto"
 	"regexp"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
 
-// alternativeBody 把 HTML 与它的纯文本降级拼成一个 multipart/alternative MIME 实体：
-// 首部是 Content-Type（含 boundary），随后 text/plain 在前、text/html 在后——
-// 邮件客户端按自己的能力取最后一个能渲染的部件，这是「同一封信两种呈现」的标准形态。
-// text/plain 由 auth 侧的模板逐封提供（HTML 的忠实降级），本包不从 HTML 反推。
-func alternativeBody(html, text string) (string, error) {
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
+// rfc2047B 按 RFC 2047 的 B 编码（base64）给头值里的非 ASCII 段加编码：Graph 对
+// raw MIME 的 Subject/From 不会代编码，裸 UTF-8 头在部分收件链路上被按 Latin-1
+// 误读（乱码的另一隐患）。纯 ASCII 原样返回——ASCII 头值不该编码。
+func rfc2047B(s string) string {
+	if s == "" || isASCII(s) {
+		return s
+	}
+	data := base64.StdEncoding.EncodeToString([]byte(s))
+	// RFC 2047 限定单个 encoded-word 的字符数据 ≤76 字符：超长按 76 切段，段间用
+	// 折行空白（CRLF + SP，RFC 5322 头折叠）连接。本站主题/品牌名都是短串，切段
+	// 实际不触发，但头编码函数不该赌输入长度。
+	var b strings.Builder
+	for len(data) > 76 {
+		b.WriteString("=?UTF-8?B?" + data[:76] + "?=\r\n ")
+		data = data[76:]
+	}
+	b.WriteString("=?UTF-8?B?" + data + "?=")
+	return b.String()
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// base64CTE 把正文编成 RFC 2045 的 base64 传输编码（部件头 CTE: base64）：
+// 76 字符折行、行尾 CRLF。用 base64 而不是 8bit 裸 UTF-8：裸 8bit 在转发链路上
+// 会被某一段重新判定编码（正是本包 2026-10-22 乱码报告的第二隐患）。
+func base64CTE(s string) string {
+	data := base64.StdEncoding.EncodeToString([]byte(s))
+	var b strings.Builder
+	for len(data) > 76 {
+		b.WriteString(data[:76])
+		b.WriteString("\r\n")
+		data = data[76:]
+	}
+	b.WriteString(data)
+	b.WriteString("\r\n")
+	return b.String()
+}
+
+// buildMIME 拼出投给 Graph 的完整 RFC 5322 信件：信封头（Date/From/To/Subject/
+// MIME-Version/Content-Type）+ multipart/alternative 正文（text/plain 在前、
+// text/html 在后，两部件均 base64 传输编码），所有行尾 CRLF。
+//
+// **为什么必须补信封头**：旧实现只拼裸 multipart 实体塞进 JSON，Graph 不解析；改走
+// raw MIME 提交后（见 Send），收件人与主题只能从信封头来——缺 To/Subject 的 MIME
+// 要么被 Exchange 拒、要么丢收件人。Subject/From 含中文时按 RFC 2047 B 编码，
+// Graph 不会代编码。
+func buildMIME(fromName, to, subject, html, text string, now time.Time) (string, error) {
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
 	plain, err := w.CreatePart(textproto.MIMEHeader{
 		"Content-Type":              {"text/plain; charset=utf-8"},
-		"Content-Transfer-Encoding": {"8bit"},
+		"Content-Transfer-Encoding": {"base64"},
 	})
 	if err != nil {
 		return "", fmt.Errorf("拼纯文本部件: %w", err)
 	}
-	if _, err := io.WriteString(plain, text); err != nil {
+	if _, err := io.WriteString(plain, base64CTE(text)); err != nil {
 		return "", fmt.Errorf("写纯文本部件: %w", err)
 	}
 	part, err := w.CreatePart(textproto.MIMEHeader{
 		"Content-Type":              {"text/html; charset=utf-8"},
-		"Content-Transfer-Encoding": {"8bit"},
+		"Content-Transfer-Encoding": {"base64"},
 	})
 	if err != nil {
 		return "", fmt.Errorf("拼 HTML 部件: %w", err)
 	}
-	if _, err := io.WriteString(part, html); err != nil {
+	if _, err := io.WriteString(part, base64CTE(html)); err != nil {
 		return "", fmt.Errorf("写 HTML 部件: %w", err)
 	}
 	if err := w.Close(); err != nil {
 		return "", fmt.Errorf("收尾 multipart: %w", err)
 	}
-	return "Content-Type: multipart/alternative; boundary=\"" + w.Boundary() +
-		"\"\r\n\r\n" + buf.String(), nil
+
+	var msg bytes.Buffer
+	// Date 走 RFC 5322 date-time（time.RFC1123Z 同型）：Exchange 校验信封头形态。
+	fmt.Fprintf(&msg, "Date: %s\r\n", now.Format(time.RFC1123Z))
+	fmt.Fprintf(&msg, "From: %s <%s>\r\n", rfc2047B(fromName), sender)
+	fmt.Fprintf(&msg, "To: %s\r\n", to)
+	fmt.Fprintf(&msg, "Subject: %s\r\n", rfc2047B(subject))
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&msg, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", w.Boundary())
+	msg.Write(body.Bytes())
+	return msg.String(), nil
 }
 
 const (
@@ -131,43 +195,17 @@ func New(cfg ConfigFunc) *Sender {
 	}
 }
 
-// emailAddress 是 Graph recipient 的内层对象。**Graph 的 recipient 一律是
-// {"emailAddress": {...}} 包一层**——message.from 也是 recipient 型：写成平铺的
-// {"address","name"} 会被 sendMail 拒成 400 RequestBodyRead（2026-10-19 线上实测，
-// 当天全部验证码信 503）。Name 只给 from 用，omitempty 让收件人 payload 保持原样。
-type emailAddress struct {
-	Address string `json:"address"`
-	Name    string `json:"name,omitempty"`
-}
-
-// recipient 既作收件人也作 message.from——复用同型，包层结构就不会只改对一头。
-type recipient struct {
-	EmailAddress emailAddress `json:"emailAddress"`
-}
-
-type message struct {
-	From         recipient   `json:"from"`
-	Subject      string      `json:"subject"`
-	Body         body        `json:"body"`
-	ToRecipients []recipient `json:"toRecipients"`
-}
-
-type body struct {
-	ContentType string `json:"contentType"`
-	Content     string `json:"content"`
-}
-
-type sendMailRequest struct {
-	Message         message `json:"message"`
-	SaveToSentItems bool    `json:"saveToSentItems"`
-}
-
-// Send 发一封邮件（正文为 multipart/alternative：text/plain 降级 + text/html）。
-// fromName 是这封信的发件人显示名（品牌名），落到
-// message.from.emailAddress.name；text 是 HTML 的忠实纯文本降级（auth 模板逐封提供）。
+// Send 发一封邮件：正文为完整 RFC 5322 信件（信封头 + multipart/alternative 双部件，
+// 见 buildMIME），整体 base64 后走 Graph 的 raw MIME 提交路径（sendMail +
+// Content-Type: text/plain）。fromName 是发件人显示名（品牌名），落进信封 From 头
+//（非 ASCII 按 RFC 2047 编码）；text 是 HTML 的忠实纯文本降级（auth 模板逐封提供）。
 // 成功 = Graph 回 202（已接受；投递仍受 Exchange 限流约束，
 // 微软官方口径：sendMail 成功返回 202 Accepted、响应体为空）。
 // 失败返回带状态码与响应体片段的错误——只进服务端日志，客户端只看到白话。
+//
+// **已发送项**：MIME 提交没有 saveToSentItems 开关（那是 JSON 形态的字段），按
+// sendMail 文档口径信件会存进发信邮箱的已发送项——与旧 JSON 路径显式 false 不同，
+// 属 MIME 提交的固有形态，验证码频次下可接受。
 //
 // **不自动重试**：429/5xx 的重试语义按微软节流指引要先等 Retry-After 再发，
 // 而发码本身有 60 秒冷却与每 IP 5 次/分的闸，重试省不下用户等待、还多一份
@@ -179,8 +217,8 @@ func (s *Sender) Send(ctx context.Context, fromName, to, subject, html, text str
 	if tenantID == "" || clientID == "" || secret == "" {
 		return errNoCredential
 	}
-	// 正文先拼（纯文本 + HTML 双部件）
-	content, err := alternativeBody(html, text)
+	// 信件先拼：完整信封头 + multipart/alternative（纯文本 + HTML 双部件）
+	mimeMsg, err := buildMIME(fromName, to, subject, html, text, time.Now())
 	if err != nil {
 		return err
 	}
@@ -213,22 +251,16 @@ func (s *Sender) Send(ctx context.Context, fromName, to, subject, html, text str
 	if err != nil {
 		return fmt.Errorf("取 Graph 访问令牌: %w", err)
 	}
-	m := message{
-		From:         recipient{EmailAddress: emailAddress{Address: sender, Name: fromName}},
-		Subject:      subject,
-		Body:         body{ContentType: "HTML", Content: content},
-		ToRecipients: []recipient{{EmailAddress: emailAddress{Address: to}}},
-	}
-	payload, err := json.Marshal(sendMailRequest{Message: m})
-	if err != nil {
-		return fmt.Errorf("编码 sendMail 请求: %w", err)
-	}
+	// Graph 的 raw MIME 提交路径：请求体 = base64(完整 MIME 信件)，Content-Type:
+	// text/plain（官方形态，user-sendmail 文档 Example 4「Send a new message using
+	// MIME format」）。JSON 形态的 message.body.content 不解析 MIME——那正是乱码根因。
+	payload := []byte(base64.StdEncoding.EncodeToString([]byte(mimeMsg)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sendURL, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("构造请求: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "text/plain")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
