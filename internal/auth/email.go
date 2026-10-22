@@ -29,6 +29,15 @@ import (
 //
 // 文案四段式：首句发生了什么 → 细节列表（时间/设备等，有则列）→「不是我」/
 // 行动入口 → 页脚（落款品牌名 + 此邮件不可回复）。第二人称短句、不堆感叹号。
+//
+// 文案基调（业界对标定案）：
+//   - 事件主句是名词化的过去时陈述、零感叹号、零营销语、明确主语——
+//     「你的密码已被重置」而不是「密码重置成功！」；
+//   - 安全/确认类信在主句下给降噪先手句（「如果是你本人，无需任何行动。」），
+//     或直接陈述事实让用户一眼对号入座；
+//   - 所有安全信在**页脚前**带一句固定的反钓鱼声明（antiPhish）；
+//   - 验证码信的「前往账号台」按钮降级为正文内联文字链接（业界 OTP 信多为零 CTA /
+//     文本链接，按钮只留给真正要点击的动作），text/plain 部件仍给完整 URL。
 
 // siteBase 是托管资产与控制台链接的域名常量。邮件里的 https 链接全部由它拼出
 // ——模板不接用户输入的 URL。
@@ -200,6 +209,16 @@ func footText(b brand) string {
 	return b.footer + "\n此邮件不可回复\n© 2026·屑涵"
 }
 
+// antiPhish 是所有安全信页脚前的固定反钓鱼声明：明示本服务不会索要密码、验证码
+// 与转账（Microsoft/Google/ReportCyber 口径）。中性一句话，不随品牌、场景变。
+const antiPhish = "我们不会向你索要密码、验证码或转账。"
+
+// antiPhishHTML 把声明排成安全信的最后一个正文段（页脚分隔线之前）：13px 次文，
+// 平静陈述句——它不是红色警示，是「本服务行为边界」的自证。
+func antiPhishHTML() string {
+	return `            <p style="` + emailFont + `margin:16px 0 0;font-size:13px;line-height:1.6;color:` + mailSub + `;">` + antiPhish + `</p>`
+}
+
 // mailLog 发信失败要留排障线索：客户端只看到白话，根因（Graph 状态码/响应体）只在
 // 服务端日志。邮箱过 maskEmail 脱敏——日志会进排障链路与备份，全文邮箱是 PII。
 func mailLog(err error, purpose, email string) {
@@ -209,14 +228,21 @@ func mailLog(err error, purpose, email string) {
 // safeTime 是通知信里时间戳的统一形态（本地时区，分钟精度够用户对时）。
 func safeTime(t time.Time) string { return t.Format("2006-01-02 15:04") }
 
-// codeEmail 拼验证码信（注册 / 找回密码 / 修改密码 / 登录 / 登录两步验证 / 修改邮箱
-// 六类共用）：眉题 → 标题与一句话说明 → 验证码卡 + 有效期 → 单 CTA → 提示卡 →
-// 红警示句。
+// codeEmail 拼验证码信（注册 / 找回密码 / 修改密码 / 登录 / 登录两步验证 / 注销账号 /
+// 修改邮箱 七类共用）：眉题 → 标题与一句话说明 → 验证码卡 + 有效期 → 账号台内联
+// 文字链接 → 提示卡 → 红警示句 → 反钓鱼声明。
 //
-// action 只会是上述六个字面量之一（由 purpose 分流，不来自用户输入），code 只含
+// 「前往账号台」**不是主按钮**（业界约 1/3 的 OTP 信零 CTA、主流用文本链接）：
+// 按钮只留给真正要点击的动作，账号台入口降级为正文内联文字链接；text/plain 部件
+// 仍给完整 URL（纯文本客户端与图片屏蔽场景的出路）。
+//
+// action 只会是上述七个字面量之一（由 purpose 分流，不来自用户输入），code 只含
 // 数字——两处都没有 HTML 注入面。
 func codeEmail(b brand, action, code string) (subject, htmlBody, text string) {
 	subject = b.prefix + action + "验证码"
+	// 勿分享警示按 Latitude/ReportCyber 口径强化：把「平台工作人员」点名排除在
+	// 可信索码方之外，并给出「有人索要 → 举报」的下一步；品牌句仍走 b.join。
+	warn := b.join("不会向你索要验证码") + "。包括平台工作人员在内，任何人都不会向你索要此码——若有人索要，请立即举报。"
 	inner := brandEyebrow(b, "邮箱验证") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">` + action + `验证码</h1>
             <p style="` + emailFont + `margin:0 0 24px;font-size:16px;line-height:1.6;color:` + mailInk + `;">在应用里输入下面的验证码，继续` + action + `。</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailCodeBox + `" style="width:100%;background-color:` + mailCodeBox + `;border-radius:20px;">
@@ -227,12 +253,14 @@ func codeEmail(b brand, action, code string) (subject, htmlBody, text string) {
                 </td>
               </tr>
             </table>
-` + ctaButton(b, "前往账号台", accountURL) + `            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailTipBox + `" style="width:100%;background-color:` + mailTipBox + `;border-radius:16px;margin:24px 0 0;">
+            <p style="` + emailFont + `margin:20px 0 0;font-size:16px;line-height:1.6;color:` + mailSub + `;">也可以<a href="` + accountURL + `" style="color:` + b.primaryHex + `;text-decoration:underline;">前往账号台</a>，管理账号与安全设置。</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailTipBox + `" style="width:100%;background-color:` + mailTipBox + `;border-radius:16px;margin:24px 0 0;">
               <tr>
                 <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.6;color:` + mailSub + `;">不是你操作？忽略这封邮件即可，账号不会有任何变化。</td>
               </tr>
             </table>
-            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + b.join("不会向你索要验证码，也别把它告诉他人。") + `</p>`
+            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "邮箱验证") + `
 
 ` + action + `验证码
@@ -246,7 +274,9 @@ func codeEmail(b brand, action, code string) (subject, htmlBody, text string) {
 
 不是你操作？忽略这封邮件即可，账号不会有任何变化。
 
-` + b.join("不会向你索要验证码，也别把它告诉他人。") + `
+` + warn + `
+
+` + antiPhish + `
 
 ——
 ` + footText(b)
@@ -255,39 +285,66 @@ func codeEmail(b brand, action, code string) (subject, htmlBody, text string) {
 }
 
 // changeEmailNoticeEmail 改绑邮箱后的通知信（旧、新邮箱各一封）：说清「哪个邮箱变成了
-// 什么」，再给非本人操作时的下一步（红纯文字警示 + 单 CTA）——两句一事。
+// 什么」，再给非本人操作时的下一步——两句一事。
+//
+// 旧邮箱那封是**安全警报**（Artor 口径）：正文**零可点链接**——改绑本身已由验证码把关，
+// 警报信再挂按钮只会给钓鱼信递刀；下一步只用文字说清（修改密码 / 联系管理员 /
+// 「找回密码」自助重置）。新邮箱那封是使用指引：新邮箱值 + 生效时间 + 下次登录用新
+// 邮箱，保留账号台按钮。生效时间由模板自取发信时刻（业务调用方不携带时间戳，
+// 发信即生效，两者同一时刻）。
+//
 // 邮箱进正文前先 html.EscapeString：validateEmail 的正则不拦 `<>&`，不转义就是注入面。
 func changeEmailNoticeEmail(b brand, toNew bool, oldEmail, newEmail string) (subject, htmlBody, text string) {
 	oldE, newE := html.EscapeString(oldEmail), html.EscapeString(newEmail)
-	var title, lead, next string
 	if toNew {
 		subject = b.prefix + "新邮箱已绑定"
-		title = "新邮箱已绑定"
-		lead = newE + " 已成为" + b.account + "的绑定邮箱（原绑定邮箱 " + oldE + "），该账号的验证码会发到这里。"
-		next = "不是你操作？请立刻让账号主人把邮箱改回去。"
-	} else {
-		subject = b.prefix + "绑定邮箱已更换"
-		title = "绑定邮箱已更换"
-		lead = "你的账号绑定邮箱已由 " + oldE + " 改为 " + newE + "。"
-		next = "不是你操作？请立刻用「找回密码」重置密码。"
-	}
-	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">` + title + `</h1>
+		lead := newE + " 已成为" + b.account + "的绑定邮箱（原绑定邮箱 " + oldE + "），自 " + safeTime(time.Now()) + " 起生效，该账号的验证码会发到这里。"
+		const guidance, warn = "下次登录请使用新邮箱。", "不是你本人知情的操作？请立即联系管理员。"
+		inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">新邮箱已绑定</h1>
             <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + lead + `</p>
-            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + next + `</p>
-` + ctaButton(b, "管理账号", accountURL)
-	text = brandEyebrowText(b, "账号安全") + `
+            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + guidance + `</p>
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + ctaButton(b, "管理账号", accountURL) + `
+` + antiPhishHTML()
+		text = brandEyebrowText(b, "账号安全") + `
 
-` + title + `
+新邮箱已绑定
 
 ` + stripTags(lead) + `
 
-` + next + `
+` + guidance + `
+
+` + warn + `
 
 ` + ctaText("管理账号", accountURL) + `
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := title + "。" + next
+		preheader := "新邮箱已绑定，下次登录请使用新邮箱。"
+		return subject, emailShell(b, preheader, inner), text
+	}
+	subject = b.prefix + "绑定邮箱已更换"
+	lead := "你的账号绑定邮箱已由 " + oldE + " 改为 " + newE + "。"
+	warn := "若非本人操作，请立即修改密码并联系管理员；也可用「找回密码」自助重置。"
+	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">绑定邮箱已更换</h1>
+            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + lead + `</p>
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + antiPhishHTML()
+	text = brandEyebrowText(b, "账号安全") + `
+
+绑定邮箱已更换
+
+` + stripTags(lead) + `
+
+` + warn + `
+
+` + antiPhish + `
+
+——
+` + footText(b)
+	preheader := "你的账号绑定邮箱已更换。若非本人操作，请立即修改密码并联系管理员。"
 	return subject, emailShell(b, preheader, inner), text
 }
 
@@ -305,12 +362,16 @@ func stripTags(s string) string {
 // 说「你的热量日记账号被注销了」这类话（AGENTS §7：auth 的文案永远是通用口径）。
 
 // passwordResetNoticeEmail 管理员重置密码的通知信（W1，notify=true 时发）：
-// 场景 + 临时密码本体 + 下次登录必须修改 + 非本人操作找管理员——正文最小化，
-// 不带 uid、角色、操作者等任何额外账号信息。
+// 场景 + 重置时间 + 临时密码本体 + 「尽快登录并立即改密」的内联入口（登录页——
+// 登录后的强制改密步会接管）+ 非本人操作找管理员——正文最小化，不带 uid、角色、
+// 操作者等任何额外账号信息。重置时间由模板自取发信时刻（发信紧跟重置，同一时刻）。
 func passwordResetNoticeEmail(b brand, temporary string) (subject, htmlBody, text string) {
+	const loginURL = siteBase + "/web/login"
 	subject = b.prefix + "密码重置通知"
-	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">你的密码已被管理员重置</h1>
-            <p style="` + emailFont + `margin:0 0 24px;font-size:16px;line-height:1.6;color:` + mailInk + `;">你的密码已被管理员重置为下面的临时密码：</p>
+	lead := "管理员已于 " + safeTime(time.Now()) + " 将你的密码重置为下面的临时密码："
+	tip := `请尽快<a href="` + loginURL + `" style="color:` + b.primaryHex + `;text-decoration:underline;">使用临时密码登录</a>，并立即设置新密码。`
+	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">你的密码已被重置</h1>
+            <p style="` + emailFont + `margin:0 0 24px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + lead + `</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailCodeBox + `" style="width:100%;background-color:` + mailCodeBox + `;border-radius:20px;">
               <tr>
                 <td align="center" style="padding:26px 12px 22px;">
@@ -320,121 +381,166 @@ func passwordResetNoticeEmail(b brand, temporary string) (subject, htmlBody, tex
             </table>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailTipBox + `" style="width:100%;background-color:` + mailTipBox + `;border-radius:16px;margin:24px 0 0;">
               <tr>
-                <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.6;color:` + mailSub + `;">请在下次登录时修改密码。</td>
+                <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.6;color:` + mailSub + `;">` + tip + `</td>
               </tr>
             </table>
-            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请联系管理员。</p>`
+            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请联系管理员。</p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号安全") + `
 
-你的密码已被管理员重置
+你的密码已被重置
 
-你的密码已被管理员重置为下面的临时密码：
+` + lead + `
 
 ` + temporary + `
 
-请在下次登录时修改密码。
+请尽快使用临时密码登录，并立即设置新密码。
+` + loginURL + `
 
 不是你本人操作？请联系管理员。
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := "你的密码已被管理员重置，请在下次登录时修改密码。"
+	preheader := "你的密码已被管理员重置，请尽快用临时密码登录并立即设置新密码。"
 	return subject, emailShell(b, preheader, inner), text
 }
 
 // passwordChangedNoticeEmail 自助改密成功后的确认信（Okta 口径：时间 + 入口，
 // **不含任何密码字段**）——用户没主动改却收到这封信，就是账号出事的信号。
+// 结构：事件主句 → 降噪先手句 → 会话范围说明（改密在 setPasswordAndRevoke 里
+// **全吊销、不保活任何一行**，当前设备靠 reissueToken 换发续用——文案与之一字对应）
+// → 分层「不是我」：改密入口（security 页）与设备审查入口（sessions 页）各挂一枚
+// 正文内联文字链 → 反钓鱼声明。
 func passwordChangedNoticeEmail(b brand, at time.Time) (subject, htmlBody, text string) {
+	const securityURL, sessionsURL = siteBase + "/web/console/security", siteBase + "/web/console/sessions"
 	subject = b.prefix + "密码已修改"
+	lead := "你的账号密码已于 " + safeTime(at) + " 修改成功。"
+	const reassure, scopeLine = "如果是你本人操作，无需任何行动。", "其它设备上的登录已全部退出，当前设备保持登录。"
+	warn := `若非本人操作，请立即<a href="` + securityURL + `" style="color:` + b.primaryHex + `;text-decoration:underline;">修改密码</a>并<a href="` + sessionsURL + `" style="color:` + b.primaryHex + `;text-decoration:underline;">审查登录设备</a>。`
 	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">密码已修改</h1>
-            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">你的账号密码已于 ` + safeTime(at) + ` 修改成功。</p>
-            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请立刻用「找回密码」重置密码。</p>
-` + ctaButton(b, "管理账号", accountURL)
+            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + lead + `</p>
+            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + reassure + `</p>
+            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + scopeLine + `</p>
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + ctaButton(b, "管理账号", accountURL) + `
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号安全") + `
 
 密码已修改
 
-你的账号密码已于 ` + safeTime(at) + ` 修改成功。
+` + lead + `
 
-不是你本人操作？请立刻用「找回密码」重置密码。
+` + reassure + `
+
+` + scopeLine + `
+
+若非本人操作，请立即修改密码并审查登录设备。
+修改密码：` + securityURL + `
+审查登录设备：` + sessionsURL + `
 
 ` + ctaText("管理账号", accountURL) + `
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := "你的账号密码已于 " + safeTime(at) + " 修改成功。"
+	preheader := lead + reassure
 	return subject, emailShell(b, preheader, inner), text
 }
 
-// deleteRequestEmail 注销申请的确认信（W3）：后果清单 + 到期执行时间 + 撤销链接。
+// deleteRequestEmail 注销申请的确认信（W3）：删除内容清单（Atlassian 模式）+ 到期
+// 执行时间 + 撤销入口。主题把**已排期**说进主题里（「将于 <日期时刻> 执行」）——
+// scheduled 与「注销已完成」在收件箱里一眼分信别，不会被当成事后通知划走。
 // cancelURL 是完整撤销链接（token 已内嵌，服务端拼好；模板不接用户输入）。
 func deleteRequestEmail(b brand, cancelURL string, dueAt time.Time) (subject, htmlBody, text string) {
-	subject = b.prefix + "注销确认"
+	due := safeTime(dueAt)
+	subject = b.prefix + "注销申请已提交，将于 " + due + " 执行"
+	const scopeList = `注销后将执行：<br>· 注销你在本服务下接入的全部项目<br>· 清空所有项目的数据（不可恢复）`
 	inner := brandEyebrow(b, "账号注销") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">注销申请已提交</h1>
-            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">我们已收到你注销账号的申请，将于 ` + safeTime(dueAt) + ` 执行。执行后：</p>
+            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">我们已收到你注销账号的申请，将于 ` + due + ` 执行。</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailTipBox + `" style="width:100%;background-color:` + mailTipBox + `;border-radius:16px;margin:0 0 4px;">
               <tr>
-                <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.8;color:` + mailSub + `;">1. 名下所有项目一并注销；<br>2. 全部数据清空，不可恢复。</td>
+                <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.8;color:` + mailSub + `;">` + scopeList + `</td>
               </tr>
             </table>
-` + ctaButton(b, "撤销注销", cancelURL) + `            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请立刻点击上方链接撤销，并联系管理员。</p>`
+` + ctaButton(b, "撤销注销", cancelURL) + `            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请立刻点击上方按钮撤销，并联系管理员。</p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号注销") + `
 
 注销申请已提交
 
-我们已收到你注销账号的申请，将于 ` + safeTime(dueAt) + ` 执行。执行后：
+我们已收到你注销账号的申请，将于 ` + due + ` 执行。
 
-1. 名下所有项目一并注销；
-2. 全部数据清空，不可恢复。
+注销后将执行：
+· 注销你在本服务下接入的全部项目
+· 清空所有项目的数据（不可恢复）
 
 ` + ctaText("撤销注销", cancelURL) + `
 
 不是你本人操作？请立刻点击上方链接撤销，并联系管理员。
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := "注销将于 " + safeTime(dueAt) + " 执行，点击链接可撤销。"
+	preheader := "注销将于 " + due + " 执行，点击链接可撤销。"
 	return subject, emailShell(b, preheader, inner), text
 }
 
-// deleteCancelledEmail 注销已撤销的通知信：只报事实与「非本人怎么办」，不带链接。
+// deleteCancelledEmail 注销已撤销的通知信：事实 + 安心句（账号与数据一切照常）+
+//「不是本人怎么办」；账号已回到正常态，保留账号台入口与反钓鱼声明。
 func deleteCancelledEmail(b brand) (subject, htmlBody, text string) {
 	subject = b.prefix + "注销已撤销"
+	const reassure = "你的账号和数据是安全的，一切照常。"
+	const warn = "不是你本人操作？请立刻修改密码并检查登录设备。"
 	inner := brandEyebrow(b, "账号注销") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">注销已撤销</h1>
-            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">你的账号注销申请已撤销，账号与数据一切如常。</p>
-            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请立刻修改密码并检查登录设备。</p>
-` + ctaButton(b, "管理账号", accountURL)
+            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">你的账号注销申请已撤销。</p>
+            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + reassure + `</p>
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + ctaButton(b, "管理账号", accountURL) + `
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号注销") + `
 
 注销已撤销
 
-你的账号注销申请已撤销，账号与数据一切如常。
+你的账号注销申请已撤销。
 
-不是你本人操作？请立刻修改密码并检查登录设备。
+` + reassure + `
+
+` + warn + `
 
 ` + ctaText("管理账号", accountURL) + `
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := "你的账号注销申请已撤销，账号与数据一切如常。"
+	preheader := "你的账号注销申请已撤销。" + reassure
 	return subject, emailShell(b, preheader, inner), text
 }
 
-// deleteDoneEmail 注销完成的通知信：永久删除、不可恢复、**无任何链接**
-//（账号已不存在，再给入口就是死链）。
+// deleteDoneEmail 注销完成的通知信：删除范围 + 不可逆陈述、**无任何链接**
+//（账号已不存在，再给入口就是死链），页脚前带反钓鱼声明——注销后的空窗期正是
+// 钓鱼信最爱冒名的时间点。
 func deleteDoneEmail(b brand) (subject, htmlBody, text string) {
 	subject = b.prefix + "注销已完成"
+	const fact = "你的账号与全部项目数据已被永久删除，无法恢复。"
 	inner := brandEyebrow(b, "账号注销") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">账号已注销</h1>
-            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">你的账号已永久删除，名下所有项目的数据已一并清空，不可恢复。</p>`
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + fact + `</p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号注销") + `
 
 账号已注销
 
-你的账号已永久删除，名下所有项目的数据已一并清空，不可恢复。
+` + fact + `
+
+` + antiPhish + `
 
 ——
 ` + footText(b)
-	preheader := "你的账号已永久删除，不可恢复。"
+	preheader := fact
 	return subject, emailShell(b, preheader, inner), text
 }
 
@@ -443,64 +549,91 @@ func deleteDoneEmail(b brand) (subject, htmlBody, text string) {
 //
 // 与自助改绑的 changeEmailNoticeEmail 的差别在措辞归属：这封明确说是**管理员**改的、
 // 用户没做任何操作——旧邮箱那封是安全警报（含新邮箱地址 + 「若非本人操作请立即改密
-// 并联系管理员」），新邮箱那封是使用指引（「下次登录请使用新邮箱」）。邮箱进正文前
-// 先 html.EscapeString（validateEmail 的正则不拦 `<>&`）。
+// 并联系管理员」，同 Artor 口径**零可点链接**），新邮箱那封是使用指引（「下次登录请
+// 使用新邮箱」）。两封主题一眼分信别（「已被管理员更换」= 警报 /「已生效」= 指引）。
+// 邮箱进正文前先 html.EscapeString（validateEmail 的正则不拦 `<>&`）。
 func adminChangeEmailNoticeEmail(b brand, toNew bool, oldEmail, newEmail string) (subject, htmlBody, text string) {
 	oldE, newE := html.EscapeString(oldEmail), html.EscapeString(newEmail)
-	var title, lead, next string
 	if toNew {
 		subject = b.prefix + "新邮箱已生效"
-		title = "新邮箱已成为登录邮箱"
-		lead = newE + " 已成为" + b.account + "的登录邮箱（由管理员设置，原登录邮箱 " + oldE + "），该账号的验证码会发到这里。"
-		next = "下次登录请使用新邮箱。不是你本人知情的操作？请联系管理员。"
-	} else {
-		subject = b.prefix + "登录邮箱已被管理员更换"
-		title = "登录邮箱已被管理员更换"
-		lead = "你的账号登录邮箱已由管理员从 " + oldE + " 更换为 " + newE + "，验证码将发往新邮箱。"
-		next = "若非本人操作，请立即修改密码并联系管理员。"
+		title := "新邮箱已成为登录邮箱"
+		lead := newE + " 已成为" + b.account + "的登录邮箱（由管理员设置，原登录邮箱 " + oldE + "），该账号的验证码会发到这里。"
+		const warn = "下次登录请使用新邮箱。不是你本人知情的操作？请联系管理员。"
+		inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">` + title + `</h1>
+            <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + lead + `</p>
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + ctaButton(b, "管理账号", accountURL) + `
+` + antiPhishHTML()
+		text = brandEyebrowText(b, "账号安全") + `
+
+` + title + `
+
+` + stripTags(lead) + `
+
+` + warn + `
+
+` + ctaText("管理账号", accountURL) + `
+
+` + antiPhish + `
+
+——
+` + footText(b)
+		preheader := title + "。下次登录请使用新邮箱。"
+		return subject, emailShell(b, preheader, inner), text
 	}
+	subject = b.prefix + "登录邮箱已被管理员更换"
+	title := "登录邮箱已被管理员更换"
+	lead := "你的账号登录邮箱已由管理员从 " + oldE + " 更换为 " + newE + "，验证码将发往新邮箱。"
+	const warn = "若非本人操作，请立即修改密码并联系管理员。"
 	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">` + title + `</h1>
             <p style="` + emailFont + `margin:0 0 20px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + lead + `</p>
-            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + next + `</p>
-` + ctaButton(b, "管理账号", accountURL)
+            <p style="` + emailFont + `margin:0 0 4px;font-size:16px;line-height:1.6;color:` + mailWarn + `;">` + warn + `</p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号安全") + `
 
 ` + title + `
 
 ` + stripTags(lead) + `
 
-` + next + `
+` + warn + `
 
-` + ctaText("管理账号", accountURL) + `
+` + antiPhish + `
 
 ——
 ` + footText(b)
-	preheader := title + "。" + next
+	preheader := title + "。若非本人操作，请立即修改密码并联系管理员。"
 	return subject, emailShell(b, preheader, inner), text
 }
 
-// loginNotifyEmail 新设备登录提醒（W1）：四段式——检测到新设备登录 → 设备/项目/
-// 时间细节 → 「不是我」的两步（改密 + 退出其它设备，各带 auth web 深链）→ 页脚
-// （含「管理登录提醒」入口）。品牌按登录来源：App 登录取该 App 品牌，web 登录取
-// 中性 Auth（调用方 brandFor(app) 传入）。
+// loginNotifyEmail 新设备登录提醒（W1）：五段式——检测到新设备登录 → 降噪先手句
+//（「如果是你本人，无需任何行动。」）→ 设备/项目/时间细节 → 「不是我」的两步
+//（改密 + 退出其它设备，各带 auth web 深链）→ 页脚（含「管理登录提醒」入口与
+// 反钓鱼声明）。**不带 IP**——业界登录告警的反面清单项，既非用户可对号的凭据，
+// 又给钓鱼信递素材。品牌按登录来源：App 登录取该 App 品牌，web 登录取中性
+// Auth（调用方 brandFor(app) 传入）。
 func loginNotifyEmail(b brand, device, appLabel string, at time.Time) (subject, htmlBody, text string) {
 	subject = b.prefix + "新设备登录提醒"
 	securityURL, sessionsURL := siteBase+"/web/console/security", siteBase+"/web/console/sessions"
 	deviceE := html.EscapeString(device) // HTML 版（含 preheader）统一用转义后的形态
+	const reassure = "如果是你本人，无需任何行动。"
 	inner := brandEyebrow(b, "账号安全") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">检测到新设备登录</h1>
             <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">你的账号刚刚在一台新设备上登录。</p>
+            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">` + reassure + `</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailTipBox + `" style="width:100%;background-color:` + mailTipBox + `;border-radius:16px;margin:0 0 4px;">
               <tr>
                 <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.8;color:` + mailSub + `;">设备：` + deviceE + `<br>项目：` + html.EscapeString(appLabel) + `<br>时间：` + safeTime(at) + `</td>
               </tr>
             </table>
             <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">如果这不是你本人的操作，请<a href="` + securityURL + `" style="color:` + b.primaryHex + `;text-decoration:underline;">立即修改密码并退出其它设备</a>。</p>
-` + ctaButton(b, "审查登录设备", sessionsURL) + `            <p style="` + emailFont + `margin:20px 0 0;font-size:13px;line-height:1.6;color:` + mailDim + `;">管理登录提醒设置：<a href="` + accountURL + `" style="color:` + mailDim + `;text-decoration:underline;">前往账号设置</a></p>`
+` + ctaButton(b, "审查登录设备", sessionsURL) + `            <p style="` + emailFont + `margin:20px 0 0;font-size:13px;line-height:1.6;color:` + mailDim + `;">管理登录提醒设置：<a href="` + accountURL + `" style="color:` + mailDim + `;text-decoration:underline;">前往账号设置</a></p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号安全") + `
 
 检测到新设备登录
 
 你的账号刚刚在一台新设备上登录。
+
+` + reassure + `
 
 设备：` + device + `
 项目：` + appLabel + `
@@ -514,32 +647,39 @@ func loginNotifyEmail(b brand, device, appLabel string, at time.Time) (subject, 
 
 管理登录提醒：` + accountURL + `
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := "检测到新设备登录（" + deviceE + "），如果不是你本人操作，请尽快修改密码。"
+	preheader := "检测到新设备登录（" + deviceE + "）。" + reassure
 	return subject, emailShell(b, preheader, inner), text
 }
 
-// inviteEmail 邀请建号的链接信（B9）：说清「你被邀请创建账号、链接什么时候失效」，
-// 单 CTA 设置密码，页脚照常。品牌按邀请 app（调用方 brandFor 传入，无 app = 中性
-// Auth）；URL 由服务端拼好（token 已内嵌），模板不接用户输入的链接——token 是
+// inviteEmail 邀请建号的链接信（B9）：说清「谁邀请你、你被邀请做什么、链接什么时候
+// 失效」，单 CTA 设置密码，页脚照常。品牌按邀请 app（调用方 brandFor 传入，无 app =
+// 中性 Auth）；URL 由服务端拼好（token 已内嵌），模板不接用户输入的链接——token 是
 // 凭证，正文之外不再进任何统计参数。
+//
+// 邀请人身份写「一位管理员」而非具体邮箱：邀请行只落 invited_by 的 uid（user_invites
+// 表无邀请人邮箱列），邀请信是模板纯函数、不查库；把 uid 解析成邮箱要动 invite.go
+// 两条发信路（创建取 actor、重发要回查 invited_by），本次改版不动业务层。
 func inviteEmail(b brand, inviteURL string, expiresAt time.Time) (subject, htmlBody, text string) {
 	subject = b.prefix + "账号邀请"
-	expireLine := "邀请链接 24 小时内有效（" + safeTime(expiresAt) + " 前）；链接被使用、撤销或过期后即失效。"
+	expireLine := "此链接 24 小时内有效（" + safeTime(expiresAt) + " 前）；链接被使用、撤销或过期后即失效。"
 	inner := brandEyebrow(b, "账号邀请") + `            <h1 style="` + emailFont + `margin:0 0 8px;font-size:20px;font-weight:400;line-height:1.4;color:` + mailInk + `;">你被邀请创建账号</h1>
-            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">点击下面的按钮设置密码，即可完成账号创建并直接登录。</p>
+            <p style="` + emailFont + `margin:0 0 16px;font-size:16px;line-height:1.6;color:` + mailInk + `;">一位管理员邀请你创建账号。点击下面的按钮设置密码，即可完成账号创建并直接登录。</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="` + mailTipBox + `" style="width:100%;background-color:` + mailTipBox + `;border-radius:16px;margin:0 0 4px;">
               <tr>
                 <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.8;color:` + mailSub + `;">` + expireLine + `</td>
               </tr>
             </table>
-` + ctaButton(b, "设置密码并加入", inviteURL) + `            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人知情的操作？忽略这封邮件即可，不会有任何变化。</p>`
+` + ctaButton(b, "设置密码并加入", inviteURL) + `            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人知情的操作？忽略这封邮件即可，不会有任何变化。</p>
+` + antiPhishHTML()
 	text = brandEyebrowText(b, "账号邀请") + `
 
 你被邀请创建账号
 
-点击下面的按钮设置密码，即可完成账号创建并直接登录。
+一位管理员邀请你创建账号。点击下面的按钮设置密码，即可完成账号创建并直接登录。
 
 ` + expireLine + `
 
@@ -547,9 +687,11 @@ func inviteEmail(b brand, inviteURL string, expiresAt time.Time) (subject, htmlB
 
 不是你本人知情的操作？忽略这封邮件即可，不会有任何变化。
 
+` + antiPhish + `
+
 ——
 ` + footText(b)
-	preheader := "你被邀请创建账号，链接 24 小时内有效。"
+	preheader := "一位管理员邀请你创建账号，此链接 24 小时内有效。"
 	return subject, emailShell(b, preheader, inner), text
 }
 

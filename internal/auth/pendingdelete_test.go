@@ -98,9 +98,10 @@ func TestDeleteRequestThenLoginCancels(t *testing.T) {
 	if users != 1 || alive != 0 {
 		t.Errorf("申请注销不该删数据（users=%d），但要杀全部会话（alive=%d）", users, alive)
 	}
-	// 确认信：主题、撤销链接、后果清单、到期时间
-	if !strings.Contains(mailer.subject, "注销确认") {
-		t.Errorf("确认信主题不对: %q", mailer.subject)
+	// 确认信：主题（已按「已排期」改版——scheduled 与「注销已完成」在收件箱一眼
+	// 分信别）、撤销链接、删除内容清单、到期时间
+	if !strings.Contains(mailer.subject, "注销申请已提交，将于") || !strings.Contains(mailer.subject, "执行") {
+		t.Errorf("确认信主题应把排期说进主题里，得到 %q", mailer.subject)
 	}
 	for _, want := range []string{"/web/delete-cancel?token=", "不可恢复", "撤销"} {
 		if !strings.Contains(mailer.html, want) {
