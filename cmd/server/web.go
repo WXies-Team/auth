@@ -168,6 +168,32 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 			}
 			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		}))
+	// 重新验证的 Passkey 路（弹框「Passkey / 两步验证码二选一」里的前者）：与
+	// POST /web/reauth 同为 authed——不是 reauthed，这两支正是要刷新 reauth 窗的
+	// 本体。额度与密码/验证码路同档：选项 30/min/uid、回执 10/min/uid。
+	mux.Handle("POST /web/reauth/webauthn/options", authed("reauth-passkey-options", 30,
+		func(c auth.WebCaller, w http.ResponseWriter, _ *http.Request) {
+			assertion, id, err := svc.BeginPasskeyReauth(c.Caller)
+			if err != nil {
+				writeResult(w, nil, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, ceremonyResponse{PublicKey: assertion.Response, CeremonyID: id})
+		}))
+	mux.Handle("POST /web/reauth/webauthn/finish", authed("reauth-passkey-finish", 10, jsonAuthedWrapper(
+		func(c auth.WebCaller, req *protocol.PasskeyFinishRequest, w http.ResponseWriter, _ *http.Request) {
+			body, ok := credentialJSON(w, req.Response)
+			if !ok {
+				return
+			}
+			// 仪式绑 uid + 凭证属主验签 + MarkReauth + 审计都在业务层
+			//（FinishPasskeyReauth）；路由层只做参数与 response 形态归一。
+			if err := svc.FinishPasskeyReauth(c.Caller, req.CeremonyID, body); err != nil {
+				writeResult(w, nil, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		})))
 	mux.Handle("POST /web/logout", authed("web-logout", 10,
 		func(c auth.WebCaller, w http.ResponseWriter, _ *http.Request) {
 			// 只吊销本行（web 会话），不动 token_version：同账号的其它设备照常用。

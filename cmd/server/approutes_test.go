@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -306,6 +307,114 @@ func TestPasskeyLoginFinishRouteAppAndWeb(t *testing.T) {
 	if bad.Code != http.StatusBadRequest {
 		t.Errorf("白名单外的 app 应 400，得到 %d（%s）", bad.Code, bad.Body.String())
 	}
+}
+
+// 重新验证的 Passkey 路（弹框「Passkey / 两步验证码二选一」的前者，sudo mode）：
+// 正路验过刷本会话 reauth_at；仪式行绑 uid（别人的 ceremonyId 消费不动）、单次
+// 消费（重放 404）、没 Passkey 的账号 400 提示改走验证码。
+func TestPasskeyReauthRoute(t *testing.T) {
+	e := newRouteEnv(t)
+	uid := seedUser(t, e, "pk-reauth@example.com", "secret123", "user")
+	au, err := webauthntest.New()
+	if err != nil {
+		t.Fatalf("造合成 passkey: %v", err)
+	}
+	seedPasskey(t, e, uid, au)
+	sess, csrf := loginCookie(t, e, "pk-reauth@example.com", "secret123")
+	withCSRF := func(r *http.Request) {
+		r.AddCookie(sess)
+		r.AddCookie(csrf)
+		r.Header.Set("X-CSRF-Token", csrf.Value)
+	}
+
+	// ① 窗已过期 → 选项 + 断言 finish → 200 且本会话 reauth_at 被刷新
+	staleReauth(t, e)
+	id, challenge := reauthPasskeyOptions(t, e, withCSRF)
+	obj, err := au.Assertion(challenge, uid)
+	if err != nil {
+		t.Fatalf("造断言: %v", err)
+	}
+	rec := e.do(t, "POST", "/web/reauth/webauthn/finish",
+		`{"ceremonyId":`+strconv.FormatInt(id, 10)+`,"response":`+string(obj)+`}`, withCSRF)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("passkey 重新验证应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	var reauthAt sql.NullInt64
+	if err := e.pool.QueryRow(
+		"SELECT reauth_at FROM sessions WHERE user_id = ? AND app = 'web' AND revoked_at IS NULL", uid,
+	).Scan(&reauthAt); err != nil || !reauthAt.Valid {
+		t.Errorf("验过应刷新本会话 reauth_at，得到 %v（err=%v）", reauthAt, err)
+	}
+
+	// ② 同一 ceremonyId 重放：单次消费，404（行已在 ① 删掉，签名再合法也进不了门）
+	replayObj, err := au.Assertion(challenge, uid)
+	if err != nil {
+		t.Fatalf("造重放断言: %v", err)
+	}
+	replay := e.do(t, "POST", "/web/reauth/webauthn/finish",
+		`{"ceremonyId":`+strconv.FormatInt(id, 10)+`,"response":`+string(replayObj)+`}`, withCSRF)
+	if replay.Code != http.StatusNotFound {
+		t.Errorf("重放同一仪式应 404，得到 %d（%s）", replay.Code, replay.Body.String())
+	}
+
+	// ③ 别人的 ceremonyId 消费不动：B 拿 A 的仪式行 finish → 404（行绑 uid）
+	uidB := seedUser(t, e, "pk-reauth-b@example.com", "secret123", "user")
+	auB, err := webauthntest.New()
+	if err != nil {
+		t.Fatalf("造 B 合成 passkey: %v", err)
+	}
+	seedPasskey(t, e, uidB, auB)
+	sessB, csrfB := loginCookie(t, e, "pk-reauth-b@example.com", "secret123")
+	withCSRFB := func(r *http.Request) {
+		r.AddCookie(sessB)
+		r.AddCookie(csrfB)
+		r.Header.Set("X-CSRF-Token", csrfB.Value)
+	}
+	idA, challengeA := reauthPasskeyOptions(t, e, withCSRF)
+	assertionB, err := auB.Assertion(challengeA, uidB)
+	if err != nil {
+		t.Fatalf("造 B 断言: %v", err)
+	}
+	cross := e.do(t, "POST", "/web/reauth/webauthn/finish",
+		`{"ceremonyId":`+strconv.FormatInt(idA, 10)+`,"response":`+string(assertionB)+`}`, withCSRFB)
+	if cross.Code != http.StatusNotFound {
+		t.Errorf("消费他人仪式应 404，得到 %d（%s）", cross.Code, cross.Body.String())
+	}
+
+	// ④ 没 Passkey 的账号发起 → 400 且指路验证码（能力探测之外的服务端兜底）
+	seedUser(t, e, "pk-reauth-none@example.com", "secret123", "user")
+	sessC, csrfC := loginCookie(t, e, "pk-reauth-none@example.com", "secret123")
+	none := e.do(t, "POST", "/web/reauth/webauthn/options", `{}`, func(r *http.Request) {
+		r.AddCookie(sessC)
+		r.AddCookie(csrfC)
+		r.Header.Set("X-CSRF-Token", csrfC.Value)
+	})
+	if none.Code != http.StatusBadRequest || !strings.Contains(none.Body.String(), "验证码") {
+		t.Errorf("无 Passkey 发起应 400 并指路验证码，得到 %d（%s）", none.Code, none.Body.String())
+	}
+}
+
+// reauthPasskeyOptions 在带 cookie/CSRF 的前提下发起一次重新验证仪式，
+// 回 ceremonyId 与 challenge（与 passkeyLoginOptions 同一回执形状）。
+func reauthPasskeyOptions(t *testing.T, e *routeEnv, mutate func(*http.Request)) (id int64, challenge string) {
+	t.Helper()
+	rec := e.do(t, "POST", "/web/reauth/webauthn/options", `{}`, mutate)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("取重新验证选项应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	var opt struct {
+		PublicKey struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+		CeremonyID int64 `json:"ceremonyId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &opt); err != nil {
+		t.Fatalf("解析选项回执: %v（%s）", err, rec.Body)
+	}
+	if opt.CeremonyID == 0 || opt.PublicKey.Challenge == "" {
+		t.Fatalf("选项回执缺 ceremonyId/challenge: %s", rec.Body)
+	}
+	return opt.CeremonyID, opt.PublicKey.Challenge
 }
 
 // passkeyLoginOptions 发一次 /webauthn/login/options，回 ceremonyId 与 challenge

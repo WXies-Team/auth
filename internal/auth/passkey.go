@@ -34,9 +34,12 @@ const (
 	passkeyRPID = "horatio.cn"
 	// challengeTTL 对齐邮箱验证码的 5 分钟：仪式是「扫码/弹窗」这一下，久等无益。
 	challengeTTL = 5 * time.Minute
-	// PasskeyCeremonyRegister / Login 是 webauthn_challenges.kind 的两值。
+	// PasskeyCeremonyRegister / Login / Reauth 是 webauthn_challenges.kind 的三值。
 	PasskeyCeremonyRegister = "register"
 	PasskeyCeremonyLogin    = "login"
+	// PasskeyCeremonyReauth 是「登录态里重拿强认证」的断言仪式（sudo mode 的
+	// Passkey 路）：行绑发起会话的 uid，认人靠建仪式时的调用现场，不靠 userHandle。
+	PasskeyCeremonyReauth = "reauth"
 )
 
 // PasskeyInfo 是 /api/passkeys 的一条记录。
@@ -220,9 +223,10 @@ func (s *Service) takeChallenge(ceremonyID int64, kind string, uid int64) (*weba
 	if err != nil {
 		return nil, fmt.Errorf("查仪式中间态: %w", err)
 	}
-	// register 仪式必须绑发起者；login（discoverable）行的 user_id 为 NULL，
-	// 不参与比对——认人靠 userHandle 反查，不靠建仪式时猜
-	if kind == PasskeyCeremonyRegister && (!owner.Valid || owner.Int64 != uid) {
+	// register / reauth 仪式必须绑发起者（reauth 行不绑 uid 就是「拿到 ceremonyId
+	// 即可冒验」的洞）；login（discoverable）行的 user_id 为 NULL，不参与比对——
+	// 认人靠 userHandle 反查，不靠建仪式时猜
+	if kind != PasskeyCeremonyLogin && (!owner.Valid || owner.Int64 != uid) {
 		return nil, &HTTPError{404, "验证请求已过期，请重新发起"}
 	}
 	if time.Now().UnixMilli() > expires {
@@ -388,6 +392,69 @@ func (s *Service) recordCredentialUse(uid int64, cred *webauthn.Credential) erro
 		return fmt.Errorf("回写凭证: %w", err)
 	}
 	return nil
+}
+
+// ---- 重新验证（sudo mode 的 Passkey 路）----
+
+// BeginPasskeyReauth 发起「登录态重拿强认证」仪式：与登录的 discoverable 流不同，
+// 这里会话里已有 uid——用 BeginLogin（非 discoverable）把 allowCredentials 钉成
+// 该账号的全部凭证，仪式行绑 uid。UV 仍走 NewWebAuthn 的 VerificationRequired。
+// 账号一把 Passkey 都没有时不发仪式，回 400 让前端改走验证码（能力探测之外的兜底）。
+func (s *Service) BeginPasskeyReauth(c Caller) (*protocol.CredentialAssertion, int64, error) {
+	if s.wa == nil {
+		return nil, 0, &HTTPError{503, "Passkey 服务暂不可用，请稍后重试"}
+	}
+	user, err := s.passkeyUserFor(c.UID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(user.creds) == 0 {
+		return nil, 0, badRequest("尚未添加 Passkey，请改用两步验证码验证")
+	}
+	assertion, sd, err := s.wa.BeginLogin(user)
+	if err != nil {
+		return nil, 0, fmt.Errorf("发起重新验证仪式: %w", err)
+	}
+	id, err := s.saveChallenge(PasskeyCeremonyReauth, &c.UID, sd)
+	if err != nil {
+		return nil, 0, err
+	}
+	return assertion, id, nil
+}
+
+// FinishPasskeyReauth 校验重新验证回执并刷新本会话的强认证窗。仪式行已绑 uid
+//（takeChallenge 比对），库只在这把凭证属于该账号的前提下验签；成败都进审计
+//（method=passkey）——持登录态反复尝试强认证，值得与密码/验证码路同样被看见。
+func (s *Service) FinishPasskeyReauth(c Caller, ceremonyID int64, body []byte) (err error) {
+	method := "passkey"
+	defer func() {
+		s.Audit(AuditEvent{
+			Action: AuditReauth, OK: err == nil, ActorUID: uidPtr(c.UID),
+			ActorEmail: maskEmail(c.Email), Meta: c.Meta,
+			Detail: map[string]string{"method": method},
+		})
+	}()
+	if s.wa == nil {
+		return &HTTPError{503, "Passkey 服务暂不可用，请稍后重试"}
+	}
+	sd, err := s.takeChallenge(ceremonyID, PasskeyCeremonyReauth, c.UID)
+	if err != nil {
+		return err
+	}
+	user, err := s.passkeyUserFor(c.UID)
+	if err != nil {
+		return err
+	}
+	cred, err := s.wa.FinishLogin(user, *sd, synthRequest(body))
+	if err != nil {
+		slog.Warn("passkey 重新验证仪式失败", "uid", c.UID, "err", err)
+		return &HTTPError{400, "Passkey 验证失败，请重试"}
+	}
+	if err := s.recordCredentialUse(c.UID, cred); err != nil {
+		// 回写失败不拦验证：强认证已经成立，丢的只是一次计数
+		slog.Warn("回写 passkey 使用记录失败", "uid", c.UID, "err", err)
+	}
+	return s.MarkReauth(c.SID)
 }
 
 // ---- 列表 / 改名 / 删除 ----
