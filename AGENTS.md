@@ -138,6 +138,11 @@ the same PR**—a stale guide ships wrong integrations.
     a live URL). The auth brand glyph is Lucide `shield`, single-sourced in genicons for
     favicon trio + email logo. Every `Audit*` constant must have a same-value `<option>` in
     `admin-audit.html` (`TestAuditFilterOptionsMatchAuditConstants` pins both directions).
+14. **UA Client Hints**: `sessions.user_agent` may carry a CH suffix
+    `原UA + " | CH:<platform>;<model>"` (collected on web login paths only when a device
+    model is reported); `shortDevice` prefers the suffix → `平台 · 机型`, suffix-less /
+    malformed fall back to UA parsing (legacy rows unaffected). The opt-in lives in
+    `internal/ui.Render`'s `Accept-CH` header.
 
 ## Known pitfalls
 
@@ -214,3 +219,16 @@ the same PR**—a stale guide ships wrong integrations.
   no image (frontend onerror falls back to colored initial). OAuth admin UI (Web 接入
   block) was removed from 项目访问 — backend `/admin/projects/{app}/oauth` + `clientId`
   stay dormant; restore the UI when the first real web project lands.
+- `Sec-CH-UA-Model` is a **high-entropy** hint: the opt-in `Accept-CH` header lives in
+  `internal/ui.Render` — losing it silently degrades device names back to UA-only. The
+  login-notify fingerprint must hash the **stored** `user_agent` (incl. the CH suffix);
+  "simplifying" it back to the raw meta UA makes every CH login look like a new device.
+- The user sessions page renders **flat** (one row per session, duplicate device names
+  stay side by side — grouping by name merges distinct devices); `.device-group`/group-kick
+  were removed and `TestSessionsPageCurrentRowNeverKickable` pins their absence.
+- Graph `sendMail` takes raw MIME as a **base64 text/plain body** (docs Example 4); the
+  JSON body form does NOT parse multipart — putting the MIME source there mails boundary
+  garbage (the 2026-10-22 乱码 incident). Don't "simplify" back.
+- `.content` grid `gap` only reaches direct children: elements wrapped in an inner
+  container (e.g. admin-sessions search form) need their own margin or they stick to the
+  next card.
