@@ -126,22 +126,23 @@ func brandEyebrow(b brand, scene string) string {
 // brandEyebrowText 是眉题的纯文本降级。
 func brandEyebrowText(b brand, scene string) string { return b.name + " · " + scene }
 
-// ctaButton 是主按钮样式（bulletproof 形态，可多 CTA 并用，如登录提醒的双深链）：<a> 上 bgcolor +
-// VML [if mso] 兜底 + 内边距顶高（line-height 48px，不依赖盒模型差异）。
+// ctaButton 是主按钮样式（bulletproof 形态，可多 CTA 并用，如登录提醒的双深链）：药丸的
+// 底色/内边距/高度/白字全部落在 <td> 上（部分中文邮箱客户端会剥 <a> 内联样式，锚点一塌
+// 蓝底就只剩「文字一圈蓝」——td 撑住形态才稳），<a> 只留同款声明作渐进增强 + VML [if mso] 兜底。
 // 按钮下方附纯文本 URL：纯文本客户端、图片屏蔽与复制粘贴场景都有出路。
 func ctaButton(b brand, label, href string) string {
 	// VML 宽度按标签字数估（Outlook 只认这条路径，宁可偏宽也别截字）
 	width := 56 + 17*utf8.RuneCountInString(label)
 	return `            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;">
               <tr>
-                <td align="center" bgcolor="` + b.primaryHex + `" style="background-color:` + b.primaryHex + `;border-radius:16px;">
+                <td align="center" bgcolor="` + b.primaryHex + `" style="background-color:` + b.primaryHex + `;border-radius:16px;padding:0 28px;height:48px;color:#FFFFFF;">
                   <!--[if mso]>
                   <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="` + href + `" style="height:48px;v-text-anchor:middle;width:` + strconv.Itoa(width) + `px;" arcsize="34%" stroke="f" fillcolor="` + b.primaryHex + `">
                     <w:anchorlock/>
                     <center style="color:#FFFFFF;font-family:Arial,sans-serif;font-size:17px;">` + label + `</center>
                   </v:roundrect>
                   <![endif]-->
-                  <a href="` + href + `" style="` + emailFont + `display:inline-block;padding:0 28px;line-height:48px;font-size:17px;font-weight:400;color:#FFFFFF;text-decoration:none;border-radius:16px;">` + label + `</a>
+                  <a href="` + href + `" style="` + emailFont + `display:inline-block;line-height:48px;font-size:17px;font-weight:400;color:#FFFFFF;text-decoration:none;border-radius:16px;">` + label + `</a>
                 </td>
               </tr>
             </table>
@@ -175,7 +176,7 @@ func emailShell(b brand, preheader, inner string) string {
           <td style="padding:28px 32px 32px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 20px;">
               <tr>
-                <td bgcolor="` + b.primaryHex + `" style="background-color:` + b.primaryHex + `;padding:8px;border-radius:16px;vertical-align:middle;"><img src="` + b.logoURL() + `" width="48" height="48" alt="` + html.EscapeString(b.name) + `" border="0" style="display:block;width:48px;height:48px;border:0;"></td>
+                <td style="padding:0;vertical-align:middle;"><img src="` + b.logoURL() + `" width="48" height="48" alt="` + html.EscapeString(b.name) + `" border="0" style="display:block;width:48px;height:48px;border:0;"></td>
                 <td style="padding:0 12px;vertical-align:middle;"><span style="` + emailFont + `font-size:17px;font-weight:400;line-height:1.3;color:` + mailInk + `;">` + b.name + `</span></td>
               </tr>
             </table>
