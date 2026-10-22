@@ -126,10 +126,11 @@ func brandEyebrow(b brand, scene string) string {
 // brandEyebrowText 是眉题的纯文本降级。
 func brandEyebrowText(b brand, scene string) string { return b.name + " · " + scene }
 
-// ctaButton 是主按钮样式（bulletproof 形态，可多 CTA 并用，如登录提醒的双深链）：药丸的
-// 底色/内边距/高度/白字全部落在 <td> 上（部分中文邮箱客户端会剥 <a> 内联样式，锚点一塌
-// 蓝底就只剩「文字一圈蓝」——td 撑住形态才稳），<a> 只留同款声明作渐进增强 + VML [if mso] 兜底。
-// 按钮下方附纯文本 URL：纯文本客户端、图片屏蔽与复制粘贴场景都有出路。
+// ctaButton 是主按钮样式（bulletproof 形态，可多 CTA 并用）：药丸的底色/内边距/高度/白字
+// 全部落在 <td> 上（部分中文邮箱客户端会剥 <a> 内联样式，锚点一塌蓝底就只剩「文字一圈
+// 蓝」——td 撑住形态才稳），<a> 只留同款声明作渐进增强 + VML [if mso] 兜底。
+// 按钮下**不挂裸链接**（业界口径：HTML 视图一个主按钮、降级 URL 归 multipart 的
+// text/plain 部件，正文裸 URL 只显廉价）；次要动作用正文内联文字链接（见 loginNotify）。
 func ctaButton(b brand, label, href string) string {
 	// VML 宽度按标签字数估（Outlook 只认这条路径，宁可偏宽也别截字）
 	width := 56 + 17*utf8.RuneCountInString(label)
@@ -146,7 +147,6 @@ func ctaButton(b brand, label, href string) string {
                 </td>
               </tr>
             </table>
-            <p style="` + emailFont + `margin:8px 0 0;font-size:13px;line-height:1.6;color:` + mailDim + `;">` + href + `</p>
 `
 }
 
@@ -377,7 +377,7 @@ func deleteRequestEmail(b brand, cancelURL string, dueAt time.Time) (subject, ht
                 <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.8;color:` + mailSub + `;">1. 名下所有项目一并注销；<br>2. 全部数据清空，不可恢复。</td>
               </tr>
             </table>
-` + ctaButton(b, "点击此链接撤销注销", cancelURL) + `            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请立刻点击上方链接撤销，并联系管理员。</p>`
+` + ctaButton(b, "撤销注销", cancelURL) + `            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">不是你本人操作？请立刻点击上方链接撤销，并联系管理员。</p>`
 	text = brandEyebrowText(b, "账号注销") + `
 
 注销申请已提交
@@ -387,7 +387,7 @@ func deleteRequestEmail(b brand, cancelURL string, dueAt time.Time) (subject, ht
 1. 名下所有项目一并注销；
 2. 全部数据清空，不可恢复。
 
-` + ctaText("点击此链接撤销注销", cancelURL) + `
+` + ctaText("撤销注销", cancelURL) + `
 
 不是你本人操作？请立刻点击上方链接撤销，并联系管理员。
 
@@ -494,8 +494,8 @@ func loginNotifyEmail(b brand, device, appLabel string, at time.Time) (subject, 
                 <td style="` + emailFont + `padding:16px 18px;font-size:16px;line-height:1.8;color:` + mailSub + `;">设备：` + deviceE + `<br>项目：` + html.EscapeString(appLabel) + `<br>时间：` + safeTime(at) + `</td>
               </tr>
             </table>
-            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">如果这不是你本人的操作，请立即修改密码并退出其它设备。</p>
-` + ctaButton(b, "账号安全设置", securityURL) + ctaButton(b, "管理登录设备", sessionsURL) + `            <p style="` + emailFont + `margin:20px 0 0;font-size:13px;line-height:1.6;color:` + mailDim + `;">管理登录提醒：<a href="` + accountURL + `" style="color:` + mailDim + `;">` + accountURL + `</a></p>`
+            <p style="` + emailFont + `margin:16px 0 0;font-size:16px;line-height:1.6;color:` + mailWarn + `;">如果这不是你本人的操作，请<a href="` + securityURL + `" style="color:` + b.primaryHex + `;text-decoration:underline;">立即修改密码并退出其它设备</a>。</p>
+` + ctaButton(b, "审查登录设备", sessionsURL) + `            <p style="` + emailFont + `margin:20px 0 0;font-size:13px;line-height:1.6;color:` + mailDim + `;">管理登录提醒设置：<a href="` + accountURL + `" style="color:` + mailDim + `;text-decoration:underline;">前往账号设置</a></p>`
 	text = brandEyebrowText(b, "账号安全") + `
 
 检测到新设备登录

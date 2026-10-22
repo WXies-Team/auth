@@ -91,7 +91,6 @@ func TestLoginNotifyEmailTemplate(t *testing.T) {
 		}
 		for _, want := range []string{
 			"检测到新设备登录", device, project, "2026-10-21 09:30",
-			"如果这不是你本人的操作，请立即修改密码并退出其它设备。",
 			siteBase + "/web/console/security", siteBase + "/web/console/sessions",
 			accountURL, b.footer,
 		} {
@@ -102,10 +101,26 @@ func TestLoginNotifyEmailTemplate(t *testing.T) {
 				t.Errorf("app=%q 纯文本缺 %q", app, want)
 			}
 		}
-		// 两个深链按钮下方都要有纯文本 URL（HTML 版）
-		for _, url := range []string{siteBase + "/web/console/security", siteBase + "/web/console/sessions"} {
-			if n := strings.Count(htmlBody, url); n < 2 {
-				t.Errorf("app=%q 的 %q 应出现 ≥2 次（按钮 + 纯文本 URL），得到 %d 次", app, url, n)
+		// 「不是我」警示句：HTML 版中间嵌内联文字链（主句+链分开断言），纯文本版保持整句
+		if !strings.Contains(htmlBody, "如果这不是你本人的操作，请<a href=\""+siteBase+"/web/console/security") ||
+			!strings.Contains(htmlBody, "text-decoration:underline;\">立即修改密码并退出其它设备</a>。") {
+			t.Errorf("app=%q HTML 缺内联警示链形态", app)
+		}
+		if !strings.Contains(text, "如果这不是你本人的操作，请立即修改密码并退出其它设备。") {
+			t.Errorf("app=%q 纯文本缺完整警示句", app)
+		}
+		// 深链计数按形态分列：sessions 走主按钮（VML 兜底 href + 锚点 href = 2），
+		// security 是正文内联文字链（仅锚点 href = 1）——任何 ≥+1 都意味着又挂了裸 URL 显示文本；
+		// 纯文本部件两枚完整 URL 都必须在（降级 URL 的家）。
+		for url, want := range map[string]int{
+			siteBase + "/web/console/security":  1,
+			siteBase + "/web/console/sessions": 2,
+		} {
+			if n := strings.Count(htmlBody, url); n != want {
+				t.Errorf("app=%q 的 %q 在 HTML 应恰好 %d 次，得到 %d 次", app, url, want, n)
+			}
+			if !strings.Contains(text, url) {
+				t.Errorf("app=%q 纯文本部件缺 %q（降级 URL 的家）", app, url)
 			}
 		}
 	}

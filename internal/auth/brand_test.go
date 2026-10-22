@@ -132,7 +132,7 @@ func TestBrandEmailLogoURL(t *testing.T) {
 }
 
 // 新外壳的结构性钉子（每品牌抽查验证码信 + 新登录提醒）：HTML 与纯文本并存、
-// 按钮 bulletproof（VML 兜底 + 按钮下方纯文本 URL）、不出现纯白底/纯黑字、
+// 按钮 bulletproof（VML 兜底、指标在 td、HTML 不挂裸 URL——降级 URL 归 text 部件）、不出现纯白底/纯黑字、
 // 没有模板渲染错误标记。
 func TestEmailShellStructure(t *testing.T) {
 	for _, app := range []string{"calorie-diary", "expense-diary", ""} {
