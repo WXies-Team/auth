@@ -105,7 +105,7 @@ the same PR**—a stale guide ships wrong integrations.
     polling; successful
    `reauthThen` / `reauthed` / admin-gate ops refresh via `slideReauth`, failures never do;
    `POST /web/reauth` also refreshes). UI auto-retries on the fixed 401
-   `需要重新验证身份，请输入密码或验证码`.
+   `需要重新验证身份`.
 9. **Roles**: `user | admin | super`. Effective app-admin = role `admin` + ≥1 `admin_scopes`
    row (grant implicit-promotes to admin; revoke-to-zero demotes to `user`). Only the root su
    (constant `RootSuperEmail = horatioxs@outlook.com`, resolved to a **uid** at startup so

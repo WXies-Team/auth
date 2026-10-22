@@ -42,8 +42,10 @@ const (
 )
 
 // MsgReauthRequired 是 reauth 窗过期时的固定文案。前端据此弹「重新验证」框
-//（ApiError 只有 message 一个字段，不能为了机器可读去改它的形状——老客户端在读它）。
-const MsgReauthRequired = "需要重新验证身份，请输入密码或验证码"
+//（ApiError 只有 message 一个字段，不能为了机器可读去改它的形状——老客户端在读它；
+// 前端匹配「重新验证」四字）。文案不再枚举验证方式：弹框按账号能力出方案
+//（Passkey / 两步验证码，无 MFA 才出密码框），方式在框内自解释。
+const MsgReauthRequired = "需要重新验证身份"
 
 // WebSession 是一次 Web 登录签发的凭据：两串都只以 sha256 落库，明文只在这一刻
 // 回给调用方（cookie 与 /web/session 的 csrfToken）。
