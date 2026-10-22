@@ -84,6 +84,13 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 			renderInvitePage(svc, w, r.URL.Query().Get("token"), "")
 		}))))
 
+	// 项目注册表 JSON（SPA 的 slug→展示名唯一出口，与页面内联的 AppsJSON 同值）。
+	// 公开只读：展示名不是秘密（邀请页/邮件同款对外）；回执走 writeJSON（no-store）。
+	mux.Handle("GET /web/registry", withLogging(limitN("web-registry", 30,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, ui.Registry())
+		}))))
+
 	// /web 根：有会话进控制台，没有进登录页；/web/ 子树的未匹配路径也归到这里
 	mux.Handle("GET /web", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if webSessionOK(svc, r) {

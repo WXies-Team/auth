@@ -282,6 +282,22 @@ func knownAppsJSON() template.JS {
 	return template.JS(b) //nolint:gosec // 自有静态数据，无用户输入
 }
 
+// RegistryApp 是 GET /web/registry 回执的一条记录。
+type RegistryApp struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// Registry 是 SPA（Kotlin/Wasm 前端）的 slug→展示名清单：与注进页面的 AppsJSON
+// 同一份值、同一份定序——注册表仍然只有 knownApps 一份。
+func Registry() []RegistryApp {
+	out := make([]RegistryApp, 0, len(knownApps))
+	for _, a := range knownApps {
+		out = append(out, RegistryApp{Key: a.key, Label: a.label})
+	}
+	return out
+}
+
 // SwitchApps 生成项目切换器的选项：
 //
 //	super     「全部」+ 两 app（currentApp 空 = 「全部」高亮）；

@@ -926,6 +926,22 @@ func staleReauth(t *testing.T, e *routeEnv) {
 	}
 }
 
+// GET /web/registry 是 SPA 的项目注册表出口：公开只读，回执与页面内联的 AppsJSON
+// 同一份值（两个项目齐全、shape 是 [{key,label}]）。
+func TestWebRegistryRoute(t *testing.T) {
+	e := newRouteEnv(t)
+	rec := e.do(t, "GET", "/web/registry", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("注册表应 200，得到 %d", rec.Code)
+	}
+	got := rec.Body.String()
+	for _, want := range []string{`"key":"calorie-diary"`, `"key":"expense-diary"`, `"label":`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("注册表缺 %s，得到 %s", want, got)
+		}
+	}
+}
+
 // 顶栏「管理后台」入口按角色在**模板层**显隐：管理员的概览页 HTML 里有入口与
 // 账号胶囊（邮箱 + 首字母占位），普通用户的 HTML 里连按钮都没有——不是前端藏一下。
 // W2：入口指向按角色分流——super 指用户页（平台落地），app-admin 指会话总览
