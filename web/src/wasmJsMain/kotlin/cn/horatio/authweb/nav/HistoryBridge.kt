@@ -31,7 +31,7 @@ object HistoryBridge {
         is Route.AdminUserSessions -> "/web/admin/sessions/${route.uid}"
         Route.AdminAudit -> "/web/admin/audit"
         Route.AdminConfig -> "/web/admin/config"
-        Route.AdminAi -> "/web/admin/ai"
+        Route.AdminAi -> "/web/admin/ai-usage"
     }
 
     /** URL（pathname + search）→ 路由；不认识的路径回 null（调用方留在原栈）。 */
@@ -56,7 +56,7 @@ object HistoryBridge {
                 pathname.substringAfterLast("/").toLongOrNull()?.let { Route.AdminUserSessions(it) }
             pathname == "/web/admin/audit" -> Route.AdminAudit
             pathname == "/web/admin/config" -> Route.AdminConfig
-            pathname == "/web/admin/ai" -> Route.AdminAi
+            pathname == "/web/admin/ai-usage" -> Route.AdminAi
             else -> null
         }
     }

@@ -567,3 +567,24 @@ func AdminNav(active string, isSuper bool) []NavItem {
 		{Href: "/web/admin/ai-usage", Label: "AI 用量", Icon: "chart-column", Active: active == "admin-ai"},
 	}
 }
+
+// SPAIndex 渲染 Kotlin/Wasm 前端（web/ 工程）的宿主页。全部同源零外链：脚本走
+// /wasm/authweb.js，由它拉起 ComposeViewport 画整页；title 是各路由的固定常量，
+// 无用户输入，直接拼接安全。背景色先给画布色，避免 wasm 启动前白闪。
+func SPAIndex(title string) string {
+	return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#3482FF">
+<title>` + title + ` · Auth</title>
+<style>html,body{margin:0;padding:0;height:100%;background:#F7F7F7;color-scheme:light dark}@media(prefers-color-scheme:dark){html,body{background:#000}}</style>
+</head>
+<body>
+<script src="/wasm/authweb.js"></script>
+</body>
+</html>
+`
+}

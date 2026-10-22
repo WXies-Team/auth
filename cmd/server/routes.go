@@ -304,6 +304,7 @@ func registerRoutes(mux *http.ServeMux, authSvc *auth.Service, cfg *config.Store
 	// 全部挂在 /web、/webauthn、/api/{totp,passkeys}、/admin 新路径下：
 	// 老端点的请求/响应形状一个字节不动，已发布的日记 App 不受影响。
 	registerStaticRoutes(mux)
+	registerWasmRoutes(mux)
 	registerPageRoutes(mux, authSvc)
 	registerWebRoutes(mux, authSvc)
 	registerAdminRoutes(mux, authSvc)

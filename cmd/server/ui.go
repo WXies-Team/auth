@@ -323,3 +323,19 @@ func renderInviteError(w http.ResponseWriter, message string) {
 		slog.Error("渲染接受邀请错误页失败", "err", err)
 	}
 }
+
+// registerWasmRoutes 挂 Kotlin/Wasm 前端产物（/wasm/*，全部内嵌进二进制）。
+// authweb.js no-cache（内容常换、名字不变）；其余是内容哈希名，immutable 长缓存。
+func registerWasmRoutes(mux *http.ServeMux) {
+	mux.Handle("GET /wasm/{name...}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ctype, cache, ok := ui.WasmAsset(r.PathValue("name"))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", ctype)
+		w.Header().Set("Cache-Control", cache)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write(data)
+	}))
+}

@@ -37,6 +37,15 @@ jobs:
         env:
           HOME: ${{ github.workspace }}/../go-home
 
+      # wasm 前端（web/ 工程）与日记 App 同工具链；编译门禁与 Go 并列。
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Web (Kotlin/Wasm) Compile
+        run: cd web && ./gradlew compileKotlinWasmJs --console=plain
+
       - name: Build & Test
         env:
           HOME: ${{ github.workspace }}/../go-home
