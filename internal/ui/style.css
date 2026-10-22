@@ -267,7 +267,7 @@ p.hint { margin: 6px 0; }
 .row.between { justify-content: space-between; }
 /* .grow 在 .item 之外也要成立（W8①）：搜索行的 label.field.grow 过去没有规则，
    输入框按内容宽缩成一小截、和右侧按钮挤在一起——这里给它统一的 flex 伸展
-  （.item/.session-row 的同名规则特异性更高，220px/200px 基准不受影响）。 */
+  （.item 的同名规则特异性更高，220px 基准不受影响）。 */
 .grow { flex: 1 1 auto; min-width: 0; }
 .stack { display: grid; gap: 12px; }
 .grid2 { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
@@ -464,8 +464,8 @@ input:disabled { opacity: .6; }
 @media (hover: hover) {
   .item:hover { transform: translateY(-2px); box-shadow: var(--shadow-1), inset 0 0 0 1px var(--card-line); }
 }
-/* 退场中撤抬升阴影（旧行为 box-shadow:none）；.session-row 共用本规则且本来无边，
-   不给它补环——有环的只有 .item（见下一行，特异性压过 .item.current:hover）。 */
+/* 退场中撤抬升阴影（旧行为 box-shadow:none）；会话行现与 .item 同体
+   （.item session-row），退场环由下一行的 .item.leaving:hover 接管。 */
 .leaving:hover { opacity: 0; transform: translateY(-4px); box-shadow: none; }
 .item .grow { flex: 1 1 220px; min-width: 0; }
 .item .title { font-weight: 500; }
@@ -565,22 +565,10 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 /* 「使用恢复码」次级切换链接：幽灵小按钮形态，不与主输入抢视觉 */
 .toggle-recovery { align-self: start; margin: -6px 0 10px; padding-left: 0; }
 
-/* ---- 会话页：设备分组卡（外层设备 + 内层会话行）---- */
-.device-group { flex-wrap: wrap; align-items: flex-start; padding-top: 16px; }
-.device-group > .btn { margin-left: auto; }
-.device-group .sub-list {
-  flex: 1 1 100%; display: grid; gap: 8px; margin-top: 10px;
-  padding-top: 10px; border-top: 1px dashed var(--line);
-}
-.session-row {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 8px 10px; border-radius: var(--radius-ctl);
-  transition: background-color var(--dur-1) var(--ease), opacity var(--dur-2) var(--ease),
-              transform var(--dur-2) var(--ease);
-}
+/* ---- 会话页：扁平会话行（.item 外壳 + session-row 行内视觉；一行=一条会话，
+   主标题=设备名，次行=项目 · 最近活跃）---- */
 .session-row:hover { background: var(--canvas); }
 .session-row.current { background: var(--primary-soft); }
-.session-row .grow { flex: 1 1 200px; min-width: 0; }
 /* 行尾「详情」展开的次级信息（首次登录 + IP）：占满一行换到行下；
    收起态由 .hidden（display:none !important）完全不占位，行高不变；
    展开进场走 app.js 的 swapIn（同一套 --ease / --dur-2 时长） */

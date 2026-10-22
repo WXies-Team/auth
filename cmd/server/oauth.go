@@ -117,7 +117,7 @@ func oauthConfirm(svc *auth.Service) http.HandlerFunc {
 			http.Redirect(w, r, "/web/login?tx="+url.QueryEscape(tx), http.StatusFound)
 			return
 		}
-		redirect, err := svc.OAuthDecide(wc.UID, tx, decision, sessMeta(r))
+		redirect, err := svc.OAuthDecide(wc.UID, tx, decision, webSessMeta(r))
 		if err != nil {
 			renderOAuthError(w, err, "无法完成授权")
 			return

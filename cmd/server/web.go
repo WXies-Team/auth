@@ -52,7 +52,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 	// ---- 登录（无登录态，只有 Origin 同源校验：此时没有可搭的 cookie 顺风车）----
 	mux.Handle("POST /web/login/password", withLogging(originGuard(limitN("web-login", 15,
 		jsonBody[protocol.WebLoginRequest](func(req *protocol.WebLoginRequest, w http.ResponseWriter, r *http.Request) {
-			res, err := svc.WebLoginPassword(req.Email, req.Password, sessMeta(r), req.App)
+			res, err := svc.WebLoginPassword(req.Email, req.Password, webSessMeta(r), req.App)
 			if err != nil {
 				writeResult(w, nil, err)
 				return
@@ -61,7 +61,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		})))))
 	mux.Handle("POST /web/login/email-code", withLogging(originGuard(limitN("web-login-code", 15,
 		jsonBody[protocol.WebLoginCodeRequest](func(req *protocol.WebLoginCodeRequest, w http.ResponseWriter, r *http.Request) {
-			res, err := svc.WebLoginEmailCode(req.Email, req.Code, sessMeta(r))
+			res, err := svc.WebLoginEmailCode(req.Email, req.Code, webSessMeta(r))
 			if err != nil {
 				writeResult(w, nil, err)
 				return
@@ -70,7 +70,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 		})))))
 	mux.Handle("POST /web/login/totp", withLogging(originGuard(limitN("web-login-totp", 15,
 		jsonBody[protocol.WebLoginTOTPRequest](func(req *protocol.WebLoginTOTPRequest, w http.ResponseWriter, r *http.Request) {
-			res, err := svc.WebLoginTOTP(req.LoginToken, req.Code, req.RecoveryCode, req.EmailCode, sessMeta(r))
+			res, err := svc.WebLoginTOTP(req.LoginToken, req.Code, req.RecoveryCode, req.EmailCode, webSessMeta(r))
 			if err != nil {
 				writeResult(w, nil, err)
 				return
@@ -115,7 +115,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 				return
 			}
 			token, password := r.PostFormValue("token"), r.PostFormValue("password")
-			res, err := svc.AcceptInvite(token, password, r.PostFormValue("nickname"), sessMeta(r))
+			res, err := svc.AcceptInvite(token, password, r.PostFormValue("nickname"), webSessMeta(r))
 			if err != nil {
 				// 业务打回就地重渲染：token 仍有效（密码不合规）→ 表单 + 字段下报错；
 				// token 已失效 → 同模板错误变体（renderInvitePage 内部分流）
@@ -227,7 +227,7 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 			}
 			// 建会话、签 JWT / 记凭证、审计都在业务层（WebPasskeyLogin）：
 			// 路由层只负责「请求 → 参数 → 回执」与 response 形态的归一。
-			res, err := svc.WebPasskeyLogin(req.CeremonyID, body, req.App, sessMeta(r))
+			res, err := svc.WebPasskeyLogin(req.CeremonyID, body, req.App, webSessMeta(r))
 			if err != nil {
 				writeResult(w, nil, err)
 				return

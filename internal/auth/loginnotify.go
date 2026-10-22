@@ -83,11 +83,15 @@ func (s *Service) notifyNewLoginDevice(uid, sid int64, email, app string, meta S
 		slog.Error("查活跃会话 UA 失败（跳过新设备提醒）", "uid", uid, "err", err)
 		return
 	}
-	if !isNewDevice(known, meta.UserAgent) {
+	// 指纹与设备名都按**存储串**算：库里 user_agent 带 CH 后缀（uaWithCH），
+	// 这里算的必须与 otherSessionFingerprints 读列现算的同一口径——否则带 CH 的
+	// 每次登录都对不上指纹，每次登录都发一封「新设备」提醒。
+	stored := meta.uaWithCH()
+	if !isNewDevice(known, stored) {
 		return
 	}
 	b := brandFor(app)
-	subject, htmlBody, text := loginNotifyEmail(b, shortDevice(meta.UserAgent), loginNotifyAppLabel(app), time.Now())
+	subject, htmlBody, text := loginNotifyEmail(b, shortDevice(stored), loginNotifyAppLabel(app), time.Now())
 	// 不接请求 ctx：发送器自带 15s 总超时，最坏也只是把这一次登录的收尾拖住
 	if err := s.mailer.Send(context.Background(), b.name, email, subject, htmlBody, text); err != nil {
 		slog.Error("发送新设备登录提醒失败", "uid", uid, "email", maskEmail(email), "err", err)

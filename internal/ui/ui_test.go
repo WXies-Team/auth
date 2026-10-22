@@ -118,6 +118,8 @@ func TestNarrowScreenShellReady(t *testing.T) {
 
 // 设备页：本设备会话行不可退出——退出按钮只在 it.current 为假时渲染（JS 源码级
 // 钉住，无 DOM 的单测拿不到渲染结果；服务端语义另由 TestSessionLifecycle 钉 current 标记）。
+// 列表口径是**扁平**：一行=一条会话，行主标题=设备名（同名设备并排，不做归并），
+// 分组渲染与组级批量退出已删干净。
 func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 	jsBytes, err := files.ReadFile("app.js")
 	if err != nil {
@@ -131,7 +133,7 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 		t.Error("本设备会话行应带「本设备」徽标")
 	}
 	// 会话 id 一律按字符串处理（雪花 id 的 JS 精度陷阱）：列表请求的回执是
-	// {sessions:[...]}；session 尾号短标识已退役，行改为「项目名 · 最近活跃」
+	// {sessions:[...]}；行结构 = 设备名主标题 + 「项目名 · 最近活跃」次行
 	// + 行尾「详情」展开（首次登录时间与 IP）
 	if !strings.Contains(js, "res.sessions || []") {
 		t.Error("会话列表应从 {sessions:[...]} 回执取数组")
@@ -140,12 +142,13 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 		t.Error("session 尾号短标识已退役，app.js 不该再出现 sessTag")
 	}
 	for _, want := range []string{
+		`<span class="title">${esc(it.device)}</span>`,
 		`· 最近活跃 ${esc(relTime(it.lastSeenAt))}`,
 		`data-act="more"`,
 		`<div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>`,
 	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("会话行应包含 %s（项目名 · 最近活跃 + 详情展开）", want)
+			t.Errorf("会话行应包含 %s（设备名主标题 + 项目名 · 最近活跃 + 详情展开）", want)
 		}
 	}
 	// 页首 hint 钉住「最近活跃」口径（用户问得最多的一句）
@@ -153,12 +156,40 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读 sessions.html: %v", err)
 	}
-	if !strings.Contains(string(page), "最近活跃指该设备最后与服务器通信的时间。") {
+	pageStr := string(page)
+	if !strings.Contains(pageStr, "最近活跃指该设备最后与服务器通信的时间。") {
 		t.Error("sessions.html 页首应有「最近活跃」口径说明")
 	}
-	// 按设备分组 + 组级批量退出走 revoke-many
-	if !strings.Contains(js, "/api/sessions/revoke-many") {
-		t.Error("设备组级退出应调 POST /api/sessions/revoke-many")
+	// 分组定案已否（同名不同设备被归并=歧义）：分组渲染、组级踢按钮、
+	// revoke-many 的组级调用一个字节不留，模板说明也不许再提「分组」
+	for _, gone := range []string{"device-group", "group-kick", "/api/sessions/revoke-many"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("会话页已扁平化，app.js 不该再出现 %q", gone)
+		}
+	}
+	if strings.Contains(pageStr, "分组") {
+		t.Error("sessions.html 不该再有「按设备分组」的说明（列表已扁平化）")
+	}
+}
+
+// UA Client Hints 的 opt-in：Render 是全部页面（登录页/授权页/邀请页/控制台页）
+// 的响应头收口，浏览器见到 Accept-CH 后才会在本站后续请求带上高熵的
+// Sec-CH-UA-Model（机型），登录建会话时并进设备名（internal/auth 的 uaWithCH）。
+func TestRenderOptsIntoClientHints(t *testing.T) {
+	rec := httptest.NewRecorder()
+	if err := Render(rec, "login", Data{Title: "登录", Minimal: true}); err != nil {
+		t.Fatalf("渲染登录页: %v", err)
+	}
+	if got := rec.Header().Get("Accept-CH"); got != "Sec-CH-UA-Platform, Sec-CH-UA-Model" {
+		t.Errorf("登录页响应应带 Accept-CH: Sec-CH-UA-Platform, Sec-CH-UA-Model，得到 %q", got)
+	}
+	// 控制台页同一收口（不只登录页，所有经 Render 的页面都带）
+	rec2 := httptest.NewRecorder()
+	if err := Render(rec2, "console", Data{Title: "概览", Email: "u@example.com"}); err != nil {
+		t.Fatalf("渲染概览页: %v", err)
+	}
+	if got := rec2.Header().Get("Accept-CH"); got != "Sec-CH-UA-Platform, Sec-CH-UA-Model" {
+		t.Errorf("概览页响应也应带 Accept-CH，得到 %q", got)
 	}
 }
 

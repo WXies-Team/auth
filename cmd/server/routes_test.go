@@ -1124,3 +1124,65 @@ func TestReauthWindowSlidesOnSensitiveOps(t *testing.T) {
 		t.Errorf("GET 读操作不该滑动 reauth_at，得到 %v 前", age)
 	}
 }
+
+// UA Client Hints 的建会话链（真库）：web 登录请求带 Sec-CH-UA-Platform/-Model 时，
+// sessions.user_agent 落 `原UA + " | CH:<platform>;<model>"` 后缀、设备名（快照列与
+// ListSessions 现算同源）出「Android · Pixel 5」；/auth/* 的 App 端点即使收到同款头
+// 也不采集（走 sessMeta），App UA 一字节不变。
+func TestWebLoginStoresClientHintSuffix(t *testing.T) {
+	const chUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+	drainLoginBucket()
+	t.Cleanup(drainLoginBucket)
+	e := newRouteEnv(t)
+
+	// web 流程：CH 两头随请求带 → 并进 user_agent 存储串
+	uid := seedUser(t, e, "ch-web@example.com", "secret123", "user")
+	rec := e.do(t, "POST", "/web/login/password",
+		`{"email":"ch-web@example.com","password":"secret123"}`, func(r *http.Request) {
+			fromIP("198.51.100.40")(r)
+			r.Header.Set("User-Agent", chUA)
+			r.Header.Set("Sec-CH-UA-Platform", `"Android"`)
+			r.Header.Set("Sec-CH-UA-Model", `"Pixel 5"`)
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("web 密码登录应 200，得到 %d（%s）", rec.Code, rec.Body.String())
+	}
+	var stored string
+	if err := e.pool.QueryRow(
+		"SELECT user_agent FROM sessions WHERE user_id = ? AND app = 'web' ORDER BY id DESC LIMIT 1",
+		uid).Scan(&stored); err != nil {
+		t.Fatalf("读 web 会话行: %v", err)
+	}
+	if want := chUA + " | CH:Android;Pixel 5"; stored != want {
+		t.Errorf("user_agent 应并入 CH 后缀 %q，得到 %q", want, stored)
+	}
+	items, err := e.svc.ListSessions(uid, 0, nil)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("取设备列表: %v（%d 行）", err, len(items))
+	}
+	if items[0].Device != "Android · Pixel 5" {
+		t.Errorf("设备名应按 CH 后缀现算成 %q，得到 %q", "Android · Pixel 5", items[0].Device)
+	}
+
+	// App 流程：/auth/login 走 sessMeta，同款头也不采集（App UA 一字节不变）
+	appUID := seedUser(t, e, "ch-app@example.com", "secret123", "user")
+	appRec := e.do(t, "POST", "/auth/login",
+		`{"email":"ch-app@example.com","password":"secret123","app":"calorie-diary"}`, func(r *http.Request) {
+			fromIP("198.51.100.41")(r)
+			r.Header.Set("User-Agent", chUA)
+			r.Header.Set("Sec-CH-UA-Platform", `"Android"`)
+			r.Header.Set("Sec-CH-UA-Model", `"Pixel 5"`)
+		})
+	if appRec.Code != http.StatusOK {
+		t.Fatalf("App 登录应 200，得到 %d（%s）", appRec.Code, appRec.Body.String())
+	}
+	var appUA string
+	if err := e.pool.QueryRow(
+		"SELECT user_agent FROM sessions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+		appUID).Scan(&appUA); err != nil {
+		t.Fatalf("读 App 会话行: %v", err)
+	}
+	if appUA != chUA {
+		t.Errorf("App 端点不该采集 CH（UA 应原样），得到 %q", appUA)
+	}
+}

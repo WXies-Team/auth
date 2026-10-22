@@ -803,7 +803,7 @@ async function initConsole() {
   });
 }
 
-/* ---------- 登录会话（按设备分组） ---------- */
+/* ---------- 登录会话（扁平列表：一行=一条会话，行主标题=设备名） ---------- */
 /* 设备类型图标（lucide 同款路径，内联进 app.js 是因为列表行由 JS 拼）：
    按服务端 UA 解析出的设备标签映射——移动系统出 smartphone、桌面系统出 laptop、
    认不出的（脚本/残缺 UA）退回通用设备图标，不猜。 */
@@ -821,31 +821,16 @@ function deviceIcon(device) {
   return DEVICE_ICONS.device;
 }
 
-/* 会话行：项目名 + 最近活跃（相对时间），行尾「详情」展开首次登录时间与 IP。
-   不再显示 session 尾号短标识——行内分组已带设备名，尾号对用户没有信息量。 */
+/* 会话行：主标题=设备名（同名设备并排各占一行、不做归并——同名完全可能是
+   两台设备，Google 官方文档自己都警告过按名归并的歧义），次行=项目名 + 最近
+   活跃（相对时间）+「本设备」徽标，行尾「详情」展开首次登录时间与 IP。
+   退出逐行（GitHub/Google 同口径），没有组级批量退出——无分组即无组概念。 */
 
 function initSessions() {
   const list = $('#session-list');
   if (!list) return;
   let rows = [];
-  let pending = null;   // {mode:'one'|'many'|'others', ids:[], label, count}
-
-  /* 按设备名分组：本设备组置顶；组内按最近活跃倒序 */
-  function groups() {
-    const map = new Map();
-    rows.forEach(r => {
-      const key = r.device || '未知设备';
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(r);
-    });
-    const out = [];
-    map.forEach((items, device) => {
-      items.sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0));
-      out.push({ device, items, current: items.some(i => i.current) });
-    });
-    out.sort((a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0));
-    return out;
-  }
+  let pending = null;   // {mode:'one'|'others', ids:[], label, count}
 
   async function load() {
     try {
@@ -861,65 +846,41 @@ function initSessions() {
       return;
     }
     list.innerHTML = '';
-    groups().forEach(g => {
-      const others = g.items.filter(i => !i.current);
+    // 服务端已按最近活跃倒序（ListSessions 的 ORDER BY last_seen_at DESC），直接铺平
+    rows.forEach(it => {
       const el = node(`
-        <div class="item device-group${g.current ? ' current' : ''}" data-device="${esc(g.device)}">
-          <span class="ico-wrap">${deviceIcon(g.device)}</span>
+        <div class="item session-row${it.current ? ' current' : ''}" data-id="${esc(it.id)}">
+          <span class="ico-wrap">${deviceIcon(it.device)}</span>
           <span class="grow">
-            <span class="title">${esc(g.device)}</span>
-            <span class="badge">${g.items.length} 条会话</span>
-            ${g.current ? '<span class="badge on">本设备</span>' : ''}
+            <span class="title">${esc(it.device)}</span>
+            <br><span class="meta">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))}</span>
+            ${it.current ? '<span class="badge on">本设备</span>' : ''}
           </span>
-          ${others.length ? '<button type="button" class="btn small danger" data-act="group-kick">退出该设备全部会话</button>' : ''}
-          <div class="sub-list">
-            ${g.items.map(it => `
-              <div class="session-row${it.current ? ' current' : ''}" data-id="${esc(it.id)}">
-                <span class="grow">
-                  <span class="title">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))}</span>
-                  ${it.current ? '<span class="badge on">本设备</span>' : ''}
-                </span>
-                <button type="button" class="btn small ghost" data-act="more" aria-expanded="false">详情</button>
-                ${it.current ? '' : '<button type="button" class="btn small danger">退出</button>'}
-                <div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>
-              </div>`).join('')}
-          </div>
+          <button type="button" class="btn small ghost" data-act="more" aria-expanded="false">详情</button>
+          ${it.current ? '' : '<button type="button" class="btn small danger">退出</button>'}
+          <div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>
         </div>`);
-      const groupKick = el.querySelector('[data-act=group-kick]');
-      if (groupKick) {
-        groupKick.addEventListener('click', () => {
-          pending = {
-            mode: 'many', ids: others.map(i => String(i.id)),
-            label: g.device, count: others.length,
-          };
-          $('#kick-title').textContent = '退出该设备全部会话';
-          $('#kick-desc').textContent = `将退出「${g.device}」上的 ${others.length} 条会话，该设备下次请求时会退出登录。`;
-          $('#kick-ok').textContent = '全部退出';
-          openDialog($('#kick-dialog'), '#kick-cancel');
-        });
-      }
-      $$('.session-row', el).forEach(row => {
-        const it = g.items.find(i => String(i.id) === row.dataset.id);
-        // 「详情」展开首次登录时间与 IP（GitHub See-more 式）：收起态 .hidden 不占
-        // 行高；展开进场复用既有 swapIn（reduced-motion 自动跳过，只换显示状态）
-        const more = row.querySelector('[data-act=more]');
-        more.addEventListener('click', () => {
-          const detail = row.querySelector('.sess-more');
-          const collapsed = detail.classList.toggle('hidden');
-          more.setAttribute('aria-expanded', String(!collapsed));
-          more.textContent = collapsed ? '详情' : '收起';
-          if (!collapsed) swapIn(detail);
-        });
-        const kick = row.querySelector('button.danger');
-        if (!kick) return;
+      // 「详情」展开首次登录时间与 IP（GitHub See-more 式）：收起态 .hidden 不占
+      // 行高；展开进场复用既有 swapIn（reduced-motion 自动跳过，只换显示状态）
+      const more = el.querySelector('[data-act=more]');
+      more.addEventListener('click', () => {
+        const detail = el.querySelector('.sess-more');
+        const collapsed = detail.classList.toggle('hidden');
+        more.setAttribute('aria-expanded', String(!collapsed));
+        more.textContent = collapsed ? '详情' : '收起';
+        if (!collapsed) swapIn(detail);
+      });
+      const kick = el.querySelector('button.danger');
+      if (kick) {
         kick.addEventListener('click', () => {
-          pending = { mode: 'one', ids: [row.dataset.id], label: it ? appLabel(it.app) : '', count: 1 };
+          // 确认弹窗点名设备与项目：一行=一条会话，两者就是这条会话的全部身份
+          pending = { mode: 'one', ids: [el.dataset.id], label: it.device, count: 1 };
           $('#kick-title').textContent = '退出这条会话';
-          $('#kick-desc').textContent = `将退出「${g.device}」上的「${pending.label}」会话，它下次请求时会退出登录。`;
+          $('#kick-desc').textContent = `将退出「${it.device}」上的「${appLabel(it.app)}」会话，它下次请求时会退出登录。`;
           $('#kick-ok').textContent = '退出会话';
           openDialog($('#kick-dialog'), '#kick-cancel');
         });
-      });
+      }
       list.appendChild(el);
     });
   }
@@ -947,13 +908,6 @@ function initSessions() {
         toast('已退出该会话');
         // 行先淡出下沉，播完再整表刷新——视觉上是「这条走了」而不是突然消失
         fadeOutRow(list.querySelector(`.session-row[data-id="${pending.ids[0]}"]`), load);
-      } else if (pending.mode === 'many') {
-        await api('/api/sessions/revoke-many', { method: 'POST', body: { ids: pending.ids } });
-        closeDialog(dlg);
-        toast(`已退出「${pending.label}」的 ${pending.count} 条会话`);
-        // 设备名可能带引号，不能拼进 selector——按 data 属性逐个找元素引用
-        const group = $$('#session-list .device-group').find(el => el.dataset.device === pending.label);
-        fadeOutRow(group, load);
       } else {
         // 服务端强制 reauth（2 小时强认证窗 + 敏感操作滑动续期），401 会自动弹「重新验证」框再重试
         await api('/api/sessions/revoke-others', { method: 'POST', body: {} });

@@ -86,11 +86,12 @@ func (s *Service) createWebSessionOn(ex execer, userID int64, meta SessionMeta) 
 	}
 	now := time.Now()
 	sid := s.ids.Generate().Int64()
+	ua := meta.uaWithCH() // web 登录采到 CH 就并进后缀（与 createSessionOn 同一口径）
 	if _, err := ex.ExecContext(context.Background(),
 		`INSERT INTO sessions (id, user_id, app, device, ip, user_agent, created_at, last_seen_at, web_token_hash, web_csrf_hash)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		sid, userID, webAppLabel, truncateRunes(shortDevice(meta.UserAgent), 191),
-		meta.IP, truncateRunes(meta.UserAgent, 512), now.UnixMilli(), now.UnixMilli(),
+		sid, userID, webAppLabel, truncateRunes(shortDevice(ua), 191),
+		meta.IP, truncateRunes(ua, 512), now.UnixMilli(), now.UnixMilli(),
 		sha256Hex(token), sha256Hex(csrf)); err != nil {
 		return nil, fmt.Errorf("建 web 会话: %w", err)
 	}

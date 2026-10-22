@@ -561,6 +561,20 @@ func sessMeta(r *http.Request) auth.SessionMeta {
 	return auth.SessionMeta{IP: clientIP(r), UserAgent: r.UserAgent()}
 }
 
+// webSessMeta 在 sessMeta 之上再取 UA Client Hints 两头：Sec-CH-UA-Platform
+//（低熵，默认随请求带）与 Sec-CH-UA-Model（高熵，要 /web 页面响应先带过
+// Accept-CH——见 internal/ui.Render——浏览器才自动带上；Firefox/Safari 不支持，
+// 取不到就是空串，存储串不加后缀，设备名回退 UA 解析，零回归）。
+//
+// **只在 web 登录路用**（/web/login/*、/webauthn/login/finish、/web/invite、
+// OAuth 确认）：App 端点（/auth/*）与审计照走 sessMeta，App UA 一个字节不受影响。
+func webSessMeta(r *http.Request) auth.SessionMeta {
+	m := sessMeta(r)
+	m.CHPlatform = r.Header.Get("Sec-CH-UA-Platform")
+	m.CHModel = r.Header.Get("Sec-CH-UA-Model")
+	return m
+}
+
 // loopbackOnly 只放行环回与受信内网来源的请求，其余 403。
 //
 // 内部端点（/internal/*）不该经 nginx 暴露：它们凭一根共享 bearer 就能用、

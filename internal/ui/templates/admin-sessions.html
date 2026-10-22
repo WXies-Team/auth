@@ -8,7 +8,10 @@
 
 <!-- 层级一：用户列表 -->
 <div id="sess-users-view">
-  <form class="row" id="sess-user-search-form" role="search">
+  <!-- 搜索行自带 16px 下边距（站内 --gap 节奏）：#sess-users-view 是普通块容器，
+       .content 网格的 gap 只作用于它的直接子项，延伸不进来——缺了它搜索行与
+       下方卡片黏连（2026-10-22 用户实报）。 -->
+  <form class="row" id="sess-user-search-form" role="search" style="margin:0 0 16px">
     <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
       <input type="text" id="sess-user-query" placeholder="按邮箱片段或 uid 搜索" autocomplete="off">
     </label>

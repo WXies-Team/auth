@@ -490,6 +490,12 @@ func Render(w http.ResponseWriter, name string, data Data) error {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	// UA Client Hints 采集的 opt-in（页面响应是唯一收口：登录页/授权页/邀请页
+	// 全走 Render，浏览器见到后才在本站后续请求自动带上高熵的 Sec-CH-UA-Model，
+	// 登录建会话时把机型并进设备名——见 internal/auth.SessionMeta/uaWithCH）。
+	// Platform 是低熵提示（默认就带），列在这里一并声明；Firefox/Safari 不支持
+	// Client Hints，头照收不误，取不到就回退 UA 解析（零回归）。
+	w.Header().Set("Accept-CH", "Sec-CH-UA-Platform, Sec-CH-UA-Model")
 	// Status 非零 = 以该状态码起头（必须在 Execute 写体之前，晚了头就作废）
 	if data.Status != 0 {
 		w.WriteHeader(data.Status)

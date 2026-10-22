@@ -163,7 +163,9 @@ func (s *Service) OAuthDecide(uid int64, tx, decision string, meta SessionMeta) 
 	s.oauthStore.putCode(code, &oauthCode{
 		UID: uid, App: e.App, RedirectURI: e.RedirectURI,
 		ClientID: e.ClientID, Challenge: e.Challenge,
-		IP: meta.IP, UA: meta.UserAgent, Exp: time.Now().Add(oauthCodeTTL),
+		// UA 按存储串口径并入 CH 后缀（uaWithCH）：token 兑换来自应用后端，
+		// Client Hints 只有浏览器确认这一刻的请求带着——此时不并，之后就没机会了。
+		IP: meta.IP, UA: meta.uaWithCH(), Exp: time.Now().Add(oauthCodeTTL),
 	})
 	return buildOAuthRedirect(e.RedirectURI, url.Values{"code": {code}, "state": {e.State}})
 }

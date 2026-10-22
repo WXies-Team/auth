@@ -15,9 +15,19 @@ import (
 
 // SessionMeta 是一次登录请求的来源信息：ip 进列表（限流口径同一个 clientIP），
 // User-Agent 用来解析设备标签。由路由层从 *http.Request 取，业务层不碰 HTTP。
+//
+// CHPlatform / CHModel 是 UA Client Hints 采到的浏览器平台与机型（请求头
+// Sec-CH-UA-Platform / Sec-CH-UA-Model）：**只有 web 登录路的路由层填值**
+//（cmd/server.webSessMeta），App 端点走 sessMeta 恒为空——建会话时并进
+// user_agent 存储串，审计仍只落 IP/UA 原文（audit.go 不读这两个字段）。
 type SessionMeta struct {
 	IP        string
 	UserAgent string
+	// CHPlatform 形如 "Android"（低熵提示，默认就随请求带）；CHModel 形如
+	// "Pixel 5"（高熵提示，要 /web 页面响应先带过 Accept-CH 才会带）。
+	// 两边都是**未清理的头原文**（含结构化头的成对引号），清理在 uaWithCH 里做。
+	CHPlatform string
+	CHModel    string
 }
 
 // sessionTouchInterval 是 last_seen_at 的回写节流：verify 是每个业务请求的必经点，
@@ -42,10 +52,11 @@ func (s *Service) createSession(userID int64, app string, meta SessionMeta) (int
 func (s *Service) createSessionOn(ex execer, userID int64, app string, meta SessionMeta) (int64, error) {
 	now := time.Now().UnixMilli()
 	sid := s.ids.Generate().Int64()
+	ua := meta.uaWithCH() // web 登录带 CH 就并进后缀；App 调用方无 CH，原样落库
 	if _, err := ex.ExecContext(context.Background(),
 		"INSERT INTO sessions (id, user_id, app, device, ip, user_agent, created_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?)",
-		sid, userID, app, truncateRunes(shortDevice(meta.UserAgent), 191),
-		meta.IP, truncateRunes(meta.UserAgent, 512), now, now); err != nil {
+		sid, userID, app, truncateRunes(shortDevice(ua), 191),
+		meta.IP, truncateRunes(ua, 512), now, now); err != nil {
 		return 0, fmt.Errorf("建登录会话: %w", err)
 	}
 	return sid, nil
@@ -255,24 +266,34 @@ func revokeUserSessions(ctx context.Context, ex execer, userID, keepSID int64, a
 	return nil
 }
 
-// shortDevice 把 User-Agent 压成**设备列表里显示的那一格**。三态定案：
+// shortDevice 把 User-Agent 压成**设备列表里显示的那一格**。四态定案：
 //
-//	① App 规范 UA（`calorie-diary/1.2.3 (Android; Pixel 8)`）→ 友好机型（Pixel 8）；
-//	② 浏览器 UA → 有机型出「系统 · 机型」（Android · Pixel 8），否则「浏览器 · 系统」；
-//	③ 认不出 → 「未知设备」。
+//	① UA 带 Client Hints 后缀且有机型 → 「平台 · 机型」（Android · Pixel 5，见 uaWithCH）；
+//	② App 规范 UA（`calorie-diary/1.2.3 (Android; Pixel 8)`）→ 友好机型（Pixel 8）；
+//	③ 浏览器 UA → 有机型出「系统 · 机型」（Android · Pixel 8），否则「浏览器 · 系统」；
+//	④ 认不出 → 「未知设备」。
 //
-// 第 ③ 条是本批收紧的：早先认不出就存 UA 原文，于是 Ktor/OkHttp 这类**库名 UA**
+// 第 ④ 条是本批收紧的：早先认不出就存 UA 原文，于是 Ktor/OkHttp 这类**库名 UA**
 // 被当成设备名显示（「ktor-client/2.0」根本不是一台设备）。原文不丢——完整 UA
-// 仍按 512 字截断落在 user_agent 列，排障时照查。
+//（含 CH 后缀）仍按 512 字截断落在 user_agent 列，排障时照查。
 //
 // 调用口径：**展示时现算**——ListSessions / AdminListSessions 读取时按 user_agent
 // 调它（存量行随规则升级自愈，device 列快照不参与展示）；插入时（createSessionOn /
 // websession）也调同一个函数落快照，新行两处天然一致。
 func shortDevice(ua string) string {
-	if strings.TrimSpace(ua) == "" {
+	base, chPlatform, chModel, chOK := splitCH(ua)
+	// ① UA-CH 机型优先：它是 UA 拿不到的真实机型（Chrome 缩水 UA 里机型已抹成 K）。
+	// 没采到机型（老行无后缀 / 桌面空 model / 残缺后缀）一律走既有解析，零回归。
+	if chOK && chModel != "" {
+		if chPlatform != "" {
+			return chPlatform + " · " + chModel
+		}
+		return chModel
+	}
+	if strings.TrimSpace(base) == "" {
 		return "未知设备"
 	}
-	if ok, osName, model := parseAppUA(ua); ok {
+	if ok, osName, model := parseAppUA(base); ok {
 		if model != "" {
 			return model
 		}
@@ -280,7 +301,7 @@ func shortDevice(ua string) string {
 			return osName
 		}
 	}
-	os, browser, model := classifyUA(ua)
+	os, browser, model := classifyUA(base)
 	switch {
 	case os != "" && model != "":
 		return os + " · " + model
@@ -293,6 +314,77 @@ func shortDevice(ua string) string {
 	default:
 		return "未知设备"
 	}
+}
+
+// ---- UA Client Hints 的存储与解析（web 登录采集的浏览器机型，见 SessionMeta 注释）----
+
+const (
+	// chSuffixMark 是 user_agent 里 Client Hints 后缀的标记：存储串恒为
+	// `原UA + " | CH:<platform>;<model>"`（uaWithCH 拼，splitCH 切）。
+	chSuffixMark = " | CH:"
+	// chValueMax 是单个 CH 值的 rune 上限：头是客户端可控输入，不设限等于让它
+	// 把 512 字的存储串整段挤占。
+	chValueMax = 64
+)
+
+// uaWithCH 把 Client Hints 并进 user_agent 的**存储串**。只有采到**机型**才拼后缀：
+// 平台段 UA 自带（classifyUA 已能解析），桌面浏览器的空 model（`Sec-CH-UA-Model: ""`）
+// 不留空后缀噪音。无 CH 时原样返回——App 调用方（/auth/*）与老行为一字节不变。
+//
+// 截断顺序要紧：base 先按 512-后缀长度截断再拼，保证后缀一定落进 512 字内
+//（先拼再截会把排在尾部的后缀切掉，机型信息白采）。
+func (m SessionMeta) uaWithCH() string {
+	model := sanitizeCHValue(m.CHModel)
+	if model == "" {
+		return m.UserAgent
+	}
+	suffix := chSuffixMark + sanitizeCHValue(m.CHPlatform) + ";" + model
+	if r := []rune(m.UserAgent); len(r) > 512-len([]rune(suffix)) {
+		m.UserAgent = string(r[:512-len([]rune(suffix))])
+	}
+	return m.UserAgent + suffix
+}
+
+// splitCH 把存储串切成「原 UA + platform + model」。后缀缺失、残缺（标记后没有
+// 分号、两段都空）都回 ok=false，base 里畸形标记一并剥掉——调用方走既有 UA 解析，
+// 老行 / 残缺行零回归。取**最后一段**标记：UA 原文即使被伪造进同款标记，真实后缀
+// 仍排在最后（uaWithCH 只追加在尾部）。
+func splitCH(ua string) (base, platform, model string, ok bool) {
+	i := strings.LastIndex(ua, chSuffixMark)
+	if i < 0 {
+		return ua, "", "", false
+	}
+	rest := ua[i+len(chSuffixMark):]
+	rawPlat, rawModel, hasSemi := strings.Cut(rest, ";")
+	platform, model = strings.TrimSpace(rawPlat), strings.TrimSpace(rawModel)
+	if !hasSemi || (platform == "" && model == "") {
+		return ua[:i], "", "", false
+	}
+	return ua[:i], platform, model, true
+}
+
+// sanitizeCHValue 清一个 Client Hints 头值：去首尾空白与结构化头的成对引号
+//（Sec-CH-UA-* 是 quoted-string：`"Pixel 5"`），剔除后缀的两个分隔符（| ;）与
+// 控制字符——分隔符留着会被 splitCH 当成后缀边界，等于把解析交给客户端摆布。
+// 空值保持空串（桌面 Chrome 的 `Sec-CH-UA-Model: ""` → 不拼后缀）。
+func sanitizeCHValue(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && strings.HasPrefix(v, `"`) && strings.HasSuffix(v, `"`) {
+		v = strings.TrimSpace(v[1 : len(v)-1])
+	}
+	v = strings.Map(func(r rune) rune {
+		switch {
+		case r == '|' || r == ';':
+			return -1
+		case r < 0x20 || r == 0x7f:
+			return -1
+		}
+		return r
+	}, v)
+	if r := []rune(v); len(r) > chValueMax {
+		v = string(r[:chValueMax])
+	}
+	return v
 }
 
 // parseAppUA 识别 App 上报的规范 User-Agent：`产品名/版本 (系统; 机型)`。

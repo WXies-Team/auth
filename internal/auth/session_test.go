@@ -60,6 +60,68 @@ func TestSessionDeviceLabel(t *testing.T) {
 	}
 }
 
+// UA Client Hints 后缀（web 登录采集的浏览器机型）：有后缀且有机型 → 「平台 · 机型」；
+// 无后缀（存量行 / App 行）、残缺后缀（标记后没分号、两段全空）一律剥掉标记走既有
+// 解析——零回归。缩水 UA（机型抹成 K）是 CH 机型真正补位的场景。
+func TestShortDeviceClientHintsSuffix(t *testing.T) {
+	reducedUA := "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+	cases := []struct{ ua, want string }{
+		// 有后缀：CH 机型优先——UA 里机型已缩水成 K，CH 是唯一真实机型
+		{reducedUA + " | CH:Android;Pixel 5", "Android · Pixel 5"},
+		// 机型在、平台缺省：只出机型
+		{reducedUA + " | CH:;Pixel 5", "Pixel 5"},
+		// 残缺后缀：没有分号 / 标记后全空 → 剥掉标记，走既有 UA 解析
+		{reducedUA + " | CH:Android", "Android · K"},
+		{reducedUA + " | CH:", "Android · K"},
+		{reducedUA + " | CH:;", "Android · K"},
+		// 无后缀：既有口径一字不变（老行、App 行）
+		{reducedUA, "Android · K"},
+		{"calorie-diary/1.2.3 (Android; Pixel 8)", "Pixel 8"},
+		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.6099.129",
+			"Edge · Windows"},
+		{"", "未知设备"},
+	}
+	for _, c := range cases {
+		if got := shortDevice(c.ua); got != c.want {
+			t.Errorf("shortDevice(%q) = %q，应为 %q", c.ua, got, c.want)
+		}
+	}
+}
+
+// uaWithCH 是存储串的拼接口径：无 CH / 空 model（桌面 Chrome 的 `Sec-CH-UA-Model:
+// ""`）不加后缀；头值是结构化 quoted-string，去引号且剔掉 | ; 分隔符与控制字符
+//（分隔符是解析边界，留着等于把 splitCH 交给客户端摆布）；超长 base 先按
+// 512-后缀长度截断再拼，后缀一定落进 512 字内。
+func TestSessionMetaUAWithCH(t *testing.T) {
+	ua := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	if got := (SessionMeta{UserAgent: ua}).uaWithCH(); got != ua {
+		t.Errorf("无 CH 不该加后缀，得到 %q", got)
+	}
+	if got := (SessionMeta{UserAgent: ua, CHPlatform: `"Windows"`, CHModel: `""`}).uaWithCH(); got != ua {
+		t.Errorf("空 model 不该加后缀，得到 %q", got)
+	}
+	if got, want := (SessionMeta{UserAgent: ua, CHPlatform: `"Android"`, CHModel: `"Pixel 5"`}).uaWithCH(),
+		ua+" | CH:Android;Pixel 5"; got != want {
+		t.Errorf("带 CH 的存储串应为 %q，得到 %q", want, got)
+	}
+	if got, want := (SessionMeta{UserAgent: ua, CHModel: "A|B;C\x00"}).uaWithCH(), ua+" | CH:;ABC"; got != want {
+		t.Errorf("CH 值里的分隔符/控制字符应被剔除，得到 %q", got)
+	}
+	// 超长 base：截断不许把尾部后缀切掉，且 base 段恰为 512-后缀长度
+	long := strings.Repeat("超", 600)
+	suffix := " | CH:Android;Pixel 5"
+	got := (SessionMeta{UserAgent: long, CHPlatform: `"Android"`, CHModel: `"Pixel 5"`}).uaWithCH()
+	if r := []rune(got); len(r) != 512 {
+		t.Errorf("存储串应含后缀恰为 512 字，得到 %d 字", len(r))
+	}
+	if !strings.HasSuffix(got, suffix) {
+		t.Errorf("截断不该把 CH 后缀切掉，串尾为 %q", got[len(got)-len(suffix):])
+	}
+	if base, _, _, _ := splitCH(got); base != string([]rune(long)[:512-len([]rune(suffix))]) {
+		t.Errorf("base 应恰截到 512-后缀长度，得到 %d 字", len([]rune(base)))
+	}
+}
+
 // sidStr 把 int64 的 sid 换成列表回执里的十进制字符串形态（本批起 SessionInfo.ID
 // 一律以字符串输出，避免 63 位雪花被浏览器 JSON.parse 抹圆）。
 func sidStr(id int64) string { return strconv.FormatInt(id, 10) }
