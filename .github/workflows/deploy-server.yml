@@ -36,6 +36,12 @@ jobs:
         env:
           HOME: ${{ github.workspace }}/../go-home
 
+      # wasm 前端（web/）需要 JDK 21：step 进程的 PATH 里没有 java，与 HOME 同款坑
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
       # 门禁 + 打包在同一条命令里：「测试没过」与「打了个坏包」一起被拦住
       - name: Test & Package
         env:
