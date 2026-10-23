@@ -2,7 +2,9 @@ package cn.horatio.authweb.shell
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -56,24 +58,33 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * 页签集随当前分区切换：控制台五项 / 管理后台六项（super）或四项（项目管理员）。
  */
 @Composable
-fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
-    val backStack = rememberNavBackStack<Route>(Route.Login)
+fun AppRoot() {
+    // 首帧就以 URL 路由起步（remember 只算一次）：若先落 Login 再由 LaunchedEffect
+    // 改栈，已登录深进后台页时 LoginScreen 会抢先把栈改成概览（父/子 effect 竞态）
+    val initialRoute = remember { HistoryBridge.currentFromLocation() ?: Route.Login }
+    val backStack = rememberNavBackStack(initialRoute)
     val navigator = remember { Navigator(backStack) }
     val nav = remember { NavController(navigator) }
     val current = backStack.lastOrNull() ?: Route.Login
     val backdrop = rememberAppBackdrop()
     val blurActive = backdrop != null && WebUiPrefs.enableBlur
 
-    // 启动接线：初始 URL → 路由（replaceState 对齐）+ popstate 订阅
+    // 启动接线：先装载会话（角色/能力全局可见，后台页直进也齐）+ 初始 URL → 路由
+    //（replaceState 对齐）+ popstate 订阅
     LaunchedEffect(Unit) {
-        val initial = HistoryBridge.currentFromLocation() ?: Route.Login
-        backStack.clear()
-        backStack.add(initial)
-        HistoryBridge.attach(navigator, initial)
+        runCatching { cn.horatio.authweb.data.SessionStore.refresh() }
+        HistoryBridge.attach(navigator, initialRoute)
     }
 
+    // 公开页（登录/邀请/授权/注销撤销）不渲染任何分区 chrome：无页签、无底栏、无 rail
+    val inPublic = current is Route.Login || current is Route.Invite ||
+        current is Route.Authorize || current is Route.DeleteCancel
     val inAdmin = current.toString().contains("Admin")
-    val tabs = if (inAdmin) AppTabs.admin(isSuperAdmin()) else AppTabs.console()
+    val tabs = when {
+        inPublic -> emptyList()
+        inAdmin -> AppTabs.admin(cn.horatio.authweb.data.SessionStore.isSuper)
+        else -> AppTabs.console()
+    }
     val selectedIndex = tabs.indexOfFirst { it.route::class == current::class }.coerceAtLeast(0)
 
     val wide = shouldShowSplitPane()
@@ -81,8 +92,9 @@ fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
     val navCornerRadius = rememberNavSystemCornerRadius()
 
     CompositionLocalProvider(LocalNav provides nav) {
-    Row(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
-        if (wide) {
+    Column(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
+    Row(Modifier.weight(1f).fillMaxWidth()) {
+        if (wide && tabs.isNotEmpty()) {
             val railState = rememberNavigationRailState(
                 initialValue = if (expandRail) NavigationRailValue.Expanded else NavigationRailValue.Collapsed,
             )
@@ -106,8 +118,6 @@ fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
                 .fillMaxHeight()
                 // 宽屏转场层不能画到 rail 上面
                 .then(if (wide) Modifier.clipToBounds() else Modifier)
-                // 窄屏给玻璃底栏让位（浮动式，内容不被推挤）
-                .then(if (!wide && tabs.isNotEmpty()) Modifier.padding(bottom = 88.dp) else Modifier),
         ) {
             NavDisplay(
                 backStack = backStack,
@@ -143,16 +153,18 @@ fun AppRoot(isSuperAdmin: () -> Boolean = { false }) {
                 SnackbarHost(LocalSnackbarHostState.current)
             }
             ReauthDialog()
-            if (!wide && tabs.isNotEmpty()) {
-                Box(Modifier.align(Alignment.BottomCenter)) {
-                    IosLiquidGlassNavigationBar(
-                        items = tabs.map { it.item },
-                        selectedIndex = selectedIndex,
-                        onItemClick = { nav.switchSection(tabs, it) },
-                        backdrop = backdrop,
-                        isBlurActive = blurActive,
-                    )
-                }
+        }
+        }
+        if (!wide && tabs.isNotEmpty()) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                IosLiquidGlassNavigationBar(
+                    items = tabs.map { it.item },
+                    selectedIndex = selectedIndex,
+                    onItemClick = { nav.switchSection(tabs, it) },
+                    backdrop = backdrop,
+                    isBlurActive = blurActive,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
     }

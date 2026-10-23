@@ -111,15 +111,14 @@ func registerWebRoutes(mux *http.ServeMux, svc *auth.Service) {
 			//（与 OAuth confirm 同款防膨口径：不给匿名端点塞 10MB 默认值的机会）
 			r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 			if err := r.ParseForm(); err != nil {
-				renderInviteError(w, "请求格式不正确，请从邀请邮件重新打开")
+				writeError(w, http.StatusBadRequest, "请求格式不正确，请从邀请邮件重新打开")
 				return
 			}
 			token, password := r.PostFormValue("token"), r.PostFormValue("password")
 			res, err := svc.AcceptInvite(token, password, r.PostFormValue("nickname"), webSessMeta(r))
 			if err != nil {
-				// 业务打回就地重渲染：token 仍有效（密码不合规）→ 表单 + 字段下报错；
-				// token 已失效 → 同模板错误变体（renderInvitePage 内部分流）
-				renderInvitePage(svc, w, token, errText(err))
+				// 业务打回（token 失效/密码不合规）：JSON 错误交 SPA 就地展示
+				writeResult(w, nil, err)
 				return
 			}
 			setWebCookies(w, res.Session)

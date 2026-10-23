@@ -181,12 +181,12 @@ func renderOAuthConfirm(svc *auth.Service, w http.ResponseWriter, tx string, uid
 		renderOAuthError(w, err, "无法继续授权")
 		return
 	}
-	if err := ui.Render(w, "authorize", ui.Data{
-		Title: "授权登录", Minimal: true,
-		OAuth: &ui.OAuthView{
-			Tx: view.Tx, App: view.App, AppName: view.AppName,
-			RedirectHost: view.RedirectHost, Email: view.Email,
-		},
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Accept-CH", ui.ClientHintsHeader)
+	if err := ui.AuthorizePage(w, ui.OAuthView{
+		Tx: view.Tx, AppName: view.AppName,
+		RedirectHost: view.RedirectHost, Email: view.Email,
 	}); err != nil {
 		slog.Error("渲染授权页失败", "err", err)
 	}
@@ -200,10 +200,10 @@ func renderOAuthError(w http.ResponseWriter, err error, title string) {
 	if errors.As(err, &he) {
 		status = he.Code
 	}
-	if rerr := ui.Render(w, "authorize", ui.Data{
-		Title: title, Minimal: true, Status: status,
-		OAuth: &ui.OAuthView{ErrorTitle: title, ErrorMessage: errText(err)},
-	}); rerr != nil {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	if rerr := ui.AuthorizePage(w, ui.OAuthView{ErrorTitle: title, ErrorMessage: errText(err)}); rerr != nil {
 		slog.Error("渲染授权错误页失败", "err", rerr)
 	}
 }

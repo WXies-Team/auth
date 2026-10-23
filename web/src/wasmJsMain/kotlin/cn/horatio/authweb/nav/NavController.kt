@@ -20,6 +20,11 @@ class NavController(private val navigator: Navigator) {
         if (navigator.backStackSize() > 1) window.history.back() else navigator.pop()
     }
 
+    /** 单路由替换整栈（登录成功收口：栈归一到目标页，不给「后退回登录页」留门）。 */
+    fun replaceAll(route: Route) {
+        HistoryBridge.replace(navigator, route)
+    }
+
     /** 分区页签切换：不叠历史条目（tab 不是「进入下一页」），直达即换顶。 */
     fun switchSection(tabs: List<cn.horatio.authweb.shell.TabSpec>, index: Int) {
         val target = tabs.getOrNull(index)?.route ?: return

@@ -90,7 +90,7 @@ fun LoginScreen() {
     // 单路由 replace，按规格退 push。
     LaunchedEffect(Unit) {
         if (runCatching { SessionStore.refresh() }.getOrNull() != null) {
-            nav.push(Route.Console)
+            nav.replaceAll(Route.Console)
         }
     }
 
@@ -136,7 +136,7 @@ fun LoginScreen() {
     fun goConsole() {
         scope.launch {
             runCatching { SessionStore.refresh() }
-            nav.push(Route.Console)
+            nav.replaceAll(Route.Console)
         }
     }
 

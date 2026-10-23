@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/WXies-Team/auth/internal/auth"
+	"github.com/WXies-Team/auth/internal/ui"
 	"github.com/WXies-Team/auth/internal/config"
 	"github.com/WXies-Team/auth/internal/db"
 	"golang.org/x/crypto/bcrypt"
@@ -251,17 +252,20 @@ func TestWebPageGates(t *testing.T) {
 		t.Fatalf("登录页应 200，得到 %d", rec.Code)
 	}
 	html := rec.Body.String()
-	for _, want := range []string{"pane-password", "pane-code", "pane-reset", ">Auth<", "跳到主要内容"} {
+	// M4 切流后页面壳 = SPA 宿主页：同源脚本、零外链、no-store + Client Hints opt-in
+	for _, want := range []string{"/wasm/authweb.js", "<title>登录 · Auth", "viewport-fit=cover"} {
 		if !strings.Contains(html, want) {
-			t.Errorf("登录页缺关键结构 %q", want)
+			t.Errorf("SPA 壳缺关键结构 %q", want)
 		}
 	}
-	// 零外链：页面里不该出现任何 http(s):// 引用（锚点、data URI 除外）
-	for _, line := range strings.Split(html, "\n") {
-		if strings.Contains(line, "https://") && !strings.Contains(line, "horatio.cn") &&
-			!strings.Contains(line, "data:") {
-			t.Errorf("页面出现外链: %s", strings.TrimSpace(line))
-		}
+	if strings.Contains(html, "https://") {
+		t.Error("SPA 壳出现外链")
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("页面壳应 no-store，得到 %q", cc)
+	}
+	if ch := rec.Header().Get("Accept-CH"); ch != ui.ClientHintsHeader {
+		t.Errorf("页面壳应带 Accept-CH opt-in，得到 %q", ch)
 	}
 	if rec := e.do(t, "GET", "/web/console", "", nil); rec.Code != http.StatusFound {
 		t.Errorf("未登录访问控制台应 302，得到 %d", rec.Code)
@@ -942,47 +946,39 @@ func TestWebRegistryRoute(t *testing.T) {
 	}
 }
 
-// 顶栏「管理后台」入口按角色在**模板层**显隐：管理员的概览页 HTML 里有入口与
-// 账号胶囊（邮箱 + 首字母占位），普通用户的 HTML 里连按钮都没有——不是前端藏一下。
-// W2：入口指向按角色分流——super 指用户页（平台落地），app-admin 指会话总览
-//（它的数据落地；用户页对它 302）。
+// 管理入口的页面门禁按角色分流（M4 SPA 切流后前端自渲染入口，服务端只剩门禁）：
+// admin/super 200 拿壳；普通用户 302 去概览；未登录 302 去登录页。
 func TestTopbarAdminEntryRendersByRole(t *testing.T) {
 	e := newRouteEnv(t)
 	seedUser(t, e, "topbar-admin@example.com", "secret123", "admin")
 	seedUser(t, e, "topbar-super@example.com", "secret123", "super")
 	seedUser(t, e, "topbar-user@example.com", "secret123", "user")
 
-	page := func(email string) string {
+	shellOf := func(email, path string) *httptest.ResponseRecorder {
 		drainLoginBucket()
 		sess, _ := loginCookie(t, e, email, "secret123")
-		rec := e.do(t, "GET", "/web/console", "", func(r *http.Request) { r.AddCookie(sess) })
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s 打概览页应 200，得到 %d", email, rec.Code)
-		}
-		return rec.Body.String()
+		return e.do(t, "GET", path, "", func(r *http.Request) { r.AddCookie(sess) })
 	}
-
-	adminHTML := page("topbar-admin@example.com")
-	for _, want := range []string{
-		`id="admin-entry"`, `href="/web/admin/sessions"`,
-		"topbar-email", "topbar-admin@example.com", "me-avatar", ">T<",
-	} {
-		if !strings.Contains(adminHTML, want) {
-			t.Errorf("app-admin 概览页缺顶栏元素 %q", want)
-		}
+	// app-admin 只进得了自己的管理页（/web/admin 是 super 专属，对它 302 会话总览）
+	if rec := shellOf("topbar-admin@example.com", "/web/admin/sessions"); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "/wasm/authweb.js") {
+		t.Errorf("app-admin 打会话总览应 200 拿 SPA 壳，得到 %d", rec.Code)
 	}
-
-	superHTML := page("topbar-super@example.com")
-	if !strings.Contains(superHTML, `id="admin-entry"`) || !strings.Contains(superHTML, `href="/web/admin"`) {
-		t.Error("super 概览页的管理入口应指向 /web/admin")
+	if rec := shellOf("topbar-admin@example.com", "/web/admin"); rec.Code != http.StatusFound ||
+		rec.Header().Get("Location") != "/web/admin/sessions" {
+		t.Errorf("app-admin 打用户页应 302 去会话总览，得到 %d %q", rec.Code, rec.Header().Get("Location"))
 	}
-
-	userHTML := page("topbar-user@example.com")
-	if strings.Contains(userHTML, `id="admin-entry"`) {
-		t.Error("普通用户的 HTML 里不该出现管理后台入口（模板层按 role 判定）")
+	if rec := shellOf("topbar-super@example.com", "/web/admin"); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), "/wasm/authweb.js") {
+		t.Errorf("super 打用户页应 200 拿 SPA 壳，得到 %d", rec.Code)
 	}
-	if !strings.Contains(userHTML, "topbar-user@example.com") {
-		t.Error("账号胶囊应带当前邮箱")
+	rec := shellOf("topbar-user@example.com", "/web/admin")
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/web/console" {
+		t.Errorf("普通用户访问管理页应 302 去概览，得到 %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	unauth := e.do(t, "GET", "/web/admin", "", nil)
+	if unauth.Code != http.StatusFound || unauth.Header().Get("Location") != "/web/login" {
+		t.Errorf("未登录访问管理页应 302 去登录页，得到 %d %q", unauth.Code, unauth.Header().Get("Location"))
 	}
 }
 

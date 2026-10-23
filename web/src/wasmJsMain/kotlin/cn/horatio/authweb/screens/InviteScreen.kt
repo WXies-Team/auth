@@ -81,8 +81,9 @@ fun InviteScreen(token: String = "") {
                     snackbarHostState.showSnackbar("注册成功，已自动登录")
                     if (SessionStore.isAuthed) nav.push(Route.Console) else nav.push(Route.Login)
                 } else {
-                    // 业务打回是 400 + 重渲染的邀请页 HTML（非 JSON）：就地抽错误段落
-                    error = inviteHtmlError(res.body) ?: "邀请链接无效或已过期，请联系邀请人重新发送"
+                    // 业务打回是 JSON {"message":...}（M4 切流后）；HTML 抽取留作兜底
+                    error = jsonMessage(res.body) ?: inviteHtmlError(res.body)
+                        ?: "邀请链接无效或已过期，请联系邀请人重新发送"
                 }
             } catch (e: Exception) {
                 error = e.message ?: "提交失败，请稍后重试"
@@ -195,6 +196,12 @@ private fun inviteHtmlError(body: String): String? {
     val dim = Regex("class=\"dim\" style=\"margin-top:8px\">([^<]*)<").find(body)?.groupValues?.get(1)
     return dim?.takeIf { it.isNotBlank() }?.let { unescapeHtml(it) }
 }
+
+/** 从 JSON 错误回执 {"message":"..."} 取文案（writeError 统一形状）。 */
+private fun jsonMessage(body: String): String? = runCatching {
+    kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        .decodeFromString<cn.horatio.authweb.data.ApiError>(body).message
+}.getOrNull()?.takeIf { it.isNotBlank() }
 
 /** html/template 的四种实体反转义（错误文案里出现即救，不引库）。 */
 private fun unescapeHtml(s: String): String = s

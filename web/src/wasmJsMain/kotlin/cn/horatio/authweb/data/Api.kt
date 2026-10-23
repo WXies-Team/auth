@@ -9,13 +9,14 @@
 package cn.horatio.authweb.data
 
 import kotlin.js.JsString
+import kotlin.js.Promise
 import kotlin.js.toJsString
 import kotlinx.browser.window
 import kotlinx.coroutines.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.w3c.fetch.Headers
-import org.w3c.fetch.RequestInit
+import org.w3c.fetch.Response
 
 class HttpResponse(val status: Int, val body: String)
 
@@ -38,6 +39,24 @@ inline fun <reified T> HttpResponse.json(): T {
     return Api.Json.decodeFromString(body)
 }
 
+// Chrome 对 RequestInit 里的 null 枚举字段（cache/credentials/mode…）直接 TypeError，
+// 故 init 对象在 JS 侧原样构造：同源 cookie + no-store，body 仅非空时给。
+@JsFun(
+    "(path, method, headers, body) => window.fetch(path, {" +
+        " method: method, headers: headers, credentials: 'same-origin'," +
+        " cache: 'no-store', body: body === null ? undefined : body })",
+)
+private external fun fetchJs(path: String, method: String, headers: Headers, body: JsString?): Promise<Response>
+
+// CSRF 引导：__Host-auth_web_csrf 是**可读** cookie（HttpOnly 只给会话 cookie），
+// 首个 /web/session POST 之前还没有会话回执可抄，只能从 document.cookie 现读——
+// 与旧 app.js 的 cookie() 助手同款路径。
+@JsFun(
+    "() => { const m = document.cookie.match(/(?:^|; )__Host-auth_web_csrf=([^;]*)/);" +
+        " return m ? decodeURIComponent(m[1]) : ''; }",
+)
+private external fun readCsrfCookie(): JsString
+
 object Api {
     /** CSRF 令牌，SessionStore.refresh 装载会话后同步；非 GET 请求自动附带。 */
     var csrfToken: String = ""
@@ -50,11 +69,12 @@ object Api {
         val headers = Headers()
         var payload: JsString? = null
         if (method != "GET") {
+            if (csrfToken.isEmpty()) csrfToken = readCsrfCookie().toString()
             headers.append("Content-Type", "application/json")
             headers.append("X-CSRF-Token", csrfToken)
             payload = body?.toJsString()
         }
-        val res = window.fetch(path, RequestInit(method = method, headers = headers, body = payload)).await()
+        val res = fetchJs(path, method, headers, payload).await()
         return HttpResponse(res.status.toInt(), res.text().await().toString())
     }
 

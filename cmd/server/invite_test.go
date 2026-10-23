@@ -264,36 +264,19 @@ func TestInviteAcceptPageRoutes(t *testing.T) {
 	t.Cleanup(drainInviteBucket)
 	e := newRouteEnv(t)
 
-	// 无效 token → 400 错误变体（友好文案 + 出路）
+	// 无效 token：壳照发（M4 切流后 token 校验在 SPA 内做），POST 才是权威闸
 	rec := e.do(t, "GET", "/web/invite?token=definitely-bogus", "", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("无效 token 应 400，得到 %d %s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{"无法接受邀请", "邀请链接无效"} {
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Errorf("错误变体缺 %q", want)
-		}
-	}
-	if strings.Contains(rec.Body.String(), `action="/web/invite"`) {
-		t.Error("错误变体不该渲染提交表单")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "/wasm/authweb.js") {
+		t.Fatalf("邀请页应下发 SPA 壳，得到 %d %s", rec.Code, rec.Body.String())
 	}
 
-	// 有效 token → 表单变体（邮箱只读 + 两个 autocomplete + 隐藏 token）
+	// 有效 token → 同一 SPA 壳（表单/校验都在 SPA 里）
 	token := "route-accept-" + fmt.Sprint(time.Now().UnixNano())
 	seedInviteRow(t, e, "route-accept@example.com", "calorie-diary", token,
 		time.Now().Add(time.Hour).UnixMilli())
 	rec = e.do(t, "GET", "/web/invite?token="+url.QueryEscape(token), "", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("有效 token 应 200，得到 %d %s", rec.Code, rec.Body.String())
-	}
-	for _, want := range []string{
-		`action="/web/invite"`, `name="token"`, "route-accept@example.com",
-		`autocomplete="new-password"`, `autocomplete="username"`, `autocomplete="nickname"`,
-		"设置密码并完成注册",
-	} {
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Errorf("接受表单缺 %q", want)
-		}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "/wasm/authweb.js") {
+		t.Fatalf("邀请页应下发 SPA 壳，得到 %d %s", rec.Code, rec.Body.String())
 	}
 
 	// 弱密码 POST → 400 且回到表单（就地报错，不踢去错误变体）
@@ -301,8 +284,8 @@ func TestInviteAcceptPageRoutes(t *testing.T) {
 	rec = e.do(t, "POST", "/web/invite", form, func(r *http.Request) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	})
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `id="invite-card"`) {
-		t.Fatalf("弱密码应 400 且重渲染表单，得到 %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "message") {
+		t.Fatalf("弱密码应 400 + JSON 错误，得到 %d %s", rec.Code, rec.Body.String())
 	}
 
 	// 正确密码 POST → 302 /web/console + 种双 cookie（自动登录）
@@ -356,7 +339,7 @@ func TestInviteAcceptPageRoutes(t *testing.T) {
 	rec = e.do(t, "POST", "/web/invite", form, func(r *http.Request) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	})
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "无法接受邀请") {
-		t.Errorf("重放应 400 错误变体，得到 %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "已被接受") {
+		t.Errorf("重放应 400 + JSON 错误，得到 %d %s", rec.Code, rec.Body.String())
 	}
 }
