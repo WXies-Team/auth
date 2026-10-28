@@ -6,23 +6,26 @@
 
 <p class="hint">授予任一项目的管理权即成为项目管理员（只能管理授权范围内的会话、用量与审计）；平台管理员管全部项目、用户目录与全局配置。只有平台管理员能调整角色与授权。</p>
 
-<form class="row" id="user-search-form" role="search">
-  <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
-    <input type="text" id="user-query" placeholder="按邮箱片段或 uid 搜索（同时过滤下方邀请）" autocomplete="off">
-  </label>
-  <button type="submit" class="btn">{{icon "search"}} 搜索</button>
-</form>
-
-<div class="row" style="margin-top:4px">
-  <button type="button" class="btn" id="invite-open">{{icon "mail"}} 邀请用户</button>
-  <!-- 批量工具条：N 实时；选中为空整条收起（.row 是 flex，显隐必须走 .hidden 类） -->
-  <span class="row hidden" id="bulk-bar" style="gap:8px;margin-left:auto">
-    <span class="dim" id="bulk-count"></span>
-    <button type="button" class="btn danger small" id="bulk-reset">批量重置密码</button>
-    <button type="button" class="btn danger small" id="bulk-ban">批量封禁</button>
-    <button type="button" class="btn small" id="bulk-unban">批量解除封禁</button>
-    <button type="button" class="btn ghost small" id="bulk-clear">清空选择</button>
-  </span>
+<!-- 搜索收进工具条卡（与审计页同款）：搜索框自适应、按钮贴右侧。
+     邀请与批量操作并入同一张卡的第二行——它们都是「作用于这张表」的动作，
+     分散在画布上时与表格没有归属关系。 -->
+<div class="toolbar">
+  <form class="toolbar-inline" id="user-search-form" role="search">
+    <label class="field grow" style="margin:0"><span class="sr-only">搜索用户</span>
+      <input type="search" id="user-query" placeholder="按邮箱片段或 uid 搜索" autocomplete="off">
+    </label>
+  </form>
+  <div class="toolbar-inline">
+    <button type="button" class="btn" id="invite-open">{{icon "mail"}} 邀请用户</button>
+    <!-- 批量工具条：N 实时；选中为空整条收起（显隐必须走 .hidden 类） -->
+    <span class="toolbar-inline hidden" id="bulk-bar" style="gap:8px;margin-left:auto">
+      <span class="dim" id="bulk-count"></span>
+      <button type="button" class="btn danger small" id="bulk-reset">批量重置密码</button>
+      <button type="button" class="btn danger small" id="bulk-ban">批量封禁</button>
+      <button type="button" class="btn small" id="bulk-unban">批量解除封禁</button>
+      <button type="button" class="btn ghost small" id="bulk-clear">清空选择</button>
+    </span>
+  </div>
 </div>
 
 <p class="err" id="users-error" role="alert" hidden></p>
@@ -31,10 +34,13 @@
   <table>
     <caption class="sr-only">用户列表</caption>
     <thead>
-      <tr><th style="width:42px"><input type="checkbox" id="users-selall" aria-label="选择本页全部用户"></th><th>用户</th><th>uid</th><th>角色</th><th>项目授权</th><th>两步验证</th><th>Passkey</th><th>注册时间</th><th></th></tr>
+      <!-- 列数压到 7：原来 9 列（含独立的两步验证/Passkey/注册时间）会把表格撑过
+           容器宽度，行尾的「管理」按钮被**横向溢出裁掉**——主操作藏在横滚后面。
+           安全状态合并成一列；注册时间属于低频信息，移进详情面板。 -->
+      <tr><th style="width:42px"><input type="checkbox" id="users-selall" aria-label="选择本页全部用户"></th><th>用户</th><th>uid</th><th>角色</th><th>项目授权</th><th>安全</th><th style="width:1%"></th></tr>
     </thead>
     <tbody id="users-body">
-      <tr><td colspan="9" class="empty">读取中…</td></tr>
+      <tr><td colspan="7" class="empty">读取中…</td></tr>
     </tbody>
   </table>
 </div>
@@ -52,7 +58,7 @@
     <table>
       <caption class="sr-only">邀请记录</caption>
       <thead>
-        <tr><th>邮箱</th><th>项目</th><th>状态</th><th>有效期</th><th></th></tr>
+        <tr><th>邮箱</th><th>项目</th><th>状态</th><th>有效期</th><th style="width:1%"></th></tr>
       </thead>
       <tbody id="invites-body">
         <tr><td colspan="5" class="empty">读取中…</td></tr>
