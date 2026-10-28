@@ -813,11 +813,16 @@ async function initConsole() {
   const fill = (sel, fn) => fn().then(v => { $(sel).textContent = v; })
     .catch(err => { if (err.status !== 401) $(sel).textContent = '读取失败（' + err.message + '）'; });
 
-  const me = await api('/web/session', { method: 'POST', body: {} }).catch(err => {
-    if (err.status === 401) return null;
-    throw err;
-  });
-  if (!me) return;   // 401 由 api() 统一跳登录，这里不再报错
+  let me = null;
+  try {
+    me = await api('/web/session', { method: 'POST', body: {} });
+  } catch (err) {
+    // 401 由 api() 统一跳登录、不再报错；其余（断网/429/500）仍要提示，
+    // 且**不能**往上抛——initConsole 由 DOMContentLoaded 直接调，抛出即未捕获。
+    if (err.status !== 401) toast(err.message, true);
+    return;
+  }
+  if (!me) return;
   $('#me-email').textContent = me.email;
   if (me.role === 'admin' || me.role === 'super') {
     const badge = $('#role-badge');
