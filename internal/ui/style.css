@@ -28,6 +28,8 @@
   --radius-ctl: 16px;
   /* 动效令牌：全站唯一 easing 与时长梯度（见文件末「动效系统」段） */
   --ease: cubic-bezier(.2, 0, 0, 1);
+  /* 弹簧曲线：只给「物理反馈」用（按压回弹/开关），miuix 动效法则——其余一律 --ease */
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
   --dur-1: 150ms;   /* 微交互：按压、颜色、焦点环 */
   --dur-2: 180ms;   /* 区块切换、行退场 */
   --dur-3: 200ms;   /* 入场、对话框 */
@@ -179,20 +181,51 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
 .content > * { min-width: 0; }
 
 /* 窄屏：分区导航折叠成顶栏下的横向滚动 tab 行（不依赖 JS，display:none 切换最稳） */
+/* 窄屏底栏 = 悬浮玻璃胶囊（复刻两个日记 App 的液态玻璃底栏；宽屏由
+   min-width:900px 的规则切回侧栏）。backdrop 只糊这一条窄带，代价可忽略；
+   不支持 backdrop-filter 的老浏览器退化成半透明实底，读得清。 */
 .tabnav {
-  display: flex; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
-  -webkit-overflow-scrolling: touch; scrollbar-width: none;
-  padding: 4px var(--pad-r) 6px var(--pad-x);
+  position: fixed; z-index: 40;
+  left: 50%; transform: translateX(-50%);
+  bottom: max(10px, env(safe-area-inset-bottom));
+  display: flex; gap: 2px;
+  padding: 6px; margin: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .62);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+  /* 玻璃边高光（外）+ 轻投影（上浮感）；暗色换成内侧白环 */
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .14), inset 0 0 0 1px rgba(255, 255, 255, .45);
+}
+@media (prefers-color-scheme: dark) {
+  .tabnav {
+    background: rgba(38, 38, 38, .58);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, .4), inset 0 0 0 1px rgba(255, 255, 255, .1);
+  }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .tabnav { background: var(--card); }
 }
 .tabnav::-webkit-scrollbar { display: none; }
-.tabnav .nav-item { flex: none; white-space: nowrap; }
+.tabnav .nav-item {
+  flex: none; white-space: nowrap;
+  flex-direction: column; gap: 2px;
+  min-height: 0; padding: 6px 12px;
+  border-radius: 999px; font-size: 11px; line-height: 1.1;
+}
+.tabnav .nav-item .ico { width: 22px; height: 22px; }
+.tabnav .nav-item:hover { background: transparent; }
+.tabnav .nav-item:active { transform: scale(.92); transition-duration: 0s; }
+.tabnav .nav-item.on { background: rgba(52, 130, 255, .14); }
+/* 内容给底栏让位：最后一张卡不被胶囊压住 */
+@media (max-width: 899.98px) { main.content { padding-bottom: 88px; } }
 
 .nav-item {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: var(--tap); padding: 0 12px; border-radius: var(--radius-ctl);
   color: var(--dim); text-decoration: none; font-size: 15px;
   transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease),
-              transform var(--dur-1) var(--ease);
+              transform var(--dur-1) var(--spring);
 }
 .nav-item:hover { background: var(--card); color: var(--ink); }
 .nav-item.on { color: var(--primary); background: var(--primary-soft); font-weight: 500; }
@@ -572,7 +605,6 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 /* 行尾「详情」展开的次级信息（首次登录 + IP）：占满一行换到行下；
    收起态由 .hidden（display:none !important）完全不占位，行高不变；
    展开进场走 app.js 的 swapIn（同一套 --ease / --dur-2 时长） */
-.session-row .sess-more { flex: 1 1 100%; color: var(--dim); font-size: 13px; }
 
 /* ---- AI 用量：KPI 卡与 7 天 sparkline ---- */
 .kpi-row { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
