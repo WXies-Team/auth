@@ -119,6 +119,20 @@ code { font-family: var(--mono); }
 .brand-mark { display: inline-flex; align-items: center; width: 28px; height: 28px; color: var(--primary); vertical-align: middle; }
 .brand-mark img { display: block; width: 28px; height: 28px; }
 .topnav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+/* 窄屏顶栏：管理入口 + 项目切换 + 账号胶囊曾被 flex-wrap 拆成**三行**，把首屏
+   顶栏撑得很高。改成单行不折、内部横滚——高度收住，功能一个不丢。 */
+@media (max-width: 640px) {
+  .topbar-in { flex-wrap: nowrap; }
+  .topnav {
+    flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .topnav::-webkit-scrollbar { display: none; }
+  .topnav > * { flex: none; }
+  .acct { max-width: 60%; }
+  .acct-email { max-width: 30vw; }
+}
 
 /* 账号胶囊：邮箱 + 档案头像色点（无头像时用邮箱首字母占位，JS 可再按档案上色） */
 /* 圆角描边统一走 box-shadow 内环而非 border：border 曲线抗锯齿差是圆角锯齿感
@@ -192,22 +206,32 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
 /* 窄屏底栏 = 悬浮玻璃胶囊（复刻两个日记 App 的液态玻璃底栏；宽屏由
    min-width:900px 的规则切回侧栏）。backdrop 只糊这一条窄带，代价可忽略；
    不支持 backdrop-filter 的老浏览器退化成半透明实底，读得清。 */
+/* 窄屏底栏 = miuix FloatingNavigationBar（药丸）。
+   几何逐值取自 miuix 源码 NavigationBar.kt 的 FloatingNavigationBarDefaults：
+     CornerRadius 50dp（药丸）、HorizontalOutSidePadding 36dp、HorizontalPadding 12dp、
+     ItemSpacing 12dp、IconSize 28/26dp、IconPadding 10dp、BottomPadding 8dp、
+     ShadowElevation 1dp；**未选中项 = 同色 × 40% 透明度、选中项全不透明**
+     （UnselectedAlpha 0.4 / SelectedPressedAlpha 0.5），不是给选中项加底色块。
+   背景走玻璃（网页浮层惯例，两个日记 App 同款），不支持 backdrop-filter 时退化实底。 */
 .tabnav {
   position: fixed; z-index: 40;
-  left: 50%; transform: translateX(-50%);
+  /* 居中**不用 transform**：旧写法 left:50% + translateX(-50%) 会被入场动画的
+     rise-in 关键帧（transform: translateY(...)）整个覆盖 —— 动画期间胶囊没有
+     水平位移、停在右半边，动画一结束再瞬间弹回正中，实测中心从 352px 跳到
+     195px（位移 157px）。这就是「底栏乱飞」。改成 left/right:0 + margin:auto
+     让 transform 完全让给动画。 */
+  left: 0; right: 0; margin-inline: auto;
+  width: fit-content; max-width: calc(100vw - 24px);
   bottom: max(10px, env(safe-area-inset-bottom));
-  display: flex; gap: 2px;
-  /* 后台 6 项实测 399px > 390 视口，胶囊被左右裁掉。给 max-width 收进视口，
-     超出改**内部横滚**（沿用旧 tab 行的横滚行为，scrollbar 隐藏）。 */
-  max-width: calc(100vw - 24px);
-  overflow-x: auto;
-  padding: 6px; margin: 0;
-  border-radius: 999px;
+  display: flex; align-items: stretch; gap: 2px;
+  padding: 6px;
+  border-radius: 50px;                 /* miuix CornerRadius 50dp → 药丸 */
   background: rgba(255, 255, 255, .62);
   -webkit-backdrop-filter: blur(20px) saturate(1.6);
   backdrop-filter: blur(20px) saturate(1.6);
   /* 玻璃边高光（外）+ 轻投影（上浮感）；暗色换成内侧白环 */
   box-shadow: 0 6px 22px rgba(0, 0, 0, .14), inset 0 0 0 1px rgba(255, 255, 255, .45);
+  transform-origin: center bottom;
 }
 @media (prefers-color-scheme: dark) {
   .tabnav {
@@ -220,15 +244,22 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
 }
 .tabnav::-webkit-scrollbar { display: none; }
 .tabnav .nav-item {
-  flex: none; white-space: nowrap;
-  flex-direction: column; gap: 2px;
-  min-height: 0; padding: 6px 12px;
-  border-radius: 999px; font-size: 11px; line-height: 1.1;
+  /* 后台 6 项时整条会超 390 视口：让项**均分宽度**而不是溢出后靠横滚找（横滚在
+     固定浮层上既难点中又难发现）。flex-basis 0 让它们等分，min-width:0 允许收缩，
+     文案不换行、超长才截断。 */
+  flex: 1 1 auto; min-width: 0;
+  flex-direction: column; justify-content: center; gap: 2px;
+  padding: 6px 10px;
+  border-radius: 20px; font-size: 11px; line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.tabnav .nav-item .ico { width: 22px; height: 22px; }
-.tabnav .nav-item:hover { background: transparent; }
+.tabnav .nav-item .ico { width: 26px; height: 26px; }   /* miuix IconSize 26dp */
+/* miuix：未选中项是同色 ×40% alpha，选中项恢复全不透明（不是加底色块） */
+.tabnav .nav-item { color: var(--ink); opacity: .4; }
+.tabnav .nav-item.on { opacity: 1; background: transparent; font-weight: 500; }
+.tabnav .nav-item:hover { background: transparent; opacity: .7; }
+.tabnav .nav-item.on:hover { opacity: 1; }
 .tabnav .nav-item:active { transform: scale(.92); transition-duration: 0s; }
-.tabnav .nav-item.on { background: rgba(52, 130, 255, .14); }
 /* 内容给底栏让位：最后一张卡不被胶囊压住 */
 @media (max-width: 899.98px) { main.content { padding-bottom: 88px; } }
 

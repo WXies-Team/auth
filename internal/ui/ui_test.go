@@ -73,6 +73,16 @@ func TestPageTemplatesPresent(t *testing.T) {
 
 // cssRule 取一条以行首选择器开头的规则体（含大括号）。要求行首是为了不被
 // `.btn .ico` 这类更长的选择器抢匹配。
+// mustCSS 读出 style.css 全文（失败即 Fatal）。
+func mustCSS(t *testing.T) string {
+	t.Helper()
+	b, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	return string(b)
+}
+
 // stripCSSComments 去掉 /* ... */，让「规则里有什么声明」的断言只看真声明。
 func stripCSSComments(css string) string {
 	var b strings.Builder
@@ -999,6 +1009,40 @@ func TestMinimalPagesRenderNoFooter(t *testing.T) {
 		t.Error("style.css 不该再有 `.foot` 规则（页脚已整体退役）")
 	}
 	// 注销撤销页（cmd/server 的独立 HTML）不进模板集：它自带的整页里也没有页脚。
+}
+
+// 窄屏底栏（miuix FloatingNavigationBar）：居中**不许依赖 transform**。
+// 旧写法 left:50% + translateX(-50%) 会被入场动画 rise-in 的关键帧
+// （transform: translateY(...)）整个覆盖 —— 动画期间胶囊没有水平位移、停在
+// 右半边，动画一结束再瞬间弹回正中（实测中心从 352px 跳到 195px，位移 157px），
+// 用户看到的就是「底栏乱飞」。
+func TestTabnavCenteringNeverUsesTransform(t *testing.T) {
+	css := stripCSSComments(mustCSS(t))
+	rule, ok := cssRule(css, ".tabnav")
+	if !ok {
+		t.Fatal("缺 .tabnav 规则")
+	}
+	if strings.Contains(rule, "transform:") {
+		t.Error(".tabnav 自身不许写 transform（会被入场动画覆盖导致横向跳动），居中请用 left/right:0 + margin-inline:auto")
+	}
+	if !strings.Contains(rule, "margin-inline: auto") || !strings.Contains(rule, "left: 0; right: 0") {
+		t.Error(".tabnav 应以 left/right:0 + margin-inline:auto 居中")
+	}
+	// miuix FloatingToolbarDefaults.CornerRadius = 50dp → 药丸
+	if !strings.Contains(rule, "border-radius: 50px") {
+		t.Error(".tabnav 圆角应为 50px（miuix FloatingToolbarDefaults.CornerRadius=50dp，药丸形态）")
+	}
+	// 未选中项 = 同色 ×40% alpha、选中全不透明（UnselectedAlpha 0.4）。
+	// .tabnav .nav-item 有两条规则（尺寸一条、颜色一条），得把全部拼起来看。
+	var navRules strings.Builder
+	for _, seg := range strings.Split(css, ".tabnav .nav-item") {
+		if i := strings.Index(seg, "}"); i > 0 {
+			navRules.WriteString(seg[:i])
+		}
+	}
+	if !strings.Contains(navRules.String(), "opacity: .4") {
+		t.Error("未选中项应为 opacity:.4（miuix UnselectedAlpha 0.4），不是给选中项加底色块")
+	}
 }
 
 // miuix 规范对齐（2026-10 全站重构）：卡片是**纯填充无描边**、圆角全站唯一 16、
