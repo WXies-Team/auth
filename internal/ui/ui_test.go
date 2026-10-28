@@ -133,8 +133,9 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 		t.Error("本设备会话行应带「本设备」徽标")
 	}
 	// 会话 id 一律按字符串处理（雪花 id 的 JS 精度陷阱）：列表请求的回执是
-	// {sessions:[...]}；行结构 = 设备名主标题 + 「项目名 · 最近活跃」次行
-	// + 行尾「详情」展开（首次登录时间与 IP）
+	// {sessions:[...]}；行结构 = 设备名主标题 + 「项目名 · 最近活跃 · IP · 首次登录」
+	// 常驻副行（2026-10 拍板去展开，与两个日记 App 同口径：区分同名设备的两条
+	// 线索不再藏在「详情」里）
 	if !strings.Contains(js, "res.sessions || []") {
 		t.Error("会话列表应从 {sessions:[...]} 回执取数组")
 	}
@@ -144,11 +145,16 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 	for _, want := range []string{
 		`<span class="title">${esc(it.device)}</span>`,
 		`· 最近活跃 ${esc(relTime(it.lastSeenAt))}`,
-		`data-act="more"`,
-		`<div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>`,
+		`IP ${esc(it.ip || '—')}`,
+		`首次登录 ${esc(it.createdAt > 0 ? fmtTime(it.createdAt) : '—')}`,
 	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("会话行应包含 %s（设备名主标题 + 项目名 · 最近活跃 + 详情展开）", want)
+			t.Errorf("会话行应包含 %s（设备名主标题 + 常驻副行含 IP 与首次登录）", want)
+		}
+	}
+	for _, gone := range []string{`data-act="more"`, "sess-more"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("会话行已扁平化，app.js 不该再出现 %q", gone)
 		}
 	}
 	// 页首 hint 钉住「最近活跃」口径（用户问得最多的一句）
@@ -1021,32 +1027,45 @@ func TestAvatarDeriveByUID(t *testing.T) {
 	}
 }
 
-// W2 reauth 分步 + W4 Web 接入撤下的 JS/模板同步钉：
-// 弹窗只允许「一屏一问」（第一步密码、第二步码），Web 接入的模板与脚本一并撤净。
+// reauth 弹框的能力自适应契约 + W4 Web 接入撤下的同步钉：
+// 三块能力区（Passkey 主钮 / 码框 / 密码兜底）齐全；app.js 有单例 in-flight
+//（并发 401 共享弹框，修「验完要手动刷新」）与 Passkey 仪式接线；
+// Web 接入的模板与脚本一并撤净不许回潮。
 func TestReauthStagedAndWebAccessRemoved(t *testing.T) {
 	layout, err := files.ReadFile("templates/layout.html")
 	if err != nil {
 		t.Fatalf("读 layout: %v", err)
 	}
 	head := string(layout)
-	for _, want := range []string{`id="reauth-step1"`, `id="reauth-step2"`, `class="hidden"`} {
+	for _, want := range []string{
+		`id="reauth-passkey-wrap"`, `id="reauth-code-wrap"`, `id="reauth-password-wrap"`,
+		`id="reauth-passkey"`, `id="reauth-code"`, `id="reauth-password"`, `class="hidden"`,
+	} {
 		if !strings.Contains(head, want) {
-			t.Errorf("reauth 弹窗缺分步结构 %q", want)
+			t.Errorf("reauth 弹窗缺能力自适应结构 %q", want)
 		}
 	}
-	// 「一屏全堆」的旧结构不许回潮：密码与码框之间的「或」分隔
-	if strings.Contains(head, `<p class="or">或</p>`) {
-		t.Error("reauth 弹窗不该再有「密码 或 验证码」的同屏分隔（W2 已改分步）")
+	for _, gone := range []string{`id="reauth-step1"`, `id="reauth-step2"`, `<p class="or">或</p>`} {
+		if strings.Contains(head, gone) {
+			t.Errorf("reauth 弹窗不该再有旧分步结构 %q", gone)
+		}
 	}
 	jsBytes, err := files.ReadFile("app.js")
 	if err != nil {
 		t.Fatalf("读 app.js: %v", err)
 	}
 	js := string(jsBytes)
-	for _, want := range []string{"function reauthShowStep(", "totpEnabled", `body: { password }`, "body: { totpCode, recoveryCode }"} {
+	for _, want := range []string{
+		"reauthInflight", "passkeyCount", "totpEnabled", "passwordSet",
+		"/web/reauth/webauthn/options", "/web/reauth/webauthn/finish",
+		`body: { password }`, "body: { totpCode, recoveryCode }",
+	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("app.js 缺 W2 分步接线 %q", want)
+			t.Errorf("app.js 缺能力自适应接线 %q", want)
 		}
+	}
+	if strings.Contains(js, "reauthShowStep(") {
+		t.Error("旧的两步分步接线应已退役（reauthShowStep）")
 	}
 	access, err := files.ReadFile("templates/admin-access.html")
 	if err != nil {

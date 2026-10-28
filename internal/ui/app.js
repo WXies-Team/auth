@@ -249,53 +249,91 @@ function makeCodeToggle(input, labelEl, cfg) {
   };
 }
 
-/* ---------- 重新验证弹框（W2 分步：先密码，开了两步验证再要一个码） ----------
-   接线说明（现状是**单接口带三字段**，服务端 /web/reauth 密码/两步码/恢复码三选一）：
-   这里做成前端两段、**两次都打同一个既有接口**——第一步 POST {password}（服务端
-   当场验密码，错密码在这里就报），成功后按 /web/session 回执的 totpEnabled 决定
-   是否进第二步；第二步 POST {totpCode|recoveryCode}（服务端验因子），成功才收口。
-   无 2FA 账号第一步即完成。接口一个没加、一个没改。 */
-let reauthResolver = null;
-let reauthStep = 'password';   // 'password' | 'code'
-let reauthTotp = null;         // 打开弹框时发起的两步验证状态查询（Promise<boolean>）
-
-/* 步切换沿用 dlg 内既有交叉淡入（swapIn，reduced-motion 自动跳过） */
-function reauthShowStep(step) {
-  reauthStep = step;
-  const s1 = $('#reauth-step1'), s2 = $('#reauth-step2');
-  if (!s1 || !s2) return;
-  const toCode = step === 'code';
-  s1.classList.toggle('hidden', toCode);
-  s2.classList.toggle('hidden', !toCode);
-  if (!toCode) swapIn(s1); else swapIn(s2);
-}
+/* ---------- 重新验证弹框（能力自适应 + 单例 in-flight） ----------
+   弹框按账号能力出方案（2026-10 定案，与两个日记 App 同一口径）：
+   - 有 Passkey → 主按钮「使用 Passkey 验证」（/web/reauth/webauthn/* 仪式）；
+   - 开了两步验证 → 码框（恢复码原地切换）；有 Passkey 时两者并列、二选一；
+   - 两者皆无 → 密码框兜底（纯密码账号不能被锁死在改密/改邮之外）。
+   单例 in-flight：并发 401 共享同一弹框与结果——旧版单槽 resolver 会被第二次
+   调用覆盖，第一个调用者的 promise 永不结算（区块停在「读取中…」，只能手动
+   刷新页面），这里修掉：弹框在飞时后来者直接等同一份结果。 */
+let reauthInflight = null;   // Promise<boolean> | null
+let reauthResolver = null;   // 收口函数（closeReauth 调）
+let reauthHasCode = false;   // 提交分支：码框在 → 码；否则密码框
 
 function promptReauth() {
-  return new Promise(resolve => {
-    const dlg = $('#reauth');
-    if (!dlg) { resolve(false); return; }
+  if (reauthInflight) return reauthInflight;   // 单例：并发共享，不许覆盖
+  reauthInflight = new Promise(resolve => {
     reauthResolver = resolve;
+    const dlg = $('#reauth');
+    if (!dlg) { reauthInflight = null; reauthResolver = null; resolve(false); return; }
     showErr('#reauth-error', '');
     $('#reauth-password').value = '';
     $('#reauth-code').value = '';
     if (window.__reauthToggle) window.__reauthToggle.reset();
-    // 每次打开都回第一步；两步验证状态同步去问一次（第一步提交后据此分流）
-    reauthStep = 'password';
-    $('#reauth-step1').classList.remove('hidden');
-    $('#reauth-step2').classList.add('hidden');
-    reauthTotp = api('/web/session', { method: 'POST', body: {}, noReauth: true })
-      .then(me => !!(me && me.totpEnabled))
-      .catch(() => false);   // 状态取不到按「没有 2FA」走：密码已过即收口，不卡流程
+    // 三块能力区先全藏（防闪上一次的形态），能力到了再亮
+    for (const id of ['#reauth-passkey-wrap', '#reauth-code-wrap', '#reauth-password-wrap']) {
+      $(id).classList.add('hidden');
+    }
     if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.setAttribute('open', '');
-    $('#reauth-password').focus();
+    reauthApplyCapability();
   });
+  return reauthInflight;
+}
+
+/* 能力探测：/web/session 一次拿 passkeyCount/totpEnabled/passwordSet → 亮对应区。
+   会话查询失败按「无能力」走密码兜底（至少有条路，不卡流程）。 */
+async function reauthApplyCapability() {
+  let me = null;
+  try { me = await api('/web/session', { method: 'POST', body: {}, noReauth: true }); } catch (err) { /* 兜底 */ }
+  const dlg = $('#reauth');
+  if (!reauthInflight || !dlg || !dlg.open) return;   // 期间已关窗，结果作废
+  const hasPasskey = !!(me && me.passkeyCount > 0) && !!window.PublicKeyCredential;
+  const hasTotp = !!(me && me.totpEnabled);
+  const hasPassword = !me || me.passwordSet;   // 拿不到会话 → 至少给密码这条路
+  reauthHasCode = hasTotp;
+  const showPasskey = hasPasskey;
+  const showCode = hasTotp;
+  const showPassword = !hasPasskey && !hasTotp && hasPassword;
+  $('#reauth-passkey-wrap').classList.toggle('hidden', !showPasskey);
+  $('#reauth-code-wrap').classList.toggle('hidden', !showCode);
+  $('#reauth-password-wrap').classList.toggle('hidden', !showPassword);
+  // 「验证」提交钮只服务码/密码两路；Passkey 为主时收起（按钮即主行动）
+  $('#reauth-ok').classList.toggle('hidden', !(showCode || showPassword));
+  if (showPasskey) { swapIn($('#reauth-passkey-wrap')); $('#reauth-passkey').focus(); }
+  else if (showCode) { swapIn($('#reauth-code-wrap')); $('#reauth-code').focus(); }
+  else { $('#reauth-password').focus(); }
+}
+
+/* Passkey 路：options → 系统弹框断言 → finish。用户在系统弹框里取消不算失败
+   （留窗重试，与登录路同口径）。 */
+async function reauthByPasskey() {
+  const btn = $('#reauth-passkey');
+  setBusy(btn, true);
+  showErr('#reauth-error', '');
+  try {
+    const opts = await api('/web/reauth/webauthn/options', { method: 'POST', body: {}, noReauth: true });
+    const cred = await navigator.credentials.get({ publicKey: decodePKOptions(opts.publicKey) });
+    await api('/web/reauth/webauthn/finish', {
+      method: 'POST', body: { ceremonyId: opts.ceremonyId, response: assertionJSON(cred) }, noReauth: true,
+    });
+    closeReauth(true);
+  } catch (err) {
+    if (!err || (err.name !== 'NotAllowedError' && err.name !== 'AbortError')) {
+      showErr('#reauth-error', (err && err.message) || 'Passkey 验证失败，请重试');
+    }
+  } finally {
+    setBusy(btn, false);
+  }
 }
 
 function closeReauth(ok) {
   const dlg = $('#reauth');
   if (dlg && dlg.open) dlg.close();
-  reauthStep = 'password';
-  if (reauthResolver) { reauthResolver(ok); reauthResolver = null; }
+  const resolve = reauthResolver;
+  reauthInflight = null;   // 先清槽再结算：后来者开新弹框，不会接上旧 promise
+  reauthResolver = null;
+  if (resolve) resolve(ok);
 }
 
 function wireReauth() {
@@ -317,42 +355,28 @@ function wireReauth() {
   });
   $('#reauth-toggle-recovery').addEventListener('click', () =>
     window.__reauthToggle.set(window.__reauthToggle.mode() === 'recovery' ? 'code' : 'recovery', { focus: true }));
+  $('#reauth-passkey').addEventListener('click', reauthByPasskey);
   $('#reauth-cancel').addEventListener('click', () => closeReauth(false));
   $('#reauth').addEventListener('cancel', e => { e.preventDefault(); closeReauth(false); });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     const btn = $('#reauth-ok');
-    if (reauthStep === 'password') {
-      const password = $('#reauth-password').value;
-      if (!password) { showErr('#reauth-error', '请输入密码'); return; }
-      setBusy(btn, true);
-      try {
-        await api('/web/reauth', { method: 'POST', body: { password }, noReauth: true });
-        if (reauthTotp && await reauthTotp) {
-          reauthShowStep('code');   // 账号开了两步验证：进第二步收一个码
-          $('#reauth-code').focus();
-        } else {
-          closeReauth(true);        // 无 2FA：一步到位
-        }
-      } catch (err) {
-        showErr('#reauth-error', err.message);
-      } finally {
-        setBusy(btn, false);
-      }
-      return;
-    }
-    // 第二步：按当前 N 态决定字段（恢复码 ↔ 两步验证码），空输入前端先挡
-    const useRecovery = window.__reauthToggle.mode() === 'recovery';
-    const totpCode = useRecovery ? '' : $('#reauth-code').value.trim();
-    const recoveryCode = useRecovery ? $('#reauth-code').value.trim() : '';
-    if (!totpCode && !recoveryCode) {
-      showErr('#reauth-error', useRecovery ? '请输入恢复码' : '请输入两步验证码'); return;
-    }
     setBusy(btn, true);
     try {
-      await api('/web/reauth', {
-        method: 'POST', body: { totpCode, recoveryCode }, noReauth: true,
-      });
+      if (reauthHasCode) {
+        // 按当前 N 态决定字段（恢复码 ↔ 两步验证码），空输入前端先挡
+        const useRecovery = window.__reauthToggle.mode() === 'recovery';
+        const totpCode = useRecovery ? '' : $('#reauth-code').value.trim();
+        const recoveryCode = useRecovery ? $('#reauth-code').value.trim() : '';
+        if (!totpCode && !recoveryCode) {
+          showErr('#reauth-error', useRecovery ? '请输入恢复码' : '请输入两步验证码'); return;
+        }
+        await api('/web/reauth', { method: 'POST', body: { totpCode, recoveryCode }, noReauth: true });
+      } else {
+        const password = $('#reauth-password').value;
+        if (!password) { showErr('#reauth-error', '请输入密码'); return; }
+        await api('/web/reauth', { method: 'POST', body: { password }, noReauth: true });
+      }
       closeReauth(true);
     } catch (err) {
       showErr('#reauth-error', err.message);
@@ -823,7 +847,8 @@ function deviceIcon(device) {
 
 /* 会话行：主标题=设备名（同名设备并排各占一行、不做归并——同名完全可能是
    两台设备，Google 官方文档自己都警告过按名归并的歧义），次行=项目名 + 最近
-   活跃（相对时间）+「本设备」徽标，行尾「详情」展开首次登录时间与 IP。
+   活跃（相对时间）+ IP + 首次登录（2026-10 拍板去展开：区分同名设备的两条
+   线索常驻副行，与两个日记 App 同口径），「本设备」徽标，行尾退出按钮。
    退出逐行（GitHub/Google 同口径），没有组级批量退出——无分组即无组概念。 */
 
 function initSessions() {
@@ -853,23 +878,11 @@ function initSessions() {
           <span class="ico-wrap">${deviceIcon(it.device)}</span>
           <span class="grow">
             <span class="title">${esc(it.device)}</span>
-            <br><span class="meta">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))}</span>
+            <br><span class="meta">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))} · IP ${esc(it.ip || '—')} · 首次登录 ${esc(it.createdAt > 0 ? fmtTime(it.createdAt) : '—')}</span>
             ${it.current ? '<span class="badge on">本设备</span>' : ''}
           </span>
-          <button type="button" class="btn small ghost" data-act="more" aria-expanded="false">详情</button>
           ${it.current ? '' : '<button type="button" class="btn small danger">退出</button>'}
-          <div class="sess-more hidden">首次登录 ${esc(fmtTime(it.createdAt))} · IP ${esc(it.ip)}</div>
         </div>`);
-      // 「详情」展开首次登录时间与 IP（GitHub See-more 式）：收起态 .hidden 不占
-      // 行高；展开进场复用既有 swapIn（reduced-motion 自动跳过，只换显示状态）
-      const more = el.querySelector('[data-act=more]');
-      more.addEventListener('click', () => {
-        const detail = el.querySelector('.sess-more');
-        const collapsed = detail.classList.toggle('hidden');
-        more.setAttribute('aria-expanded', String(!collapsed));
-        more.textContent = collapsed ? '详情' : '收起';
-        if (!collapsed) swapIn(detail);
-      });
       const kick = el.querySelector('button.danger');
       if (kick) {
         kick.addEventListener('click', () => {
