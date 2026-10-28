@@ -146,6 +146,11 @@ the same PR**—a stale guide ships wrong integrations.
 
 ## Known pitfalls
 
+- **不要再走 Kotlin/Wasm 前端路线**：2026-10-23 曾用 miuix 0.9.4 + Kotlin/Wasm 全量重建
+  web 前端并上线（web/ 工程 + go:embed + /wasm 路由），实测画布渲染在本控制台场景**卡顿**，
+  2026-10-28 整体回滚（git revert 309db55..fe3a9bb）。原生效果的复刻走模板前端的 CSS/JS
+  级增强（窄屏玻璃胶囊底栏 --spring 弹簧曲线等，见 style.css）。历史在 git 里，别重新发明。
+
 - `JWT_SECRET` < 32 bytes and `TOTP_ENC_KEY` < 32 bytes → process refuses to start (by
   design). `TOTP_ENC_KEY` in prod backs up next to `JWT_SECRET`: losing it invalidates every
   enrolled TOTP (recovery codes only). Local runs/real-DB tests set it via `t.Setenv`.
