@@ -801,29 +801,36 @@ function assertionJSON(cred) {
 /* ---------- 概览 ---------- */
 async function initConsole() {
   if (!$('#me-email')) return;
-  try {
-    const me = await api('/web/session', { method: 'POST', body: {} });
-    $('#me-email').textContent = me.email;
-    if (me.role === 'admin' || me.role === 'super') {
-      const badge = $('#role-badge');
-      badge.textContent = me.role === 'super' ? '平台管理员' : '项目管理员';
-      badge.classList.remove('hidden');   // 徽标 display:inline-flex，hidden 属性盖不住——走 .hidden 类
-      popIn(badge);   // 徽标浮现
-    }
-    $('#stat-password').textContent = me.passwordSet ? '已设置' : '未设置（该账号靠验证码或 Passkey 登录）';
-
-    const totp = await api('/api/totp');
-    $('#stat-totp').textContent = totp.enabled ? '已开启' : '未开启';
-    const keys = await api('/api/passkeys');
-    $('#stat-passkey').textContent = keys.length ? `${keys.length} 个` : '未添加';
-  } catch (err) {
-    if (err.status !== 401) toast(err.message, true);
-    return;
-  }
-
+  // **先绑登出，再发请求**：旧版把绑定放在 try/catch 之后、catch 里又 return，
+  // 于是任一状态请求失败（网络抖动/429）就三行永远「读取中…」且**退出登录彻底
+  // 失灵**——用户被锁在概览页登不出去。登出是逃生口，必须与请求结果无关。
   $('#logout').addEventListener('click', async () => {
     try { await api('/web/logout', { method: 'POST', body: {} }); } catch (_) { /* 已登出也要跳 */ }
     location.href = '/web/login';
+  });
+
+  // 三行状态各自独立、互不牵连：一行失败只标红那一行，其余照常显示。
+  const fill = (sel, fn) => fn().then(v => { $(sel).textContent = v; })
+    .catch(err => { if (err.status !== 401) $(sel).textContent = '读取失败（' + err.message + '）'; });
+
+  const me = await api('/web/session', { method: 'POST', body: {} }).catch(err => {
+    if (err.status === 401) return null;
+    throw err;
+  });
+  if (!me) return;   // 401 由 api() 统一跳登录，这里不再报错
+  $('#me-email').textContent = me.email;
+  if (me.role === 'admin' || me.role === 'super') {
+    const badge = $('#role-badge');
+    badge.textContent = me.role === 'super' ? '平台管理员' : '项目管理员';
+    badge.classList.remove('hidden');   // 徽标 display:inline-flex，hidden 属性盖不住——走 .hidden 类
+    popIn(badge);   // 徽标浮现
+  }
+
+  fill('#stat-password', async () => me.passwordSet ? '已设置' : '未设置（该账号靠验证码或 Passkey 登录）');
+  fill('#stat-totp', async () => (await api('/api/totp')).enabled ? '已开启' : '未开启');
+  fill('#stat-passkey', async () => {
+    const keys = await api('/api/passkeys');
+    return keys.length ? `${keys.length} 个` : '未添加';
   });
 }
 
@@ -998,15 +1005,24 @@ function initPasskeys() {
     input.setAttribute('autocomplete', 'off');
     nameEl.replaceWith(input);
     input.focus();
+    // blur 即提交有两个坑：① 值没改也发 PATCH（双 toast）；② commit 里 load()
+    // 整表重绘，用户「改名中顺手点同一行的删除」时 mousedown 触发 blur → 列表重绘
+    // → 删除按钮在 click 到达前已被销毁，**点击被吞**。这里值未变直接跳过，
+    // 且提交期间不再响应 blur（Enter 已提交过一次）。
+    let committing = false;
+    const original = input.value;
     const commit = async () => {
+      if (committing) return;
+      if (input.value === original) { load(); return; }   // 没改就还原，不发请求
+      committing = true;
       try {
         await api('/api/passkeys/' + it.id, { method: 'PATCH', body: { name: input.value } });
         toast('已改名');
         await load();
-      } catch (err) { toast(err.message, true); }
+      } catch (err) { toast(err.message, true); await load(); }
     };
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
       if (e.key === 'Escape') { e.preventDefault(); load(); }
     });
     input.addEventListener('blur', commit);
@@ -1196,7 +1212,7 @@ function initSecurity() {
     } catch (err) { toast(err.message, true); }
   });
   $('#disable-totp').addEventListener('click', async () => {
-    const code = await askCode('关闭两步验证', '输入当前两步验证码或一个恢复码；关闭后验证器绑定与 10 个恢复码将全部失效，登录只需密码；其它设备保持登录状态。');
+    const code = await askCode('关闭两步验证', '输入当前两步验证码或一个恢复码；关闭后验证器绑定与全部恢复码将全部失效，登录只需密码；其它设备保持登录状态。');
     if (!code) return;
     try {
       await api('/api/totp/disable', { method: 'POST', body: { code } });
@@ -1205,7 +1221,23 @@ function initSecurity() {
     } catch (err) { toast(err.message, true); }
   });
 
-  refresh().catch(err => toast(err.message, true));
+  const retryBtn = $('#totp-retry');
+  if (retryBtn) retryBtn.addEventListener('click', () => {
+    retryBtn.classList.add('hidden');
+    $('#totp-badge').textContent = '读取中…';
+    refresh().catch(() => { retryBtn.classList.remove('hidden'); $('#totp-badge').textContent = '读取失败'; });
+  });
+
+  // 加载失败不能只弹个 toast 就完事：徽标会永远停在「读取中…」、两个分区双双
+  // 保持 hidden，整页空白且**没有任何重试入口**。改成徽标标「读取失败」+ 出重试钮。
+  refresh().catch(err => {
+    if (err.status === 401) return;
+    const badge = $('#totp-badge');
+    badge.textContent = '读取失败';
+    badge.classList.remove('on');
+    const retry = $('#totp-retry');
+    if (retry) retry.classList.remove('hidden');
+  });
 }
 
 /* ---------- 账号：改密 / 改邮箱 / 注销 ---------- */
@@ -2006,7 +2038,7 @@ function initAdminUsers() {
       pager.set(res.total, res.items.length);
       body.innerHTML = '';
       if (!res.items.length) {
-        body.innerHTML = '<tr><td colspan="9" class="empty">暂无匹配的用户</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="empty">暂无匹配的用户</td></tr>';
         $('#users-selall').checked = false;
         return;
       }
@@ -2030,7 +2062,7 @@ function initAdminUsers() {
       refreshBulkBar();
     } catch (err) {
       showErr('#users-error', err.message);
-      body.innerHTML = '<tr><td colspan="9" class="empty">读取失败</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="empty">读取失败</td></tr>';
       refreshBulkBar();
     }
   }
@@ -2327,7 +2359,13 @@ function initAdminUsers() {
     }
   }
 
-  $('#ud-close').addEventListener('click', () => $('#user-detail').classList.add('hidden'));
+  // 关闭必须**清掉 lastDetail**：任何确认操作成功后都会 if (lastDetail.uid)
+  // openDetail(...) 重刷详情，不清的话「打开详情 → 关闭 → 去撤销一条邀请」会把
+  // 已关闭的面板自动弹回来。
+  $('#ud-close').addEventListener('click', () => {
+    lastDetail = { uid: 0, email: '' };
+    $('#user-detail').classList.add('hidden');
+  });
   $('#user-search-form').addEventListener('submit', e => {
     e.preventDefault();
     pager.state.query = $('#user-query').value.trim();
@@ -2775,6 +2813,9 @@ function initAdminAudit() {
     try {
       const res = await api('/admin/audit?' + filters());
       pager.set(res.total, res.items.length);
+      // 页头的「共 N 条」此前从未被填充（pager 的标签是另一个元素），永远空白，
+      // 与用户页/会话总览页头不一致。
+      $('#audit-total').textContent = `共 ${res.total} 条`;
       body.innerHTML = '';
       if (!res.items.length) {
         body.innerHTML = '<tr><td colspan="7" class="empty">暂无匹配的审计记录</td></tr>';
@@ -2875,8 +2916,16 @@ function initAdminConfig() {
       wrap.innerHTML = '';
       let rendered = 0;
       GROUPS.forEach(g => {
-        const mine = items.filter(it => it.key.indexOf(g.prefix) === 0);
-        if (!mine.length) return;
+        // **三个已知键恒渲染**，哪怕库里一条都没有：旧逻辑只渲染库里已存在的键，
+        // 新部署（从未写入 llm_*）整页「暂无配置项。」，管理员没有任何途径创建——
+        // 而 PUT 端点本就支持 upsert，这是纯粹的前端死胡同。
+        const fromStore = items.filter(it => it.key.indexOf(g.prefix) === 0);
+        const byKey = new Map(fromStore.map(it => [it.key, it]));
+        Object.keys(LABELS).forEach(k => {
+          if (!byKey.has(k)) byKey.set(k, { key: k, configured: false, secret: k === 'llm_api_key' });
+        });
+        const mine = [...byKey.values()];
+        if (!mine.length) return;   // forEach 回调内，return 即跳过本组
         rendered += 1;
         const card = node(`<section class="card"><h2>${esc(g.title)}</h2><div class="stack" style="margin-top:8px"></div></section>`);
         const stack = card.querySelector('.stack');
@@ -2900,8 +2949,11 @@ function initAdminConfig() {
             </div>`);
           row.querySelector('[data-act=save]').addEventListener('click', async () => {
             const input = row.querySelector('input');
-            const value = input.value;
-            if (!value) { toast('留空表示不修改', true); return; }
+            // **必须 trim 后判空**：服务端把空串当「清除该键」处理，只判 !value 时
+            // 误敲的一个空格就能绕过「清除」的确认弹窗、把 mail_api_key 之类静默删掉，
+            // toast 还报「已保存」。留空的语义是「不修改」，清除请走清除按钮。
+            const value = input.value.trim();
+            if (!value) { toast('留空表示不修改；要清空请点「清除」', true); return; }
             try {
               await api('/admin/config/' + encodeURIComponent(it.key), { method: 'PUT', body: { value } });
               input.value = '';

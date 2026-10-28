@@ -34,20 +34,27 @@
     </div>
   </div>
 
-  <!-- 恢复码（只显示这一次）：等宽网格 + 下载/复制/已保存 -->
-  <div id="codes-panel" class="detail hidden" aria-labelledby="codes-title">
-    <h3 id="codes-title">恢复码</h3>
-    <p class="hint">10 个一次性恢复码，验证器不在身边时靠它登录。<strong>关闭本页后无法再查看</strong>，请先保存。</p>
-    <div class="codes" id="codes-list"></div>
-    <div class="row" style="margin-top:10px">
-      <button type="button" class="btn" id="download-codes">{{icon "download"}} 下载 txt</button>
-      <button type="button" class="btn" id="copy-codes">{{icon "copy"}} 复制全部</button>
-      <button type="button" class="btn primary" id="saved-codes">我已保存</button>
-    </div>
+</section>
+
+<!-- 恢复码面板：**独立 section，不能嵌在 #totp-off 里**。
+     旧位置在 <section id="totp-off"> 内部，而 refresh() 用 $('#totp-off').hidden
+     整段控制显隐 —— 开启两步验证时码刚渲染就被随后的 refresh() 藏起来（只闪
+     一帧）；重生成时旧码已作废、新码渲染在隐藏分区，用户**一组码都拿不到**。 -->
+<section class="card hidden" id="codes-panel" aria-labelledby="codes-title">
+  <h2 id="codes-title">恢复码</h2>
+  <p class="hint">10 个一次性恢复码，验证器不在身边时靠它登录。<strong>关闭本页后无法再查看</strong>，请先保存。</p>
+  <div class="codes" id="codes-list"></div>
+  <div class="row" style="margin-top:10px">
+    <button type="button" class="btn" id="download-codes">{{icon "download"}} 下载 txt</button>
+    <button type="button" class="btn" id="copy-codes">{{icon "copy"}} 复制全部</button>
+    <button type="button" class="btn primary" id="saved-codes">我已保存</button>
   </div>
 </section>
 
 <!-- 已开启 -->
+<!-- 重试钮：refresh() 失败时才出现（app.js 的 catch 里取消 .hidden），
+     否则整页空白且用户无从重来。 -->
+<button type="button" class="btn hidden" id="totp-retry" style="margin-bottom:12px">重新加载</button>
 <section class="card" id="totp-on" hidden aria-labelledby="on-title">
   <h2 id="on-title">两步验证已开启</h2>
   <p class="hint" id="totp-since"></p>

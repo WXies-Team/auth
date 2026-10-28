@@ -472,6 +472,15 @@ input:disabled { opacity: .6; }
 .btn.ghost:hover { background: var(--card); color: var(--ink); }
 .btn.small { min-height: 34px; padding: 0 13px; font-size: 13px; }
 .btn[aria-busy=true] { opacity: .75; pointer-events: none; }
+/* disabled 态必须与可用态**一眼可分**：分页在首页的「上一页」、批量弹层输「确认」
+   前的主钮、未修改时的「保存」此前都与可用态同观感且仍是 pointer，点了没反应
+   就像坏了。opacity + not-allowed + 去掉按压缩进。 */
+.btn:disabled, .btn[aria-disabled=true] {
+  opacity: .45; cursor: not-allowed; pointer-events: none;
+  background: var(--sub-bg); color: var(--dim); box-shadow: none;
+}
+.btn.primary:disabled { background: var(--sub-bg); color: var(--dim); }
+.btn.danger:disabled { background: var(--danger-bg); opacity: .35; }
 /* 加载态：按钮文字后跟一圈转圈（900ms/圈，纯 opacity+transform；不用扫光）。
    setBusy() 只切 aria-busy，样式全在这里——所有按钮的加载态天然一致。 */
 .btn[aria-busy=true]::after {
@@ -640,6 +649,11 @@ td.wrap-cell { white-space: normal; overflow-wrap: anywhere; word-break: normal;
 .dlg form { display: grid; gap: 6px; }
 
 /* ---- 提示条（滑入 + 淡入；消失淡出）---- */
+/* 窄屏：toast 抬到玻璃底栏之上并上移——底栏 z-index 40 且同在底部居中，
+   不抬的话踢会话/改密/封禁的成功提示全被底栏压住看不见。 */
+@media (max-width: 899.98px) {
+  .toast { z-index: 50; bottom: calc(max(10px, env(safe-area-inset-bottom)) + 72px); }
+}
 .toast {
   position: fixed; left: 50%; transform: translate(-50%, 8px);
   bottom: max(16px, env(safe-area-inset-bottom));
