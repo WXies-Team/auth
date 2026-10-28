@@ -9,22 +9,28 @@
    只动 transform/opacity（绝不碰 layout 属性）；reduced-motion 一刀切全关。 */
 :root {
   --primary: #3482FF;
+  /* --primary-strong：**承载文字**时的主色（按钮白字底 / 主色文字）。miuix 原值
+     #3482FF 配白字只有 3.63:1，低于 WCAG AA 4.5:1；色相不变只加深到 #2563EB
+     （白字 5.17:1、淡底 #EAF2FF 上 4.59:1，两项都过线）。图标/描边/焦点环等
+     非文字用途仍用 --primary，保住 miuix 的观感。 */
+  --primary-strong: #2563EB;
   --primary-ink: #ffffff;
   --primary-soft: #EAF2FF;
   --canvas: #F7F7F7;
   --card: #ffffff;
-  --card-line: #ECECEC;
+  --outline: #D9D9D9;
   --ink: #000000;
   --dim: rgba(0, 0, 0, .6);
   --line: #E0E0E0;
+  --section-title: #5F6785;   /* miuix #8C93B0 只有 3.04:1，加深到 5.58:1 */
   --sub-bg: #F0F0F0;
   --sub-ink: #303030;
   --danger: #E94634;
   --danger-ink: #C93A2A;
   --danger-bg: rgba(233, 70, 52, .08);
-  --ok: #1E9E5A;
+  --ok: #15803D;   /* 原 #1E9E5A 3.45:1，加深到 5.02:1 */
   --focus: #3482FF;
-  --radius-card: 24px;
+  --radius-card: 16px;
   --radius-ctl: 16px;
   /* 动效令牌：全站唯一 easing 与时长梯度（见文件末「动效系统」段） */
   --ease: cubic-bezier(.2, 0, 0, 1);
@@ -35,7 +41,7 @@
   --dur-3: 200ms;   /* 入场、对话框 */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, .04), 0 4px 14px rgba(0, 0, 0, .06);
   --shadow-2: 0 2px 6px rgba(0, 0, 0, .06), 0 10px 28px rgba(0, 0, 0, .08);
-  --tap: 40px;            /* 控件下限：40px；触控设备由 @media (pointer:coarse) 抬到 44px */
+  --tap: 44px;            /* 控件下限：miuix MinHeight 40dp 与网页无障碍 44px 取更严 */
   --gap: 16px;
   --pad-x: max(16px, env(safe-area-inset-left));
   --pad-r: max(16px, env(safe-area-inset-right));
@@ -45,15 +51,17 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --primary: #3482FF;
+    --primary: #277AF7;
+    --primary-strong: #2563EB;   /* 暗色同值：#277AF7 配白字 4.03:1 仍不够 */
     --primary-ink: #ffffff;
     --primary-soft: #2B3B54;
     --canvas: #000000;
     --card: #242424;
-    --card-line: #393939;
+    --outline: #404040;
     --ink: #E6FFFFFF;          /* #FFFFFF 90% */
     --dim: rgba(255, 255, 255, .6);
     --line: #393939;
+    --section-title: #787E96;
     --sub-bg: #434343;
     --sub-ink: #E6FFFFFF;
     --danger: #E94634;
@@ -155,7 +163,7 @@ code { font-family: var(--mono); }
   transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
 .app-chip:hover { color: var(--ink); }
-.app-chip.on { background: var(--primary-soft); color: var(--primary); font-weight: 500; }
+.app-chip.on { background: var(--primary-soft); color: var(--primary-strong); font-weight: 500; }
 /* W8② 按压反馈统一：分段 chip 与 .btn/.tab 同款「按下轻微缩进」（只 transform，
    reduced-motion 由文件末尾一刀切撤掉）——之前点它是「无反应」，和全站不一致。 */
 .app-chip:active { transform: scale(.97); }
@@ -189,6 +197,10 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
   left: 50%; transform: translateX(-50%);
   bottom: max(10px, env(safe-area-inset-bottom));
   display: flex; gap: 2px;
+  /* 后台 6 项实测 399px > 390 视口，胶囊被左右裁掉。给 max-width 收进视口，
+     超出改**内部横滚**（沿用旧 tab 行的横滚行为，scrollbar 隐藏）。 */
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
   padding: 6px; margin: 0;
   border-radius: 999px;
   background: rgba(255, 255, 255, .62);
@@ -228,7 +240,7 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
               transform var(--dur-1) var(--spring);
 }
 .nav-item:hover { background: var(--card); color: var(--ink); }
-.nav-item.on { color: var(--primary); background: var(--primary-soft); font-weight: 500; }
+.nav-item.on { color: var(--primary-strong); background: var(--primary-soft); font-weight: 500; }
 
 @media (min-width: 900px) {
   .tabnav { display: none; }
@@ -241,35 +253,30 @@ button.app-chip { background: transparent; border: 0; font: inherit; cursor: poi
 }
 
 /* ---- 结构 ---- */
+/* 页面头 = miuix TopAppBar 的「大标题」态：title1 32 **Normal 字重**（层次靠字号，
+   不靠加粗），副标 body2 14 走 onSurfaceVariantSummary 60% 墨。折叠到 20（title3）
+   是滚动时的形态，网页无折叠行为，固定用大标题。 */
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.page-head h1 { font-size: 22px; font-weight: 400; margin: 0; letter-spacing: .2px; }
+.page-head h1 { font-size: 32px; font-weight: 400; margin: 0; letter-spacing: .2px; line-height: 1.2; }
+.page-head .sub { flex-basis: 100%; margin: 4px 0 0; font-size: 14px; color: var(--dim); }
 
 /* 折叠区（后台用户页的邀请记录）：卡片同款白面 + 内环，summary 即折叠把手。
    不给 .card 加 details——.card 带 hover 抬升与自身 padding，语义混在一起。 */
 details.section {
-  background: var(--card); background-clip: padding-box;
-  border: none; box-shadow: inset 0 0 0 1px var(--card-line);
+  background: var(--card);
   border-radius: var(--radius-card); padding: 14px 16px; margin-top: 16px;
 }
 details.section > summary { cursor: pointer; font-weight: 500; }
-.foot {
-  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-  padding: 12px var(--pad-r) calc(24px + env(safe-area-inset-bottom)) var(--pad-x);
-  border-top: 1px solid var(--line);
-  color: var(--dim); font-size: 13px;
-}
-
 /* ---- 卡片（miuix：白卡 + 24 圆角，落在 #F7F7F7 画布上）---- */
 .card {
-  background: var(--card); background-clip: padding-box;
-  border: none; box-shadow: inset 0 0 0 1px var(--card-line);
-  border-radius: var(--radius-card); padding: 20px;
-  transition: transform var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
-}
-/* 悬停轻抬 2px + 阴影过渡——仅 hover 设备（触屏没有悬停态，不给它）。
-   阴影与内环同列一条 box-shadow：列表阴影叠在环上，环色不丢。 */
-@media (hover: hover) {
-  .card:hover { transform: translateY(-2px); box-shadow: var(--shadow-1), inset 0 0 0 1px var(--card-line); }
+  /* miuix Card（CardDefaults）：surfaceContainer 纯填充 + 16 圆角，**没有描边**。
+     卡片与画布靠 color 差分离（#FFF 卡 / #F7F7F7 画布）——此前用 box-shadow:inset
+     画环是全站圆角异常与「行选中变黑后描边消失」的总根因：inset 阴影画在**子元素
+     背景之下**，任何触到卡片边缘的背景（表格行 hover、选中 chip、按钮）都会把它
+     盖掉，圆角那条线随之断裂。改成纯填充后没有环可被盖，圆角恒完整。 */
+  background: var(--card);
+  border-radius: var(--radius-card);
+  padding: 20px;
 }
 .card h2 { font-size: 17px; font-weight: 500; margin: 0 0 4px; }
 .card h3 { font-size: 15px; font-weight: 500; margin: 16px 0 6px; }
@@ -288,8 +295,11 @@ p.hint { margin: 6px 0; }
 
 /* 危险操作区（注销账号）：error 描边 + 淡底，与常规设置视觉隔离 */
 .danger-zone {
-  background: var(--danger-bg); background-clip: padding-box;
-  border: none; box-shadow: inset 0 0 0 1px var(--danger);
+  /* 危险区与常规卡片**必须视觉隔离**（危险操作不能看起来像普通设置）。卡片已无环，
+     这里保留一圈 error 描边——但用真 border 而非 inset 阴影：border 画在自身背景
+     之上，区内的按钮背景盖不掉它。 */
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
   border-radius: var(--radius-card); padding: 20px;
 }
 .danger-zone h2 { font-size: 17px; font-weight: 500; margin: 0 0 4px; color: var(--danger-ink); }
@@ -314,7 +324,7 @@ p.hint { margin: 6px 0; }
 /* input[type=date] 必须在名单里：漏了它，审计页的起始/结束日期会掉回 UA 原生
    形态（白底细边框 + mm/dd/yyyy），与站内控件两种观感（W8③ 的直接根因）。 */
 input[type=text], input[type=email], input[type=password], input[type=date],
-input[type=datetime-local], select, textarea {
+input[type=datetime-local], input[type=search], select, textarea {
   width: 100%; min-height: var(--tap); padding: 9px 15px;
   border: none; border-radius: var(--radius-ctl);
   background: var(--card); background-clip: padding-box; color: var(--ink); font: inherit;
@@ -378,7 +388,7 @@ input:-webkit-autofill {
   transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
 }
 .select-opt:hover, .select-opt.active { background: var(--canvas); }
-.select-opt[aria-selected=true] { color: var(--primary); font-weight: 500; }
+.select-opt[aria-selected=true] { color: var(--primary-strong); font-weight: 500; }
 .select-opt[aria-selected=true]::after { content: "✓"; font-size: 13px; }
 
 /* 勾选/单选自绘：原生 input 保留（语义/键盘/表单值全不动），只换外观 */
@@ -454,7 +464,7 @@ input:disabled { opacity: .6; }
 .btn:active { transform: scale(.97); }
 /* primary 的旧 border-color 与底色同色（无可见描边），border 退役后直接删；
    danger 是淡底 + error 实线环 → 迁成 box-shadow 内环，环色沿用 --danger。 */
-.btn.primary { background: var(--primary); color: var(--primary-ink); font-weight: 500; }
+.btn.primary { background: var(--primary-strong); color: var(--primary-ink); font-weight: 500; }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn.danger { background: var(--danger-bg); background-clip: padding-box; color: var(--danger-ink); box-shadow: inset 0 0 0 1px var(--danger); }
 .btn.danger:hover { background: rgba(233, 70, 52, .16); }
@@ -471,9 +481,19 @@ input:disabled { opacity: .6; }
   animation: spin 900ms linear infinite;
 }
 .btn .ico { width: 16px; height: 16px; }
+/* 触屏目标 ≥44px（WCAG 2.5.5 / Apple HIG 44pt）：触控设备上所有可点元素都要够大。
+   此前 .btn.small 只有 38px、.app-chip 28px、复选框 20px —— 在手机上是难点中的难点。 */
 @media (pointer: coarse) {
-  .btn, input[type=text], input[type=email], input[type=password], select, textarea { min-height: 44px; }
-  .btn.small { min-height: 38px; }
+  .btn, input[type=text], input[type=email], input[type=password], input[type=date],
+  input[type=datetime-local], input[type=search], select, textarea { min-height: 44px; }
+  .btn.small { min-height: 40px; }
+  .app-chip { min-height: 36px; }
+  .select-btn { min-height: 44px; }
+  .select-opt { min-height: 44px; }
+  .tab { min-height: 44px; }
+  .nav-item { min-height: 44px; }
+  input[type=checkbox], input[type=radio] { width: 24px; height: 24px; }
+  .pf-chip { width: 32px; height: 32px; }
 }
 
 .ico { width: 18px; height: 18px; flex: none; vertical-align: middle; }
@@ -481,35 +501,78 @@ input:disabled { opacity: .6; }
 
 /* ---- 列表行（设备 / Passkey / 配置）---- */
 .list { display: grid; gap: 10px; }
+/* .item：miuix BasicComponent 的行形态（min-height 56 / 内边距 16 / title17 + summary14
+   / 行间 8）。它**不是**卡片——独立成组时由 .group 外壳给面，卡内平铺时无面。
+   此前每行自带白面+环，嵌进 .card 就成了「卡片套卡片、圆角叠圆角」的畸形。 */
 .item {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  background: var(--card); background-clip: padding-box;
-  border: none; box-shadow: inset 0 0 0 1px var(--card-line);
-  border-radius: var(--radius-card); padding: 14px 16px;
-  transition: opacity var(--dur-2) var(--ease), transform var(--dur-2) var(--ease),
-              box-shadow var(--dur-2) var(--ease);
+  background: transparent;
+  border-radius: calc(var(--radius-card) - 4px);
+  padding: 14px 16px; min-height: 56px;
+  transition: opacity var(--dur-2) var(--ease), background-color var(--dur-1) var(--ease);
 }
-/* 退场：淡出 + 轻微下沉（transform，不碰 height/margin —— 不做折叠高度动画防抖动）。
-   选择器只认 .leaving 本身（.item 与 .session-row 共用），逐条退出的会话行也走它。
-   末行 .leaving:hover 特异性更高：悬停中被踢的行也照退场，不被抬升规则抢走。 */
+/* 退场：淡出 + 轻微下沉（transform，不碰 height/margin —— 不做折叠高度动画防抖动）。 */
 .leaving { opacity: 0; transform: translateY(-4px); }
-/* 悬停轻抬（仅 hover 设备；触屏没有 hover，不给它）：阴影与内环同列合并 */
+/* 行的悬停/选中反馈一律用**背景**，不用描边也不用抬升：
+   抬升阴影（translateY）是网页惯用法而非 miuix 手感；描边则会被行自身背景盖掉
+   （就是「点黑后圆角线消失」那类断裂）。miuix 的 BasicComponent 按下态只压背景。 */
 @media (hover: hover) {
-  .item:hover { transform: translateY(-2px); box-shadow: var(--shadow-1), inset 0 0 0 1px var(--card-line); }
+  .item:hover { background: var(--canvas); }
+  .group .item:hover { background: var(--sub-bg); }
 }
-/* 退场中撤抬升阴影（旧行为 box-shadow:none）；会话行现与 .item 同体
-   （.item session-row），退场环由下一行的 .item.leaving:hover 接管。 */
-.leaving:hover { opacity: 0; transform: translateY(-4px); box-shadow: none; }
+.item:focus-within { background: var(--canvas); }
 .item .grow { flex: 1 1 220px; min-width: 0; }
 .item .title { font-weight: 500; }
 .item .meta { color: var(--dim); font-size: 13px; }
-/* 当前会话的主色描边：旧 border-color:var(--primary) 迁成环色；hover 时环色与
-   抬升阴影同列合并（否则 hover 会把主色环盖掉，交互反馈丢失）。 */
-.item.current { box-shadow: inset 0 0 0 1px var(--primary); }
+/* 当前会话：主色淡底（不是描边——描边会被行背景盖掉） */
+.item.current { background: var(--primary-soft); }
 @media (hover: hover) {
-  .item.current:hover { box-shadow: var(--shadow-1), inset 0 0 0 1px var(--primary); }
+  .item.current:hover { background: var(--primary-soft); }
 }
-.item.leaving:hover { box-shadow: inset 0 0 0 1px var(--card-line); }
+
+/* =====================================================================
+   miuix 分组卡片（SettingsPage 的标准结构：SmallTitle + Card + BasicComponent 行）
+   ---------------------------------------------------------------------
+   这是 HyperOS 设置页的骨架，也是本站列表页的统一形态：
+     <h2 class="section-title">分区标题</h2>          ← SmallTitle（14 Bold，onBackgroundVariant）
+     <div class="group">                             ← Card（surfaceContainer 纯填充 16 圆角）
+       <div class="item">…title17 + summary14…</div>  ← BasicComponent（min-height 56，内边距 16）
+       <div class="item">…</div>                     ← 行间 0.75 dividerLine
+     </div>
+   此前每行自带白面+环，嵌进 .card 就成了「卡片套卡片、圆角叠圆角」的畸形，
+   且环被行背景盖掉后圆角断裂。现在**行无面、面归组**，圆角永远完整。 */
+.group {
+  background: var(--card);
+  border-radius: var(--radius-card);
+  overflow: hidden;            /* 把行的 hover 背景裁进圆角，末行四角自然圆 */
+}
+/* 行间分隔线用 border-top 而非 box-shadow：border 画在**自身背景之上**，
+   行 hover 变色时线不会被盖掉（box-shadow:inset 就会，见上方注释）。 */
+.group > .item + .item { border-top: 1px solid var(--line); }
+/* 独立分隔线（组内插一段说明/按钮时用）：左右各让出 16（行内边距） */
+.sep { border: 0; border-top: 1px solid var(--line); margin: 0 16px; }
+/* SmallTitle：14 Bold + onBackgroundVariant 蓝灰，上下 8 左右 28（照源码 28,8） */
+.section-title {
+  font-size: 14px; font-weight: 700; color: var(--section-title);
+  margin: 20px 0 8px; padding: 0 12px; letter-spacing: .2px;
+}
+.section-title:first-child { margin-top: 0; }
+
+/* 筛选/搜索工具条 = 一张卡（miuix 的 Card 内容区），字段走 grid 自适应。
+   此前筛选表单裸放在画布上，字段、快捷档位、按钮各漂各的，与下方表格没有
+   视觉归属关系——收进一张卡后「筛选 → 结果」的因果关系一眼可读。 */
+.toolbar {
+  background: var(--card);
+  border-radius: var(--radius-card);
+  padding: 16px;
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  align-items: end;
+}
+.toolbar > .field { margin: 0; }
+.toolbar .toolbar-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 工具条里的按钮排右侧；窄屏自动落到下一行 */
+.toolbar .toolbar-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
 
 .badge {
   display: inline-flex; align-items: center; gap: 4px;
@@ -517,7 +580,7 @@ input:disabled { opacity: .6; }
   background: var(--sub-bg); background-clip: padding-box; border: none; color: var(--dim);
   vertical-align: middle;
 }
-.badge.on { color: var(--primary); background: var(--primary-soft); }
+.badge.on { color: var(--primary-strong); background: var(--primary-soft); }
 .badge.off { color: var(--dim); }
 .badge.warn { color: var(--danger-ink); background: var(--danger-bg); }
 /* 邀请四态徽标的绿色档（accepted）：与 .ok-note 同一 --ok 取色 */
@@ -530,20 +593,26 @@ input:disabled { opacity: .6; }
    （word-break:break-all + 列宽塌缩）——给表格一个下限，让它在容器里横滚而不是
    把内容挤成竖排。 */
 .table-wrap {
-  overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 1px;
-  /* min-width:0（W8①）：它是 .content 网格的子项，表格 min-width 抬上来的
+  /* 表格是卡片：纯填充 + 16 圆角，**无环**（环会被 tbody 行 hover/选中背景盖掉，
+     圆角在底角断裂——用户报的「点黑后圆角线消失」就是它）。overflow 同时负责把
+     行背景裁进圆角，末行四角自然圆。 */
+  overflow: auto; -webkit-overflow-scrolling: touch;
+  /* min-width:0：它是 .content 网格的子项，表格 min-width 抬上来的
      「自动最小尺寸」会让整个页面横滚——压回容器内，横滚只发生在本盒子里 */
   min-width: 0;
-  background: var(--card); background-clip: padding-box;
-  border: none; box-shadow: inset 0 0 0 1px var(--card-line);
+  background: var(--card);
   border-radius: var(--radius-card);
 }
 table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 14px; }
 th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--dim); font-weight: 500; font-size: 13px; background: var(--card); position: sticky; top: 0; }
 tbody tr:last-child td { border-bottom: 0; }
-tbody tr:hover { background: var(--canvas); }
-td.wrap-cell { white-space: normal; word-break: break-all; }
+tbody tr:hover { background: var(--sub-bg); }
+/* 邮箱/长串的换行：**只在必要处断**。旧的 word-break:break-all 会把
+   e2e-super@example.co + m 这样劈开（审计页「操作者」列实测）。改成
+   overflow-wrap:anywhere——优先按词/标点断，放不下才在字符间断，且不断进
+   @ 符号前的关键位置。 */
+td.wrap-cell { white-space: normal; overflow-wrap: anywhere; word-break: normal; }
 
 /* ---- 标签页（改密码两条路等）---- */
 .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; overflow-x: auto; }
@@ -625,6 +694,31 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 .user-cell .avatar { flex: none; }
 .user-cell .grow { min-width: 0; }
 
+/* 两行堆叠的键值单元格：主行是人读的信息（邮箱），次行是技术标识（#uid）。
+   用 grid 竖排而不是空格拼接——拼接会在窄列里被折成 `e2e-super@example.co` + `m`。 */
+/* 行内并排的小徽标（用户表「安全」列等）：不换行、间距统一 */
+.row-inline { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.cell-stack { display: grid; gap: 1px; min-width: 0; }
+/* 邮箱一律截断 + title 看全文：审计/用户表的列宽都放不下完整邮箱，
+   overflow-wrap:anywhere 会把它劈成 `e2e-` + `super@example.com` 两行。 */
+.cell-stack .t {
+  display: block; max-width: 26ch;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cell-stack .s { font-size: 12px; color: var(--dim); }
+
+/* 表格里的邮箱：**截断不折行**。列多的表（用户页 9 列）按 overflow-wrap 折会把
+   e2e-super@example.com 劈成 `e2e- / super@exa / mple.com` 三行——既读不出也占行高。
+   改成单行 + 省略号，全文靠 title 提示与详情面板（GitHub 用户表同款）。
+   max-width 用 ch（字符宽）而不是 px：跟着字号缩放，中英混排不漂。 */
+.truncate {
+  display: block; max-width: 26ch;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 用户列固定一个下限：不让它被旁边 5 个窄列挤扁（表格整体仍可横滚） */
+td .user-cell .truncate { max-width: 24ch; }
+
 /* ---- 审计详情的键值排版 ---- */
 .detail-cell .kv { display: inline-block; margin-right: 10px; white-space: nowrap; }
 
@@ -666,6 +760,9 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 .pf-avatar-edit {
   position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%);
   opacity: 0; pointer-events: none;
+  /* z-index：.avatar 是 static，但它是 96px 实心圆且**覆盖整个按钮区域**，
+     不抬层级时 elementFromPoint 命中的是头像 → 按钮点不动（实测两端都中）。 */
+  z-index: 2;
   transition: opacity var(--dur-1) var(--ease);
   white-space: nowrap;
 }
@@ -692,8 +789,9 @@ td.wrap-cell { white-space: normal; word-break: break-all; }
 .detail { border-top: 1px dashed var(--line); margin-top: 12px; padding-top: 12px; }
 
 @media (max-width: 640px) {
-  .page-head h1 { font-size: 20px; }
-  .card, .danger-zone, .item, .table-wrap { border-radius: 18px; }
+  /* 圆角**不随断点变**：--radius-card 全站 16，窄屏另起 18 会与按钮/输入框的
+     16 并存成两种观感（这正是「圆角很奇怪」的来源之一）。窄屏只收字号与内边距。 */
+  .page-head h1 { font-size: 26px; }
   th, td { padding: 8px 10px; }
 }
 
@@ -784,9 +882,8 @@ tbody tr:nth-child(10) { animation-delay: 330ms; }
   input[type=checkbox]:active, input[type=radio]:active { transform: none; }
 }
 @media (prefers-reduced-motion: reduce) and (hover: hover) {
-  /* 抬升阴影撤掉，但描环保留（旧行为里 border 不随 hover 抬升消失） */
-  .card:hover, .item:hover { transform: none; box-shadow: inset 0 0 0 1px var(--card-line); }
-  .item.current:hover { box-shadow: inset 0 0 0 1px var(--primary); }
+  /* 行的悬停只留背景变化（无位移可撤） */
+  .item:hover { transform: none; }
 }
 /* 打印：动画不跑，backwards 的起始态会把内容钉在 opacity:0 —— 直接撤掉动画 */
 @media print {

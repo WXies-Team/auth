@@ -73,6 +73,24 @@ func TestPageTemplatesPresent(t *testing.T) {
 
 // cssRule 取一条以行首选择器开头的规则体（含大括号）。要求行首是为了不被
 // `.btn .ico` 这类更长的选择器抢匹配。
+// stripCSSComments 去掉 /* ... */，让「规则里有什么声明」的断言只看真声明。
+func stripCSSComments(css string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(css, "/*")
+		if i < 0 {
+			b.WriteString(css)
+			return b.String()
+		}
+		b.WriteString(css[:i])
+		j := strings.Index(css[i:], "*/")
+		if j < 0 {
+			return b.String()
+		}
+		css = css[i+j+2:]
+	}
+}
+
 func cssRule(css, selector string) (string, bool) {
 	i := strings.Index(css, "\n"+selector+" ")
 	if i < 0 {
@@ -225,9 +243,10 @@ func TestTopbarAccountAndAdminEntry(t *testing.T) {
 	if !strings.Contains(head, "{{if not .Minimal}}\n<!-- 顶栏常驻") {
 		t.Error("顶栏应整体由 not Minimal 门控（登录页无顶栏）")
 	}
-	// 登录页/403 页也不渲染底部 footer（整体 not Minimal 门控，连容器都不出）
-	if !strings.Contains(head, "{{if not .Minimal}}\n<footer class=\"foot\">") {
-		t.Error("footer 应整体由 not Minimal 门控（Minimal 页无页脚）")
+	// 全站零页脚（2026-10 定案）：页脚只承载固定说明，属于各页上下文而非全站导航，
+	// miuix 的 Scaffold 也从不渲染页脚。layout 里**连容器都不许出现**。
+	if strings.Contains(head, "<footer") || strings.Contains(head, `class="foot"`) {
+		t.Error("layout 不该再有 <footer>/`.foot`——全站已删页脚")
 	}
 	// 服务端应用注册表 JSON 注入点存在
 	if !strings.Contains(head, `<script type="application/json" id="known-apps">{{.AppsJSON}}</script>`) {
@@ -969,11 +988,60 @@ func TestMinimalPagesRenderNoFooter(t *testing.T) {
 		}
 		n += strings.Count(string(raw), "<footer")
 	}
-	if n != 1 {
-		t.Errorf("模板里应恰有一处 <footer>（layout 且由 not Minimal 门控），得到 %d 处", n)
+	if n != 0 {
+		t.Errorf("全站零页脚：模板集里不该有任何 <footer>，得到 %d 处", n)
 	}
-	// 注销撤销页（cmd/server 的独立 HTML）不进模板集：它自带的整页里也没有页脚
-	//（本包只对模板集负责，独立页由 cmd/server 自持——这里只钉模板口径）。
+	cssBytes, cerr := files.ReadFile("style.css")
+	if cerr != nil {
+		t.Fatalf("读 style.css: %v", cerr)
+	}
+	if strings.Contains(string(cssBytes), ".foot {") {
+		t.Error("style.css 不该再有 `.foot` 规则（页脚已整体退役）")
+	}
+	// 注销撤销页（cmd/server 的独立 HTML）不进模板集：它自带的整页里也没有页脚。
+}
+
+// miuix 规范对齐（2026-10 全站重构）：卡片是**纯填充无描边**、圆角全站唯一 16、
+// 分组行用 border-top 分隔。此前卡片用 box-shadow:inset 画环，而 inset 阴影画在
+// 子元素背景之下——表格行 hover、选中 chip、按钮一触到卡片边缘就把环盖掉，
+// 「点黑后圆角线消失」就是它。这三条钉住形态，防止回潮。
+func TestMiuixCardForm(t *testing.T) {
+	cssBytes, err := files.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("读 style.css: %v", err)
+	}
+	// 先剥注释：说明性文字里会提到 box-shadow:inset（讲历史根因），不算声明
+	css := stripCSSComments(string(cssBytes))
+
+	card, ok := cssRule(css, ".card")
+	if !ok {
+		t.Fatal("缺 .card 规则")
+	}
+	if strings.Contains(card, "box-shadow") {
+		t.Error("miuix Card 是纯填充、无描边——.card 不该有 box-shadow（会被子元素背景盖掉，圆角断裂）")
+	}
+	if !strings.Contains(card, "var(--radius-card)") {
+		t.Error(".card 应用 --radius-card，保证圆角与全站同源")
+	}
+	// 卡片圆角令牌恒 16（miuix CardDefaults.CornerRadius）：窄屏不许另起一套
+	if !strings.Contains(css, "--radius-card: 16px;") {
+		t.Error("--radius-card 应为 16px（miuix CardDefaults.CornerRadius）")
+	}
+	if strings.Contains(css, "border-radius: 18px") {
+		t.Error("不该有 border-radius:18px 的断点覆盖——圆角不随宽度变")
+	}
+	// 行间分隔线必须是 border（画在自身背景之上），不能是 inset 阴影（会被盖）
+	grp, ok := cssRule(css, ".group > .item + .item")
+	if !ok {
+		t.Fatal("缺 .group > .item + .item 分隔线规则")
+	}
+	if !strings.Contains(grp, "border-top") || strings.Contains(grp, "box-shadow") {
+		t.Error("卡内行的分隔线应用 border-top（inset 阴影会被行 hover 背景盖掉）")
+	}
+	// 已退役的 --card-line 不许回来
+	if strings.Contains(css, "--card-line") {
+		t.Error("--card-line 已随「卡片去环」退役，不该再出现")
+	}
 }
 
 // W3 头像底色派生：avatarColor 未设（0/越界）按 uid%8 从同一 8 色色板派生，
