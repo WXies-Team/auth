@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -77,13 +79,30 @@ func newRouteEnv(t *testing.T) *routeEnv {
 var uidSeq atomic.Int64
 
 // seedUser 直接落一行账号（注册链路要发邮件，路由测试用不到；业务层另有覆盖）。
+// seedUID 造一个与生产同形的 7 位 uid（1,000,000–9,999,999）。此前这里直接拿
+// 纳秒时间戳当 id，导致审计页/用户页把 19 位雪花当 uid 展示——线上真实建号走
+// internal/auth 的 newUserID(randUserID)（crypto/rand + 撞 PK 重试），恒 7 位；
+// 测试播种若不同形，看到的页面与线上不是一回事。
+func seedUID() int64 {
+	var b [4]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			return time.Now().UnixNano()%9_000_000 + 1_000_000
+		}
+		n := int64(binary.BigEndian.Uint32(b[:]))%9_000_000 + 1_000_000
+		if n >= 1_000_000 && n <= 9_999_999 {
+			return n
+		}
+	}
+}
+
 func seedUser(t *testing.T, e *routeEnv, email, password, role string) int64 {
 	t.Helper()
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), 10)
 	if err != nil {
 		t.Fatalf("散列密码: %v", err)
 	}
-	uid := time.Now().UnixNano()/1000*1000 + uidSeq.Add(1)
+	uid := seedUID()
 	if _, err := e.pool.Exec(
 		"INSERT INTO users (id, email, password_hash, created_at, token_version, role) VALUES (?,?,?,?,1,?)",
 		uid, email, string(hash), time.Now().UnixMilli(), role); err != nil {
