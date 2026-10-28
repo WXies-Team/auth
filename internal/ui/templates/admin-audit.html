@@ -1,0 +1,108 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>审计日志</h1>
+  <span class="dim" id="audit-total"></span>
+</div>
+
+<form class="row" id="audit-filter-form">
+  <label class="field grow" style="margin:0"><span>事件</span>
+    <select id="audit-action">
+      <option value="">全部</option>
+      <option value="register">register</option>
+      <option value="login.success">login.success</option>
+      <option value="login.fail">login.fail</option>
+      <option value="logout">logout</option>
+      <option value="password.change">password.change</option>
+      <option value="password.reset">重置密码</option>
+      <option value="email.change">email.change</option>
+      <option value="account.delete">account.delete</option>
+      <option value="session.kick">session.kick</option>
+      <option value="passkey.create">passkey.create</option>
+      <option value="passkey.rename">passkey.rename</option>
+      <option value="passkey.delete">passkey.delete</option>
+      <option value="totp.setup">totp.setup</option>
+      <option value="totp.enable">totp.enable</option>
+      <option value="totp.disable">totp.disable</option>
+      <option value="recovery.generate">recovery.generate</option>
+      <option value="recovery.consume">recovery.consume</option>
+      <option value="reauth">reauth</option>
+      <option value="profile.update">profile.update</option>
+      <option value="admin.user.role_change">admin.user.role_change</option>
+      <option value="admin.user.session_revoke">admin.user.session_revoke</option>
+      <option value="admin.session.revoke">admin.session.revoke</option>
+      <option value="admin.config.set">admin.config.set</option>
+      <option value="admin.audit.view">admin.audit.view</option>
+      <option value="admin.role.grant">admin.role.grant</option>
+      <option value="admin.role.revoke">admin.role.revoke</option>
+      <option value="admin.role.change">admin.role.change</option>
+      <!-- B4 OAuth：管理端接入配置登记/更新 -->
+      <option value="admin.oauth_client.write">接入配置</option>
+      <option value="internal.ensure">internal.ensure</option>
+      <!-- W4 新增操作（value 英文串 ↔ 服务端审计事件名，label 中文） -->
+      <option value="user.ban">封禁账号</option>
+      <option value="user.unban">解除封禁</option>
+      <option value="project.access_grant">加入项目名单</option>
+      <option value="project.access_revoke">移出项目名单</option>
+      <option value="project.restrict_on">开启项目限制</option>
+      <option value="project.restrict_off">关闭项目限制</option>
+      <option value="account.delete_requested">提交注销</option>
+      <option value="account.delete_cancelled">撤销注销</option>
+      <!-- B5 管理员换邮/重置资料 -->
+      <option value="user.email_change">更换邮箱</option>
+      <option value="user.profile_reset">重置资料</option>
+      <!-- B9 邀请建号与批量操作（邀请四事件按 创建/重发/撤销/接受 排；全集对拍见
+           internal/auth 的 TestAuditFilterOptionsMatchAuditConstants） -->
+      <option value="user.invite">邀请用户</option>
+      <option value="user.invite_resend">重发邀请</option>
+      <option value="user.invite_revoke">撤销邀请</option>
+      <option value="user.invite_accept">接受邀请</option>
+      <option value="admin.bulk_action">批量操作</option>
+    </select>
+  </label>
+  <label class="field grow" style="margin:0"><span>actor uid</span>
+    <input type="text" id="audit-actor" inputmode="numeric" autocomplete="off">
+  </label>
+  <label class="field grow" style="margin:0"><span>对象 uid</span>
+    <input type="text" id="audit-target" inputmode="numeric" autocomplete="off">
+  </label>
+  <!-- W8③ 时间范围：快捷档位 chips（选中态走站内 app-chip 的 primary-soft 环）+
+       两枚站内样式日期输入（type=date 也吃输入框规则，见 style.css 注释） -->
+  <div class="row" style="flex-basis:100%;gap:6px;margin-top:2px">
+    <span class="dim" style="font-size:13px">时间范围</span>
+    <span class="app-switch" role="group" aria-label="时间范围快捷档位">
+      <button type="button" class="app-chip" data-range="today" aria-pressed="false">今天</button>
+      <button type="button" class="app-chip" data-range="7" aria-pressed="false">近 7 天</button>
+      <button type="button" class="app-chip" data-range="30" aria-pressed="false">近 30 天</button>
+      <button type="button" class="app-chip on" data-range="custom" aria-pressed="true">自定义</button>
+    </span>
+  </div>
+  <label class="field grow" style="margin:0"><span>起始日期</span>
+    <input type="date" id="audit-from">
+  </label>
+  <label class="field grow" style="margin:0"><span>结束日期</span>
+    <input type="date" id="audit-to">
+  </label>
+  <button type="submit" class="btn">查询</button>
+  <button type="button" class="btn ghost" id="audit-reset">重置</button>
+</form>
+
+<p class="err" id="audit-error" role="alert" hidden></p>
+
+<div class="table-wrap">
+  <table>
+    <caption class="sr-only">审计事件</caption>
+    <thead>
+      <tr><th>时间</th><th>事件</th><th>结果</th><th>操作者</th><th>对象</th><th>IP</th><th>详情</th></tr>
+    </thead>
+    <tbody id="audit-body">
+      <tr><td colspan="7" class="empty">读取中…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="row" style="justify-content:flex-end;margin-top:10px">
+  <button type="button" class="btn small" id="audit-prev">上一页</button>
+  <span class="dim" id="audit-page">—</span>
+  <button type="button" class="btn small" id="audit-next">下一页</button>
+</div>
+{{end}}

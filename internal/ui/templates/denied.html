@@ -1,0 +1,10 @@
+{{define "content"}}
+<div class="card" style="max-width:520px;margin:48px auto;text-align:center">
+  <h1>无权访问</h1>
+  <p class="dim" style="margin-top:8px">{{if .DeniedApp}}项目「{{.DeniedApp}}」不在你的管理范围内，{{end}}你只能管理已获授权的项目数据；如需调整请联系平台管理员。</p>
+  <div class="row" style="justify-content:center;margin-top:16px">
+    <a class="btn primary" href="/web/admin/sessions">回到会话总览</a>
+    <a class="btn ghost" href="/web/console">回到概览</a>
+  </div>
+</div>
+{{end}}

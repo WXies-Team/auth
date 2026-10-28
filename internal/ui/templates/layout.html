@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="same-origin">
+<meta name="theme-color" content="#3482FF">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>{{.Title}} · Auth</title>
+<style>{{.Style}}</style>
+</head>
+<!-- data-super：平台管理员标记——与管理入口同一份 Data.IsSuper 依据，JS 侧 super 专属控件（封禁全局范围等）读它，不再自查角色 -->
+<body{{if .IsSuper}} data-super="1"{{end}}>
+<a class="skip" href="#main">跳到主要内容</a>
+
+{{if not .Minimal}}
+<!-- 顶栏常驻：左品牌、右账号胶囊 + 管理后台入口。
+     管理入口按 role 在**模板层**渲染（pageHandler 现查 users.role 传进来），
+     非管理员的 HTML 里根本没有这个按钮——不是前端藏一下。 -->
+<header class="topbar">
+  <div class="topbar-in">
+    <a class="brand" href="/web/console">
+      <span class="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" width="28" height="28"></span>
+      <span class="brand-name">Auth</span>
+    </a>
+    <div class="topnav">
+      {{if .IsAdmin}}<a class="btn small admin-entry" href="{{if .InAdmin}}/web/console{{else if .IsSuper}}/web/admin{{else}}/web/admin/sessions{{end}}" id="admin-entry">{{icon "shield-check"}} {{if .InAdmin}}返回控制台{{else}}管理后台{{end}}</a>{{end}}
+      {{if .Apps}}<span class="app-switch" id="app-switch" role="group" aria-label="项目切换">{{range .Apps}}<a class="app-chip{{if .Active}} on{{end}}" href="{{if .Key}}?app={{.Key}}{{else}}{{end}}" data-app="{{.Key}}"{{if .Active}} aria-current="true"{{end}}>{{.Label}}</a>{{end}}</span>{{end}}
+      <span class="acct">
+        <!-- B5 顶栏账号胶囊：有档案头像用图（24px），无图回退色块+首字（昵称首字符 > 邮箱首字符）；
+             显示名昵称优先，无昵称回退邮箱前缀。色块底色取 avatarColor 下标对应的色板值，
+             首字墨色按底色亮度择黑/白（avatarInkFor，成对注入——白墨对 8 色色板不足 4.5:1）。 -->
+        <span class="avatar" id="me-avatar" aria-hidden="true"{{if not .AvatarSrc}} style="background:{{.AvatarColorHex}};color:{{.AvatarInkHex}}"{{end}}>{{if .AvatarSrc}}<img src="{{.AvatarSrc}}" alt="">{{else}}{{.Initial}}{{end}}</span>
+        <span class="acct-email" id="topbar-email" title="{{.Email}}">{{.AcctName}}</span>
+      </span>
+    </div>
+  </div>
+  <nav class="tabnav" aria-label="分区导航（窄屏）">
+    {{range .Nav}}<a class="nav-item{{if .Active}} on{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{.Label}}</span></a>{{end}}
+  </nav>
+</header>
+{{end}}
+
+<div class="shell">
+  {{if not .Minimal}}
+  <nav class="sidenav" aria-label="主导航">
+    {{range .Nav}}<a class="nav-item{{if .Active}} on{{end}}" href="{{.Href}}"{{if .Active}} aria-current="page"{{end}}>{{icon .Icon}}<span>{{.Label}}</span></a>{{end}}
+  </nav>
+  {{end}}
+  <main id="main" class="content">
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    {{template "content" .}}
+  </main>
+</div>
+
+{{if not .Minimal}}
+<footer class="foot">
+  <span>Auth · 统一账号服务</span>
+  <span class="dim">会话为空闲 7 天 / 绝对 90 天过期</span>
+</footer>
+{{end}}
+
+<!-- 重新验证：管理后台与安全操作的 401 会把它顶出来，验过再自动重试原请求。
+     W2 改**分步**（GitHub sudo 模式）：第一步只出「当前密码」，服务端确认密码后
+     若账号开了两步验证才进第二步（只出码框）；无 2FA 账号一步到位。第二步复用
+     B2 的 N 态工厂（makeCodeToggle）在「两步验证码 ↔ 恢复码」间原地换语义
+     （label/placeholder/inputmode 同步换，值清空防误提交），不再一屏全堆。 -->
+<dialog id="reauth" class="dlg" aria-labelledby="reauth-title">
+  <form method="dialog" id="reauth-form">
+    <h2 id="reauth-title">重新验证身份</h2>
+    <p class="dim">为保护账号，敏感操作需要再次确认是你本人。</p>
+
+    <!-- 第一步：只收当前密码 -->
+    <div id="reauth-step1">
+      <label class="field"><span>当前密码</span>
+        <input type="password" id="reauth-password" autocomplete="current-password">
+      </label>
+    </div>
+
+    <!-- 第二步（仅账号已开两步验证时进入）：只收一个码，恢复码原地切换 -->
+    <div id="reauth-step2" class="hidden">
+      <label class="field"><span id="reauth-code-label">两步验证码（6 位）</span>
+        <input type="text" id="reauth-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入验证器上的 6 位验证码">
+      </label>
+      <button type="button" class="btn ghost small toggle-recovery" id="reauth-toggle-recovery">使用恢复码</button>
+    </div>
+
+    <p class="err" id="reauth-error" role="alert" hidden></p>
+    <div class="row end">
+      <button type="button" class="btn" id="reauth-cancel">取消</button>
+      <button type="submit" class="btn primary" id="reauth-ok">验证</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 服务端应用注册表（internal/ui knownApps 的唯一序列化出口，JS 从这里读清单） -->
+<script type="application/json" id="known-apps">{{.AppsJSON}}</script>
+<!-- 头像色板（internal/ui avatarPalette 的唯一序列化出口，JS 色块 chips 从这里取色） -->
+<script type="application/json" id="avatar-palette">{{.PaletteJSON}}</script>
+
+<script>{{.Script}}</script>
+</body>
+</html>

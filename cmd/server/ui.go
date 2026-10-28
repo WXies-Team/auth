@@ -1,59 +1,91 @@
 package main
 
 import (
+	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/WXies-Team/auth/internal/auth"
 	"github.com/WXies-Team/auth/internal/ui"
 )
 
-// 页面路由：Kotlin/Wasm SPA（web/ 工程）。服务端仍做**登录态与角色门禁**再下发
-// 壳——没登录 302 去登录页、非管理员 302 回概览，首屏不会先闪一帧空壳再跳走。
-// 页面里的数据由 SPA 调 JSON API 现取（响应 no-store，不落中间层缓存）。
+// 页面路由：服务端先做**登录态门禁**再渲染壳——没登录直接 302 去登录页，
+// 管理页非管理员 302 回概览。这样首屏不会先闪一帧「空控制台」再跳走。
+// 页面里的数据由 JS 调 /web/session 等端点现取（响应 no-store，不落中间层缓存）。
 //
-// 门禁只挡「壳」；数据层另有 admin 闸逐请求现查角色与授权（W2 的三道收口
-// 在数据端点侧照旧成立，页面层不再渲染 403 页——SPA 直接展示 API 的错误文案）。
+// W2 分级授权在页面层的三道收口（与 /admin/* 数据端点同源判定）：
+//   - gateSuper 页（用户/角色/配置）app-admin 直接 302 去会话总览——入口不渲染
+//     是模板层的事，直接敲 URL 也进不来；
+//   - 后台导航按角色分叉（super 六项 / app-admin 四项），非 super 的 HTML 里
+//     没有 users/roles/config 的入口；
+//   - 数据三页的 ?app= 越权直接 403 页（友好文案），不让越权过滤器落到 JS 层
+//     才报错。
 type pageGate int
 
 const (
 	gatePublic pageGate = iota // 登录页：已登录就别再看登录页
 	gateAuth                   // 自助台：未登录跳登录页
 	gateAdmin                  // 管理后台：未登录跳登录页，非管理员跳概览
-	gateSuper                  // 平台级页（用户/配置）：app-admin 跳会话总览
+	gateSuper                  // 平台级页（用户/角色/配置）：app-admin 跳会话总览
 )
 
-// registerPageRoutes 挂全部页面壳。title 是各路由的固定常量（SPAIndex 直拼，
-// 无用户输入）。
+// scopedPages 是读 ?app= 过滤的数据页：渲染前先验 app 参数与该管理员的授权，
+// 越权渲染 403 页（不进 JS）。
+var scopedPages = map[string]bool{
+	"admin-sessions": true,
+	"admin-audit":    true,
+	"admin-ai":       true,
+}
+
+// registerPageRoutes 挂全部页面壳（规格 B2 的页面清单）。
 func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
-	defs := []struct {
+	type pageDef struct {
 		path  string
+		name  string
 		title string
 		gate  pageGate
-	}{
-		{"/web/login", "登录", gatePublic},
-		{"/web/console", "概览", gateAuth},
-		{"/web/console/sessions", "登录会话", gateAuth},
-		{"/web/console/passkeys", "Passkey", gateAuth},
-		{"/web/console/security", "两步验证", gateAuth},
-		{"/web/console/account", "账号", gateAuth},
-		{"/web/admin", "用户", gateSuper},
-		{"/web/admin/access", "项目访问", gateAdmin},
-		{"/web/admin/sessions", "会话总览", gateAdmin},
-		{"/web/admin/audit", "审计日志", gateAdmin},
-		{"/web/admin/config", "配置中心", gateSuper},
-		{"/web/admin/ai-usage", "AI 用量", gateAdmin},
+	}
+	defs := []pageDef{
+		{"/web/login", "login", "登录", gatePublic},
+		{"/web/console", "console", "概览", gateAuth},
+		{"/web/console/sessions", "sessions", "登录会话", gateAuth},
+		{"/web/console/passkeys", "passkeys", "Passkey", gateAuth},
+		{"/web/console/security", "security", "两步验证", gateAuth},
+		{"/web/console/account", "account", "账号", gateAuth},
+		{"/web/admin", "admin-users", "用户", gateSuper},
+		{"/web/admin/access", "admin-access", "项目访问", gateAdmin},
+		{"/web/admin/sessions", "admin-sessions", "会话总览", gateAdmin},
+		{"/web/admin/audit", "admin-audit", "审计日志", gateAdmin},
+		{"/web/admin/config", "admin-config", "配置中心", gateSuper},
+		{"/web/admin/ai-usage", "admin-ai", "AI 用量", gateAdmin},
 	}
 	for _, d := range defs {
-		mux.Handle("GET "+d.path, spaHandler(svc, d.title, d.gate))
+		if !ui.Has(d.name) {
+			// 模板缺了要在启动时炸，别等用户点开 500
+			slog.Error("页面模板缺失", "name", d.name)
+			os.Exit(1)
+		}
+		mux.Handle("GET "+d.path, pageHandler(svc, d.name, d.title, d.gate))
 	}
 
-	// 接受邀请页（公开页）：token 即凭证，壳直接下发、验证与表单都在 SPA 里做。
-	// 限流 unauthed 15/分/IP（与 POST 共用 web-invite 桶）。
+	// 接受邀请页（B9，公开页）：token 即凭证，验过才渲染表单；无效/过期/已用渲染
+	// 同模板的错误变体（400 起头，学 authorize 的双变体）。限流 unauthed 15/分/IP
+	//（与 POST 共用 web-invite 桶：一张表单页 + 一次提交是正常配额）。
+	//
+	// **不挂 pageGate**：发邀请的管理员多半正登录着，若按 gatePublic 把已登录者
+	// 302 去控制台，等于「打开邀请链接被弹走」；接受成功时 AcceptInvite 另建会话并
+	// 覆写 cookie，登录态在这里没有需要保护的语义。
+	if !ui.Has("invite") {
+		slog.Error("页面模板缺失", "name", "invite")
+		os.Exit(1)
+	}
 	mux.Handle("GET /web/invite", withLogging(limitN("web-invite", 15,
-		spaHandler(svc, "接受邀请", gateNone))))
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			renderInvitePage(svc, w, r.URL.Query().Get("token"), "")
+		}))))
 
-	// 项目注册表 JSON（SPA 的 slug→展示名唯一出口）。公开只读：展示名不是秘密
-	//（邀请页/邮件同款对外）；回执走 writeJSON（no-store）。
+	// 项目注册表 JSON（SPA 的 slug→展示名唯一出口，与页面内联的 AppsJSON 同值）。
+	// 公开只读：展示名不是秘密（邀请页/邮件同款对外）；回执走 writeJSON（no-store）。
 	mux.Handle("GET /web/registry", withLogging(limitN("web-registry", 30,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusOK, ui.Registry())
@@ -70,66 +102,6 @@ func registerPageRoutes(mux *http.ServeMux, svc *auth.Service) {
 	mux.Handle("GET /web/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/web", http.StatusFound)
 	}))
-}
-
-// gateNone：无门禁的公开壳（接受邀请页——token 即凭证，登录态没有需要保护的语义）。
-const gateNone = pageGate(99)
-
-// spaHandler 按 gate 过门禁后下发 SPA 壳（no-store + UA Client Hints opt-in）。
-func spaHandler(svc *auth.Service, title string, gate pageGate) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var (
-			ok    bool
-			wc    auth.WebCaller
-			haveC bool
-		)
-		if ck, err := r.Cookie(auth.WebCookieName); err == nil && ck.Value != "" {
-			if c, err := svc.ValidWebSession(ck.Value); err == nil {
-				ok, wc, haveC = true, c, true
-			}
-		}
-		switch gate {
-		case gatePublic:
-			if ok {
-				http.Redirect(w, r, "/web/console", http.StatusFound)
-				return
-			}
-		case gateAuth:
-			if !ok {
-				http.Redirect(w, r, "/web/login", http.StatusFound)
-				return
-			}
-		case gateAdmin, gateSuper:
-			if !ok {
-				http.Redirect(w, r, "/web/login", http.StatusFound)
-				return
-			}
-			// 角色在会话解析时已现查（ValidWebSession 取 users.role），非管理员
-			// 连管理壳都拿不到——数据层另有 admin 闸逐请求再挡一道
-			if !haveC || !auth.IsAdminRole(wc.Role) {
-				http.Redirect(w, r, "/web/console", http.StatusFound)
-				return
-			}
-			if gate == gateSuper && !auth.IsSuperRole(wc.Role) {
-				http.Redirect(w, r, "/web/admin/sessions", http.StatusFound)
-				return
-			}
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Accept-CH", ui.ClientHintsHeader)
-		_, _ = w.Write([]byte(ui.SPAIndex(title)))
-	})
-}
-
-// webSessionOK 只判「cookie 会话现在是否有效」（页面门禁用，不需要 Caller 细节）。
-func webSessionOK(svc *auth.Service, r *http.Request) bool {
-	ck, err := r.Cookie(auth.WebCookieName)
-	if err != nil || ck.Value == "" {
-		return false
-	}
-	_, err = svc.ValidWebSession(ck.Value)
-	return err == nil
 }
 
 // registerStaticRoutes 挂静态资产（favicon 三件套 + 品牌 logo）与根路径重定向。
@@ -173,18 +145,181 @@ func registerStaticRoutes(mux *http.ServeMux) {
 	}))
 }
 
-// registerWasmRoutes 挂 Kotlin/Wasm 前端产物（/wasm/*，全部内嵌进二进制）。
-// authweb.js no-cache（内容常换、名字不变）；其余是内容哈希名，immutable 长缓存。
-func registerWasmRoutes(mux *http.ServeMux) {
-	mux.Handle("GET /wasm/{name...}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		data, ctype, cache, ok := ui.WasmAsset(r.PathValue("name"))
-		if !ok {
-			http.NotFound(w, r)
-			return
+// webSessionOK 只判「cookie 会话现在是否有效」（页面门禁用，不需要 Caller 细节）。
+func webSessionOK(svc *auth.Service, r *http.Request) bool {
+	ck, err := r.Cookie(auth.WebCookieName)
+	if err != nil || ck.Value == "" {
+		return false
+	}
+	_, err = svc.ValidWebSession(ck.Value)
+	return err == nil
+}
+
+// pageHandler 渲染一个页面：按 gate 决定放行还是 302，再按角色装配导航与
+// 项目切换器（W2）。adminScopes/adminRole 每次渲染现查——页面壳本身也带着
+// 授权语义（切换器选项、super 专属入口），缓存它等于缓存撤销。
+func pageHandler(svc *auth.Service, name, title string, gate pageGate) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var (
+			ok    bool
+			wc    auth.WebCaller
+			haveC bool
+			email string
+		)
+		if ck, err := r.Cookie(auth.WebCookieName); err == nil && ck.Value != "" {
+			if c, err := svc.ValidWebSession(ck.Value); err == nil {
+				ok, wc, haveC = true, c, true
+			}
 		}
-		w.Header().Set("Content-Type", ctype)
-		w.Header().Set("Cache-Control", cache)
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		_, _ = w.Write(data)
-	}))
+		if haveC {
+			email = wc.Email
+		}
+		switch gate {
+		case gatePublic:
+			if ok {
+				http.Redirect(w, r, "/web/console", http.StatusFound)
+				return
+			}
+		case gateAuth:
+			if !ok {
+				http.Redirect(w, r, "/web/login", http.StatusFound)
+				return
+			}
+		case gateAdmin, gateSuper:
+			if !ok {
+				http.Redirect(w, r, "/web/login", http.StatusFound)
+				return
+			}
+			// 角色在会话解析时已现查（ValidWebSession 取 users.role），非管理员
+			// 连管理页的 HTML 都拿不到——数据层另有 admin 闸逐请求再挡一道
+			if !ui.IsAdminRole(wc.Role) {
+				http.Redirect(w, r, "/web/console", http.StatusFound)
+				return
+			}
+		}
+
+		// ---- 后台页的 W2 装配：role/scopes → 导航、切换器、?app= 校验 ----
+		// isSuper 无条件算（概览页的顶栏入口指向也靠它：super 指用户页，app-admin
+		// 指会话总览）；scopes/nav/切换器只有后台页需要。
+		isSuper := haveC && auth.IsSuperRole(wc.Role)
+		var (
+			scopes []string
+			nav    []ui.NavItem
+			apps   []ui.AppChoice
+			curApp string
+		)
+		if gate == gateAdmin || gate == gateSuper {
+			if !isSuper {
+				var err error
+				if scopes, err = svc.AdminScopes(wc.UID); err != nil {
+					slog.Error("查应用授权失败", "uid", wc.UID, "err", err)
+					http.Error(w, "服务暂时不可用，请稍后重试", http.StatusServiceUnavailable)
+					return
+				}
+			}
+			// gateSuper 页对 app-admin 关门：直接敲 URL 也 302 去会话总览
+			if gate == gateSuper && !isSuper {
+				http.Redirect(w, r, "/web/admin/sessions", http.StatusFound)
+				return
+			}
+			// 数据三页的 ?app= 在渲染前定罪：名单外或未授权直接 403 页
+			curApp = r.URL.Query().Get("app")
+			if scopedPages[name] && curApp != "" {
+				if (!isSuper && !containsStrGo(scopes, curApp)) || (isSuper && !auth.AppAllowed(curApp)) {
+					renderDenied(w, curApp)
+					return
+				}
+			}
+			nav = ui.AdminNav(name, isSuper)
+			// 项目切换器只给**真正消费 ?app= 的数据页**渲染：用户/配置页不读这个
+			// 参数，摆一颗点了没反应的死控件只会让人以为坏了。
+			if scopedPages[name] {
+				apps = ui.SwitchApps(isSuper, scopes, curApp)
+			}
+		} else {
+			nav = ui.ConsoleNav(name)
+		}
+
+		// 顶栏账号胶囊与「管理后台」入口的渲染依据：邮箱取自现查过的会话身份，
+		// 管理入口按 users.role 判定（ui.IsAdminRole 与后台闸同一口径）——
+		// 非管理员的 HTML 里根本没有这个按钮，不是前端藏一下。
+		// B5：顶栏升级为头像+昵称，档案三件套随页渲染（GetProfile 无行回默认值，
+		// 查失败只降级为「色块+邮箱首字」形态，不拦页面——顶栏装饰不该 500 整页）。
+		d := ui.Data{
+			Title: title, Nav: nav, Minimal: gate == gatePublic,
+			Email: email, IsAdmin: haveC && ui.IsAdminRole(wc.Role),
+			IsSuper: isSuper, InAdmin: gate == gateAdmin || gate == gateSuper,
+			Apps: apps, CurrentApp: curApp,
+		}
+		if haveC {
+			d.UID = wc.UID // W3：顶栏头像底色在 avatarColor 未设时按 uid 派生
+			if prof, perr := svc.GetProfile(wc.UID); perr == nil {
+				d.Nickname = prof.Nickname
+				d.AvatarColor = prof.AvatarColor
+				if prof.AvatarImage != nil {
+					d.AvatarImage = *prof.AvatarImage
+				}
+			}
+		}
+		if err := ui.Render(w, name, d); err != nil {
+			// 头多半已经写出（Execute 中途失败），只能记日志让 500 兜底
+			slog.Error("渲染页面失败", "page", name, "err", err)
+		}
+	})
+}
+
+// containsStrGo 是 []string 的线性查找（cmd 层的小工具，与业务层的同名函数各归各家）。
+func containsStrGo(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+// renderDenied 渲染 ?app= 越权的 403 页（友好文案 + 回会话总览的出路）。
+// 文案点名是「应用范围」问题，避免被误读成登录态失效。
+func renderDenied(w http.ResponseWriter, app string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	if err := ui.Render(w, "denied", ui.Data{
+		Title: "无权访问", Minimal: true, DeniedApp: app,
+	}); err != nil {
+		slog.Error("渲染 403 页失败", "err", err)
+	}
+}
+
+// renderInvitePage 渲染接受邀请页（GET /web/invite 与 POST /web/invite 被打回时
+// 共用一处）。token 验不过 → 同模板的错误变体（400）；formErr 非空 → token 仍有效，
+// 重渲染表单并在字段下方就地报错（密码不合规这类可修正的错，不该把人踢去错误页）。
+func renderInvitePage(svc *auth.Service, w http.ResponseWriter, token, formErr string) {
+	inv, err := svc.InviteLookup(token)
+	if err != nil {
+		renderInviteError(w, errText(err))
+		return
+	}
+	status := 0
+	if formErr != "" {
+		status = http.StatusBadRequest
+	}
+	if err := ui.Render(w, "invite", ui.Data{
+		Title: "接受邀请", Minimal: true, Status: status,
+		Invite: &ui.InviteView{
+			Token: token, Email: inv.Email, App: inv.App,
+			AppName: ui.AppLabel(inv.App), Error: formErr,
+		},
+	}); err != nil {
+		slog.Error("渲染接受邀请页失败", "err", err)
+	}
+}
+
+// renderInviteError 渲染接受邀请页的错误变体（token 无效/过期/已用、表单体读不动）。
+func renderInviteError(w http.ResponseWriter, message string) {
+	if err := ui.Render(w, "invite", ui.Data{
+		Title: "无法接受邀请", Minimal: true, Status: http.StatusBadRequest,
+		Invite: &ui.InviteView{ErrorTitle: "无法接受邀请", ErrorMessage: message},
+	}); err != nil {
+		slog.Error("渲染接受邀请错误页失败", "err", err)
+	}
 }

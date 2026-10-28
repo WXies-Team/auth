@@ -1,0 +1,24 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>Passkey</h1>
+  <button type="button" class="btn primary" id="add-passkey">{{icon "plus"}} 添加 Passkey</button>
+</div>
+
+<p class="hint">Passkey 用系统指纹、面容或设备锁解锁登录，可跨设备跨浏览器共用同一批凭证——添加一把，在所有登录入口都能用。</p>
+<p class="err" id="passkey-error" role="alert" hidden></p>
+
+<div class="list" id="passkey-list" aria-live="polite">
+  <div class="empty">读取中…</div>
+</div>
+
+<p class="hint">删除前请确保还剩至少一种登录方式（密码、两步验证或另一把 Passkey）。</p>
+
+<dialog class="dlg" id="del-dialog" aria-labelledby="del-title">
+  <h2 id="del-title">删除 Passkey</h2>
+  <p id="del-desc" class="dim">删除后这把 Passkey 立即不能再用来登录。</p>
+  <form method="dialog" class="row end" style="margin-top:12px">
+    <button type="button" class="btn" id="del-cancel">取消</button>
+    <button type="button" class="btn danger" id="del-ok">删除</button>
+  </form>
+</dialog>
+{{end}}

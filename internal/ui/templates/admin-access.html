@@ -1,0 +1,23 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>项目访问</h1>
+</div>
+
+<p class="hint">每个项目一张卡：登录名单决定哪些邮箱能登录该项目；切到「仅限受邀」后，名单外的账号将无法登录。平台管理员看全部项目，项目管理员只看自己授权的项目。</p>
+
+<p class="err" id="access-error" role="alert" hidden></p>
+
+<div class="stack" id="access-list" aria-live="polite">
+  <div class="empty">读取中…</div>
+</div>
+
+<!-- 通用确认弹层：调整登录范围 / 移出名单（点名项目与邮箱） -->
+<dialog class="dlg" id="access-dlg" aria-labelledby="access-dlg-title">
+  <h2 id="access-dlg-title">确认操作</h2>
+  <p class="dim" id="access-dlg-desc"></p>
+  <div class="row end" style="margin-top:12px">
+    <button type="button" class="btn" id="access-dlg-cancel">取消</button>
+    <button type="button" class="btn primary" id="access-dlg-ok">确认</button>
+  </div>
+</dialog>
+{{end}}

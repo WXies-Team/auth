@@ -1,0 +1,110 @@
+{{define "content"}}
+<div class="login-shell">
+  <div class="brand-lg"><img class="ico" src="/favicon.svg" alt="" width="28" height="28"><span class="name">Auth</span></div>
+
+  <div class="card" id="login-card">
+    <div class="tabs" role="tablist" aria-label="登录方式" id="login-tabs">
+      <button type="button" class="tab" role="tab" id="tab-password" aria-selected="true" aria-controls="pane-password">密码登录</button>
+      <button type="button" class="tab" role="tab" id="tab-code" aria-selected="false" aria-controls="pane-code">邮箱验证码</button>
+      <button type="button" class="tab" role="tab" id="tab-reset" aria-selected="false" aria-controls="pane-reset">找回密码</button>
+    </div>
+
+    <!-- 密码登录（两步验证时原地换成单输入验证码——GitHub 式，「使用恢复码」
+         链接原地切换语义，不摆第二个输入框） -->
+    <form id="pane-password" role="tabpanel" aria-labelledby="tab-password">
+      <div id="step-password">
+        <label class="field"><span>邮箱</span>
+          <input type="email" id="login-email" autocomplete="username" required>
+        </label>
+        <label class="field"><span>密码</span>
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+      </div>
+      <div id="step-totp" class="hidden">
+        <p class="hint" id="totp-intro">该账号已开启两步验证：请输入验证器上的 6 位验证码完成登录。</p>
+        <!-- W5：发码按钮内联到验证码框右侧（同一行 flex），不再独占一行；
+             隐藏显隐一律走 .hidden 类（.btn 是 author 级 inline-flex，hidden 属性盖不住） -->
+        <div class="field">
+          <label for="login-code-2fa" id="totp-label">两步验证码（6 位）</label>
+          <div class="code-line">
+            <input type="text" id="login-code-2fa" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入验证器上的 6 位验证码">
+            <button type="button" class="btn hidden" id="send-2fa-code">获取验证码</button>
+          </div>
+        </div>
+        <!-- 邮箱码模式专属：发码按钮随模式显隐 + 已发送提示 -->
+        <p class="hint" id="totp-email-hint" hidden>验证码已发送到你的邮箱，5 分钟内有效</p>
+        <div class="row" style="gap:4px">
+          <button type="button" class="btn ghost small" id="toggle-email">没有验证器？获取邮箱验证码</button>
+          <button type="button" class="btn ghost small" id="toggle-recovery">使用恢复码</button>
+          <button type="button" class="btn ghost small" id="back-to-password">换用密码登录</button>
+        </div>
+      </div>
+      <p class="err" id="login-error" role="alert" hidden></p>
+      <button type="submit" class="btn primary" id="login-submit" style="width:100%">登录</button>
+    </form>
+
+    <!-- 邮箱验证码登录（W5：发码按钮内联到验证码框右侧） -->
+    <form id="pane-code" role="tabpanel" aria-labelledby="tab-code" class="hidden">
+      <label class="field"><span>邮箱</span>
+        <input type="email" id="code-email" autocomplete="username" required>
+      </label>
+      <div class="field">
+        <label for="code-code">邮箱验证码（6 位）</label>
+        <div class="code-line">
+          <input type="text" id="code-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+          <button type="button" class="btn" id="send-code">获取验证码</button>
+        </div>
+      </div>
+      <p class="hint">验证码 5 分钟内有效；没收到可查看垃圾箱，60 秒后可重新发送。</p>
+      <p class="err" id="code-error" role="alert" hidden></p>
+      <button type="submit" class="btn primary" style="width:100%">登录</button>
+    </form>
+
+    <!-- 找回密码（走已有的验证码重置端点；发码按钮同样内联） -->
+    <form id="pane-reset" role="tabpanel" aria-labelledby="tab-reset" class="hidden">
+      <label class="field"><span>注册邮箱</span>
+        <input type="email" id="reset-email" autocomplete="username" required>
+      </label>
+      <div class="field">
+        <label for="reset-code">邮箱验证码（6 位）</label>
+        <div class="code-line">
+          <input type="text" id="reset-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+          <button type="button" class="btn" id="send-reset-code">获取验证码</button>
+        </div>
+      </div>
+      <label class="field"><span>新密码（至少 8 位）</span>
+        <input type="password" id="reset-password" autocomplete="new-password" required>
+      </label>
+      <p class="hint">重置成功后，其它已登录设备会全部退出。</p>
+      <p class="err" id="reset-error" role="alert" hidden></p>
+      <button type="submit" class="btn primary" style="width:100%">重置密码</button>
+    </form>
+
+    <!-- 强制改密（W1）：登录回执 mustChangePassword=true 时顶替整个卡片——
+         密码登录把这一步输过的密码作为 oldPassword 带上；Passkey/验证码登录
+         没有密码可带，按放宽契约传空串。默认 .hidden（display:none !important） -->
+    <form id="step-force-pw" class="hidden" aria-labelledby="force-pw-title">
+      <h2 id="force-pw-title">请设置新密码</h2>
+      <p class="hint">出于安全考虑，必须设置新密码后才能继续使用。</p>
+      <label class="field"><span>新密码（至少 8 位）</span>
+        <input type="password" id="force-pw-new" autocomplete="new-password" required>
+      </label>
+      <label class="field"><span>确认新密码</span>
+        <input type="password" id="force-pw-confirm" autocomplete="new-password" required>
+      </label>
+      <p class="err" id="force-pw-error" role="alert" hidden></p>
+      <button type="submit" class="btn primary" id="force-pw-submit" style="width:100%">设置新密码并继续</button>
+    </form>
+
+    <!-- .btn 是 author 级 display:inline-flex，UA 的 [hidden]{display:none} 被它盖掉——
+         Passkey 入口的显隐（含下面的分隔线）一律走 .hidden 类 -->
+    <div class="or hidden" id="passkey-sep">或</div>
+    <button type="button" class="btn hidden" id="passkey-login" style="width:100%">{{icon "key-round"}} 使用 Passkey 登录</button>
+    <p class="err" id="passkey-error" role="alert" hidden></p>
+  </div>
+
+  <p class="dim" style="text-align:center;margin-top:16px;font-size:13px">
+    统一账号服务：支持密码、邮箱验证码与 Passkey；开启两步验证的账号在密码之后还需一步验证。
+  </p>
+</div>
+{{end}}

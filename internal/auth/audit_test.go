@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -271,6 +272,23 @@ func TestAuditQueryFilters(t *testing.T) {
 
 // ---- 审计筛选下拉 ↔ 事件常量的对拍（纯测试，无 DB）----
 
+// auditTemplateSelect 取管理台审计筛选 #audit-action 的 <select> 段原文。下拉在
+// internal/ui 的模板里，而 ui 保叶子包不 import auth（auth 也不 import ui）——两侧
+// 都看不到对方的 Go 标识符，走文件对拍（同 scripts/genicons/gen_test.go 的
+// os.ReadFile 模式）。
+func auditTemplateSelect(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "ui", "templates", "admin-audit.html"))
+	if err != nil {
+		t.Fatalf("读审计页模板: %v", err)
+	}
+	sel := regexp.MustCompile(`(?s)<select id="audit-action">.*?</select>`).Find(raw)
+	if sel == nil {
+		t.Fatal("admin-audit.html 缺 #audit-action 下拉")
+	}
+	return string(sel)
+}
+
 // auditSourceActions 从 audit.go 源码收集 Audit* 前缀的字符串常量——事件全集。Go 枚举
 // 不了常量，从 AST 取才不会漏掉后加的事件；AuditLogin 落库前按 OK 分流成
 // login.success / login.fail（见 Service.Audit），对拍时把裸 "login" 换成那两个值。
@@ -318,40 +336,15 @@ func auditSourceActions(t *testing.T) map[string]bool {
 	return out
 }
 
-// auditScreenSource 读审计页（Kotlin/Wasm 前端）的源码：M4 切流后筛选下拉的
-// option 值域落在 AdminAuditScreen.kt 的 AUDIT_ACTIONS 表里。
-func auditScreenSource(t *testing.T) string {
-	t.Helper()
-	src, err := os.ReadFile("../../web/src/wasmJsMain/kotlin/cn/horatio/authweb/screens/admin/AdminAuditScreen.kt")
-	if err != nil {
-		t.Fatalf("读审计屏源码: %v", err)
-	}
-	return string(src)
-}
-
-// auditActionsOf 从 AUDIT_ACTIONS 表提取 value 集合（空值「全部」除外）。
-func auditActionsOf(src string) map[string]bool {
+// auditTemplateActions 是下拉的 option 值域（空值「全部」除外）。
+func auditTemplateActions(sel string) map[string]bool {
 	out := map[string]bool{}
-	block := mustBlock(src, "val AUDIT_ACTIONS")
-	for _, m := range regexp.MustCompile(`"([^"]*)" to "`).FindAllStringSubmatch(block, -1) {
+	for _, m := range regexp.MustCompile(`value="([^"]*)"`).FindAllStringSubmatch(sel, -1) {
 		if m[1] != "" {
 			out[m[1]] = true
 		}
 	}
 	return out
-}
-
-// mustBlock 截取从 marker 起到第一个空行为止的源码段（AUDIT_ACTIONS 表的形状）。
-func mustBlock(src, marker string) string {
-	i := strings.Index(src, marker)
-	if i < 0 {
-		return ""
-	}
-	rest := src[i:]
-	if j := strings.Index(rest, "\n\n"); j > 0 {
-		return rest[:j]
-	}
-	return rest
 }
 
 // FX6a 必修2：审计筛选下拉与 audit.go 事件常量**双向逐字对拍**——常量缺 option，那类
@@ -360,11 +353,8 @@ func mustBlock(src, marker string) string {
 // 假选项）。新增 Audit* 事件忘记同步下拉，这里即红。
 func TestAuditFilterOptionsMatchAuditConstants(t *testing.T) {
 	want := auditSourceActions(t)
-	sel := auditScreenSource(t)
-	got := auditActionsOf(sel)
-	if len(got) < 40 {
-		t.Fatalf("从审计屏解析到的 option 太少（%d）——AUDIT_ACTIONS 结构变了？", len(got))
-	}
+	sel := auditTemplateSelect(t)
+	got := auditTemplateActions(sel)
 	var missing, extra []string
 	for a := range want {
 		if !got[a] {
@@ -386,9 +376,9 @@ func TestAuditFilterOptionsMatchAuditConstants(t *testing.T) {
 	}
 	// 本批补的三个：value 英文、label 中文（value 由上面的值域对拍钉住，这里钉 label）
 	for _, wantLabel := range []string{
-		`"user.invite_resend" to "重发邀请"`,
-		`"user.invite_revoke" to "撤销邀请"`,
-		`"admin.oauth_client.write" to "接入配置"`,
+		`value="user.invite_resend">重发邀请</option>`,
+		`value="user.invite_revoke">撤销邀请</option>`,
+		`value="admin.oauth_client.write">接入配置</option>`,
 	} {
 		if !strings.Contains(sel, wantLabel) {
 			t.Errorf("下拉缺 %s", wantLabel)

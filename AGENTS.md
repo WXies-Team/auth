@@ -29,7 +29,7 @@ fail ⇒ auto-rollback), nginx (BT-panel vhost) terminates TLS.
 | User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` — sole source of truth; diaries' `profiles` 三列已迁入并清理 |
 | AI rate limits / usage (per-uid) | `internal/ai/quota.go` (three gates, 口径 pinned in package comment) + `cmd/server/ai.go` |
 | User-visible email copy | `internal/auth/email.go` brand registry keyed by app (热量日记 / 开支日记 / neutral **Auth**), one shared shell |
-| Web console / admin pages (Kotlin/Wasm SPA) | logic `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go`, HTTP `cmd/server/{web,admin,ui}.go`, SPA `web/`（Gradle 子工程，产物经 `ci/build-server.sh` 拷入 `internal/ui/wasm/` 由 go:embed 伺服） |
+| Web console / admin pages | logic `internal/auth/{websession,loginflow,totp,passkey,audit,admin}.go`, HTTP `cmd/server/{web,admin,ui}.go`, pages `internal/ui/` |
 
 ## Commands
 
@@ -38,10 +38,7 @@ go build ./...        # compile gate
 go test ./...         # DB cases need TEST_MYSQL_DSN (dedicated schema, never prod) else Skip
 go vet ./...          # must stay clean
 go run ./scripts/genicons        # regenerate favicon/brand assets; -check = disk==generator
-ci/build-server.sh    # test + package dist/server.tar (same entry CI uses; builds web/ first)
-# Frontend (web/, Kotlin/Wasm + miuix 0.9.4):
-cd web && ./gradlew compileKotlinWasmJs --console=plain      # compile gate (needs JDK 21)
-cd web && ./gradlew wasmJsBrowserDistribution --console=plain  # produce dist -> copied into internal/ui/wasm by ci
+ci/build-server.sh    # test + package dist/server.tar (same entry CI uses)
 # Optional real-DB run (isolated mysqld only, NEVER prod; -p 1 — the two test packages
 # share one schema):
 TEST_MYSQL_DSN='root@tcp(127.0.0.1:<port>)/<schema>?charset=utf8mb4&parseTime=true&loc=Local' \
@@ -107,10 +104,8 @@ the same PR**—a stale guide ships wrong integrations.
     success** — GET/HEAD/OPTIONS never slide, else a hijacked cookie keeps sudo alive by
     polling; successful
    `reauthThen` / `reauthed` / admin-gate ops refresh via `slideReauth`, failures never do;
-   `POST /web/reauth` also refreshes; Passkey 路为 `POST /web/reauth/webauthn/options|finish`
-   （BeginLogin 非 discoverable，仪式行绑 uid、单次消费、method=passkey 审计）). UI auto-retries
-   on the fixed 401 `需要重新验证身份`; SPA 弹框按账号能力出方案（Passkey/两步验证码，无 MFA
-   才出密码兜底），并发 401 共享单例 in-flight promise。
+   `POST /web/reauth` also refreshes). UI auto-retries on the fixed 401
+   `需要重新验证身份`.
 9. **Roles**: `user | admin | super`. Effective app-admin = role `admin` + ≥1 `admin_scopes`
    row (grant implicit-promotes to admin; revoke-to-zero demotes to `user`). Only the root su
    (constant `RootSuperEmail = horatioxs@outlook.com`, resolved to a **uid** at startup so
@@ -150,18 +145,6 @@ the same PR**—a stale guide ships wrong integrations.
     `internal/ui.Render`'s `Accept-CH` header.
 
 ## Known pitfalls
-
-- **前端是 Kotlin/Wasm SPA（web/，miuix 0.9.4）**：旧模板前端（templates/style.css/app.js）
-  已于 M4 切流整体删除，别按旧文档找回。`go build` 前必须先有 wasm 产物（本地跑
-  `cd web && ./gradlew wasmJsBrowserDistribution` 一次即可；`internal/ui/wasm/.keep` 占位
-  保证缺产物时也能编译，页面壳会 404 到底）。页面壳（`ui.SPAIndex`）由 `spaHandler` 下发，
-  带 no-store + Accept-CH（丢 header 设备名回退 UA 解析）。审计筛选下拉的值域在
-  `web/.../screens/admin/AdminAuditScreen.kt` 的 `AUDIT_ACTIONS`——`TestAuditFilterOptionsMatchAuditConstants`
-  从那里双向对拍。`?app=` 页面层 403 门已随模板移除：授权收口在数据端点，页面壳不含数据。
-- **Wasm E2E 配方**（真浏览器全旅程验证）：隔离 mysqld 起服（`TOTP_ENC_KEY` 用测试口径
-  32×`k`，播种测试用同 key 加密 TOTP 秘钥否则登录 500「密文解开失败」）+ Playwright
-  `executablePath` 指系统 Chrome。两个坑：Compose 画布语义框的 `fill()` 是**追加不是替换**
-  （要 click→Ctrl+A→type）；点击要 `force:true`（canvas 拦截 actionability 检查）。
 
 - `JWT_SECRET` < 32 bytes and `TOTP_ENC_KEY` < 32 bytes → process refuses to start (by
   design). `TOTP_ENC_KEY` in prod backs up next to `JWT_SECRET`: losing it invalidates every

@@ -16,18 +16,6 @@ command -v "$GO" >/dev/null || { echo "::error::未找到 go，请先安装（�
 OUT_TAR="dist/server.tar"
 STAGE="dist/go-stage"
 
-echo "== web（Kotlin/Wasm 前端）=="
-# wasm 产物经 go:embed 进二进制（internal/ui/wasm/）；本地没装 JDK 时给出明确报错。
-if [ -f web/gradlew ]; then
-  command -v java >/dev/null || { echo "::error::未找到 java（wasm 前端需要 JDK 21+）"; exit 1; }
-  (cd web && ./gradlew wasmJsBrowserDistribution --console=plain)
-  rm -rf internal/ui/wasm
-  mkdir -p internal/ui/wasm
-  cp -r web/build/dist/wasmJs/productionExecutable/. internal/ui/wasm/
-  echo "wasm 产物已拷入 internal/ui/wasm/："
-  ls -lh internal/ui/wasm/
-fi
-
 echo "== go test =="
 # 真库测试靠 TEST_MYSQL_DSN 注入，CI 没有 MySQL 时自动 Skip，
 # 限流/aud 白名单/雪花 id/verify 路由这些不依赖数据库的测试照常跑。

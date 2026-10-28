@@ -1,0 +1,30 @@
+{{define "content"}}
+{{with .OAuth}}
+<div class="login-shell">
+  <div class="brand-lg"><img class="ico" src="/favicon.svg" alt="" width="28" height="28"><span class="name">Auth</span></div>
+
+  {{if .ErrorTitle}}
+  <!-- 错误页变体（同一张卡片语言）：出错原因 + 一条出路 -->
+  <div class="card" id="authorize-error">
+    <h2>{{.ErrorTitle}}</h2>
+    <p class="dim" style="margin-top:8px">{{.ErrorMessage}}</p>
+    <a class="btn" href="/web/console" style="width:100%;margin-top:14px">回到控制台</a>
+  </div>
+  {{else}}
+  <!-- 轻确认页（GitHub 式，always 显示，不静默）：项目名 + 回跳域名 + 说明，
+       继续/取消是同一张表单的两颗提交钮（decision 值分流），零 JS -->
+  <div class="card" id="authorize-card">
+    <h2>授权登录「{{.AppName}}」</h2>
+    <p class="dim" style="margin-top:6px">当前账号：{{.Email}}</p>
+    <p class="hint-box" style="margin-top:12px">登录到「{{.AppName}}」后，它将获得你的账号标识与邮箱。</p>
+    <p class="hint" style="margin-top:10px">回跳地址：{{.RedirectHost}}</p>
+    <form method="post" action="/oauth/authorize/confirm" style="margin-top:16px">
+      <input type="hidden" name="tx" value="{{.Tx}}">
+      <button type="submit" class="btn primary" name="decision" value="allow" style="width:100%">继续</button>
+      <button type="submit" class="btn" name="decision" value="deny" style="width:100%;margin-top:8px">取消</button>
+    </form>
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{end}}

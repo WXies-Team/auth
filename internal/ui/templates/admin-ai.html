@@ -1,0 +1,98 @@
+{{define "content"}}
+<div class="page-head">
+  <h1>AI 用量</h1>
+  <div class="row">
+    <label class="row" style="gap:6px"><span class="dim">近</span>
+      <select id="ai-days" aria-label="统计天数">
+        <option value="7">7 天</option>
+        <option value="30" selected>30 天</option>
+        <option value="90">90 天</option>
+      </select>
+    </label>
+    {{if .IsSuper}}<button type="button" class="btn" id="ai-edit-quota">{{icon "sliders-horizontal"}} 编辑限额</button>{{end}}
+  </div>
+</div>
+
+<p class="err" id="ai-error" role="alert" hidden></p>
+
+<!-- KPI 四卡：今日总使用 / 全站余量 / 今日活跃 / 近 7 天走势 -->
+<div class="kpi-row" id="ai-kpis">
+  <div class="card kpi" id="kpi-today"><span class="dim">今日总使用</span><strong id="kpi-today-val">—</strong><span class="hint" id="kpi-today-delta"></span></div>
+  <div class="card kpi"><span class="dim">全站今日余量</span><strong id="kpi-global-val">—</strong>
+    <span class="bar-track" style="margin-top:6px"><span class="bar-fill" id="kpi-global-bar" style="width:0%"></span></span>
+    <span class="hint" id="kpi-global-hint"></span>
+  </div>
+  <div class="card kpi"><span class="dim">今日活跃用户</span><strong id="kpi-active-val">—</strong></div>
+  <div class="card kpi"><span class="dim">近 7 天走势</span><span class="spark" id="kpi-spark" aria-hidden="true"></span><span class="hint" id="kpi-spark-hint"></span></div>
+</div>
+
+<section class="card" aria-labelledby="ai-days-title">
+  <h2 id="ai-days-title">每日用量</h2>
+  <p class="hint" id="ai-today"></p>
+  <div class="bars" id="ai-bars"></div>
+  <div class="empty hidden" id="ai-empty">所选区间内暂无用量记录。</div>
+</section>
+
+<section class="card" aria-labelledby="ai-users-title">
+  <h2 id="ai-users-title">按用户</h2>
+  <p class="hint">按所选时间范围用量降序；「占比」为该用户占全站同期用量的百分比。</p>
+  <div class="table-wrap">
+    <table>
+      <caption class="sr-only">用户用量</caption>
+      <thead>
+        <tr><th>用户</th><th>今日</th><th>区间合计</th><th>占比</th><th>每日限额余量</th></tr>
+      </thead>
+      <tbody id="ai-users-body">
+        <tr><td colspan="5" class="empty">读取中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 点行钻取：单用户明细（页内滑入，自带时间范围） -->
+<section class="card detail hidden" id="ai-detail" aria-labelledby="aid-title" aria-live="polite">
+  <div class="row between">
+    <h2 id="aid-title">用户用量明细</h2>
+    <button type="button" class="btn ghost" id="aid-close">关闭</button>
+  </div>
+  <div class="row">
+    <label class="row" style="gap:6px"><span class="dim">近</span>
+      <select id="aid-days" aria-label="明细天数">
+        <option value="7">7 天</option>
+        <option value="30" selected>30 天</option>
+        <option value="90">90 天</option>
+      </select>
+    </label>
+  </div>
+  <p class="hint" id="aid-meta"></p>
+  <span class="bar-track" style="max-width:320px"><span class="bar-fill" id="aid-limit-bar" style="width:0%"></span></span>
+  <p class="hint" id="aid-limit-hint"></p>
+  <div class="bars" id="aid-bars"></div>
+  <div class="empty hidden" id="aid-empty">该区间内暂无用量记录。</div>
+</section>
+
+<!-- 编辑限额（super only）：ai_* 四键，走 PUT /admin/config/{key} -->
+<dialog class="dlg" id="quota-dialog" aria-labelledby="quota-title">
+  <form method="dialog" id="quota-form">
+    <h2 id="quota-title">编辑 AI 限额</h2>
+    <p class="dim">改后 ≤10 秒热生效；留空表示不修改该键。</p>
+    <label class="field"><span>每用户每分钟次数（ai_rate_per_minute）</span>
+      <input type="text" id="q-input-rate" inputmode="numeric" autocomplete="off">
+    </label>
+    <label class="field"><span>全站并发（ai_concurrency）</span>
+      <input type="text" id="q-input-conc" inputmode="numeric" autocomplete="off">
+    </label>
+    <label class="field"><span>每用户每日（ai_daily_per_user）</span>
+      <input type="text" id="q-input-user" inputmode="numeric" autocomplete="off">
+    </label>
+    <label class="field"><span>全站每日（ai_daily_global）</span>
+      <input type="text" id="q-input-global" inputmode="numeric" autocomplete="off">
+    </label>
+    <p class="err" id="quota-error" role="alert" hidden></p>
+    <div class="row end">
+      <button type="button" class="btn" id="quota-cancel">取消</button>
+      <button type="submit" class="btn primary" id="quota-ok">保存</button>
+    </div>
+  </form>
+</dialog>
+{{end}}

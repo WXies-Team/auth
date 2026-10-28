@@ -509,30 +509,65 @@ func TestRolesEndpoints(t *testing.T) {
 	}
 }
 
-// 管理页门禁（M4 SPA 切流后页面层只剩门禁）：super 通行；app-admin 被 super 专属页
-// 302 去会话总览；普通用户一律 302 去概览。（旧「服务端渲染切换器/越权 ?app= 403 页」
-// 已随模板前端移除：数据端点的授权闸照旧现查，页面壳不含任何数据。）
+// 切换器渲染：super 见「全部」+ 两 app；app-admin 只见自己授权的 app（无「全部」）；
+// 普通用户无入口。super 专属页对 app-admin 302。
 func TestSwitcherRendering(t *testing.T) {
 	e := newRouteEnv(t)
 	superX := makeActor(t, e, "sw-super", "super", nil)
 	oneApp := makeActor(t, e, "sw-one", "admin", []string{"calorie-diary"})
 
-	if rec := e.do(t, "GET", "/web/admin", "", superX.cookieOnly); rec.Code != http.StatusOK {
-		t.Errorf("super 打用户页应 200，得到 %d", rec.Code)
+	pageOf := func(a *adminActor, path string) (int, string) {
+		rec := e.do(t, "GET", path, "", a.cookieOnly)
+		return rec.Code, rec.Body.String()
 	}
-	// app-admin：普通管理页 200，super 专属页（用户/配置）302 去会话总览
-	if rec := e.do(t, "GET", "/web/admin/sessions", "", oneApp.cookieOnly); rec.Code != http.StatusOK {
-		t.Errorf("app-admin 打会话总览应 200，得到 %d", rec.Code)
+
+	// super：三选项（全部/热量/开支）
+	code, html := pageOf(superX, "/web/admin/sessions")
+	if code != http.StatusOK {
+		t.Fatalf("super 打会话页应 200，得到 %d", code)
 	}
-	for _, path := range []string{"/web/admin", "/web/admin/config"} {
-		rec := e.do(t, "GET", path, "", oneApp.cookieOnly)
-		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/web/admin/sessions" {
-			t.Errorf("app-admin 访问 super 专属页 %s 应 302 去会话总览，得到 %d %q", path, rec.Code, rec.Header().Get("Location"))
+	for _, want := range []string{`id="app-switch"`, `data-app=""`, `data-app="calorie-diary"`, `data-app="expense-diary"`, `>全部<`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("super 切换器缺 %q", want)
 		}
+	}
+	// app-admin：只有 calorie，没有「全部」，没有 users/config/roles 导航入口
+	code, html = pageOf(oneApp, "/web/admin/sessions")
+	if code != http.StatusOK {
+		t.Fatalf("app-admin 打会话页应 200，得到 %d", code)
+	}
+	if !strings.Contains(html, `data-app="calorie-diary"`) {
+		t.Error("app-admin 切换器应含自己的 app")
+	}
+	if strings.Contains(html, `data-app="expense-diary"`) || strings.Contains(html, `>全部<`) {
+		t.Error("app-admin 切换器不该出现未授权 app 或「全部」")
+	}
+	for _, banned := range []string{`href="/web/admin"`, `href="/web/admin/config"`, `href="/web/admin/roles"`} {
+		if strings.Contains(html, banned) {
+			t.Errorf("app-admin 的 HTML 不该出现平台级入口 %q", banned)
+		}
+	}
+	// app-admin 直敲 super 专属页：302 去会话总览
+	rec := e.do(t, "GET", "/web/admin", "", oneApp.cookieOnly)
+	if rec.Code != http.StatusFound || !strings.Contains(rec.Header().Get("Location"), "/web/admin/sessions") {
+		t.Errorf("app-admin 访问用户页应 302 去会话页，得到 %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+	rec = e.do(t, "GET", "/web/admin/roles", "", oneApp.cookieOnly)
+	if rec.Code != http.StatusFound {
+		t.Errorf("app-admin 访问角色页应 302，得到 %d", rec.Code)
+	}
+	// 越权 ?app= 页面：403 页（友好文案）
+	code, html = pageOf(oneApp, "/web/admin/sessions?app=expense-diary")
+	if code != http.StatusForbidden || !strings.Contains(html, "无权访问") {
+		t.Errorf("越权 ?app= 页面应 403 且友好文案，得到 %d", code)
+	}
+	// super 的合法 ?app= 页面：200
+	if code, _ = pageOf(superX, "/web/admin/sessions?app=calorie-diary"); code != http.StatusOK {
+		t.Errorf("super 带合法 ?app= 应 200，得到 %d", code)
 	}
 	// 普通用户：管理页 302 去概览
 	plain := makeActor(t, e, "sw-plain", "user", nil)
-	rec := e.do(t, "GET", "/web/admin/sessions", "", plain.cookieOnly)
+	rec = e.do(t, "GET", "/web/admin/sessions", "", plain.cookieOnly)
 	if rec.Code != http.StatusFound || !strings.Contains(rec.Header().Get("Location"), "/web/console") {
 		t.Errorf("普通用户访问管理页应 302 去概览，得到 %d %s", rec.Code, rec.Header().Get("Location"))
 	}
