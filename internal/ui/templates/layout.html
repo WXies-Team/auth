@@ -64,28 +64,32 @@
 {{end}}
 
 <!-- 重新验证：管理后台与安全操作的 401 会把它顶出来，验过再自动重试原请求。
-     W2 改**分步**（GitHub sudo 模式）：第一步只出「当前密码」，服务端确认密码后
-     若账号开了两步验证才进第二步（只出码框）；无 2FA 账号一步到位。第二步复用
-     B2 的 N 态工厂（makeCodeToggle）在「两步验证码 ↔ 恢复码」间原地换语义
-     （label/placeholder/inputmode 同步换，值清空防误提交），不再一屏全堆。 -->
+     能力自适应（2026-10 定案）：有 Passkey 出主按钮；开了两步验证出码框（与
+     Passkey 并列二选一，恢复码原地切换）；两者皆无才出密码框兜底——强因子
+     优先，纯密码账号不会被锁死改密/改邮。能力由 /web/session 现查后点亮。 -->
 <dialog id="reauth" class="dlg" aria-labelledby="reauth-title">
   <form method="dialog" id="reauth-form">
     <h2 id="reauth-title">重新验证身份</h2>
     <p class="dim">为保护账号，敏感操作需要再次确认是你本人。</p>
 
-    <!-- 第一步：只收当前密码 -->
-    <div id="reauth-step1">
-      <label class="field"><span>当前密码</span>
-        <input type="password" id="reauth-password" autocomplete="current-password">
-      </label>
+    <!-- Passkey 路（有凭证才亮）：走 /web/reauth/webauthn 仪式 -->
+    <div id="reauth-passkey-wrap" class="hidden">
+      <button type="button" class="btn primary" id="reauth-passkey">使用 Passkey 验证</button>
     </div>
 
-    <!-- 第二步（仅账号已开两步验证时进入）：只收一个码，恢复码原地切换 -->
-    <div id="reauth-step2" class="hidden">
+    <!-- 两步验证码路（开了 2FA 才亮）：恢复码原地切换（N 态工厂） -->
+    <div id="reauth-code-wrap" class="hidden">
       <label class="field"><span id="reauth-code-label">两步验证码（6 位）</span>
         <input type="text" id="reauth-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入验证器上的 6 位验证码">
       </label>
       <button type="button" class="btn ghost small toggle-recovery" id="reauth-toggle-recovery">使用恢复码</button>
+    </div>
+
+    <!-- 密码兜底（无 Passkey 无 2FA 的纯密码账号） -->
+    <div id="reauth-password-wrap" class="hidden">
+      <label class="field"><span>当前密码</span>
+        <input type="password" id="reauth-password" autocomplete="current-password">
+      </label>
     </div>
 
     <p class="err" id="reauth-error" role="alert" hidden></p>
