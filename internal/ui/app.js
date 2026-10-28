@@ -1690,7 +1690,7 @@ document.addEventListener('error', e => {
 function userCell(u, px) {
   const name = (u.nickname || '').trim() || u.email;
   return `<span class="user-cell">${avatarHTML(u, px)}
-    <span class="grow"><span class="title">${esc(name)}</span>${u.nickname ? `<br><span class="meta wrap-cell">${esc(u.email)}</span>` : ''}</span></span>`;
+    <span class="grow"><span class="title truncate" title="${esc(u.email)}">${esc(name)}</span>${u.nickname ? `<br><span class="meta truncate" title="${esc(u.email)}">${esc(u.email)}</span>` : ''}</span></span>`;
 }
 function scopeSummary(u) {
   if (u.role === 'super') return '管理全部项目';
@@ -2018,9 +2018,9 @@ function initAdminUsers() {
             <td class="mono">${esc(u.uid)}</td>
             <td>${u.role === 'user' ? `<span class="badge">${ROLE_LABEL.user}</span>` : `<span class="badge on">${esc(ROLE_LABEL[u.role] || u.role)}</span>`}</td>
             <td>${esc(scopeSummary(u))}</td>
-            <td>${u.totpEnabled ? '已开启' : '未开启'}</td>
-            <td>${u.passkeyCount}</td>
-            <td>${esc(fmtTime(u.createdAt))}</td>
+            <td class="row-inline">${u.totpEnabled
+              ? '<span class="badge on">两步验证</span>'
+              : '<span class="badge off">无两步验证</span>'}<span class="badge${u.passkeyCount ? '' : ' off'}">${u.passkeyCount} 个 Passkey</span></td>
             <td><button type="button" class="btn small">管理</button></td>
           </tr>`);
         tr.querySelector('button').addEventListener('click', () => openDetail(u.uid, u.email));
@@ -2781,14 +2781,21 @@ function initAdminAudit() {
         return;
       }
       res.items.forEach(it => {
-        const who = it.actorUid ? `${it.actorUid} ${it.actorEmail || ''}` : (it.actorEmail || '匿名');
+        // 操作者/对象：**邮箱是人读的主信息**，uid 是技术标识放次行（此前两者挤一格，
+        // 19 位雪花 + 邮箱被 break-all 劈开）。匿名 = 无邮箱也无 uid。
+        const actor = it.actorEmail
+          ? `<span class="cell-stack"><span class="t">${esc(it.actorEmail)}</span>${it.actorUid ? `<span class="s mono">#${esc(it.actorUid)}</span>` : ''}</span>`
+          : (it.actorUid ? `<span class="s mono">#${esc(it.actorUid)}</span>` : '匿名');
+        const target = it.targetUid
+          ? `<span class="mono">#${esc(it.targetUid)}</span>`
+          : '—';
         body.appendChild(node(`
           <tr>
             <td>${esc(fmtTime(it.ts))}</td>
             <td class="mono">${esc(it.action)}</td>
             <td>${it.result === 'ok' ? '<span class="badge on">成功</span>' : '<span class="badge warn">失败</span>'}</td>
-            <td class="wrap-cell">${esc(who)}</td>
-            <td class="mono">${it.targetUid ? esc(it.targetUid) : '—'}</td>
+            <td class="wrap-cell">${actor}</td>
+            <td class="wrap-cell">${target}</td>
             <td class="mono">${esc(it.ip || '—')}</td>
             <td class="wrap-cell detail-cell">${detailText(it.detail)}</td>
           </tr>`));
@@ -3005,7 +3012,10 @@ function initAdminAI() {
       // 今日合计取 rep.today（今天没打点就如实显示 0），不拿 days[0] 冒充
       $('#ai-today').textContent = `今日（${todayStr()}）合计 ${today} 次`;
       const list = rep.days || [];
-      if (!list.length) {
+      // 空态判据是**区间内有没有用量**，不是「有没有条目」：后端恒回满区间的天数，
+      // 零用量时会铺成一面 30 行全 0 的空条形图——正是「半成品感」的来源。
+      const dayTotal = list.reduce((a, d) => a + Number(d.count || 0), 0);
+      if (!list.length || dayTotal === 0) {
         bars.innerHTML = '';
         $('#ai-empty').classList.remove('hidden');
       } else {
@@ -3014,7 +3024,8 @@ function initAdminAI() {
         bars.innerHTML = '';
         list.forEach(d => {
           const n = Number(d.count || 0);
-          const pct = max > 0 ? Math.max(2, Math.round(n / max * 100)) : 0;
+          // 0 值不画条：Math.max(2,…) 会给每一天都留一小截蓝头，看着像「有数据」
+          const pct = n === 0 ? 0 : Math.round(n / max * 100);
           bars.appendChild(node(`
             <div class="bar-row">
               <span class="dim">${esc(d.date)}</span>
@@ -3072,7 +3083,10 @@ function initAdminAI() {
         : '未配置每日限额。';
       const list = d.days || [];
       const box = $('#aid-bars');
-      if (!list.length) {
+      const total = list.reduce((a, x) => a + Number(x.count || 0), 0);
+      // 空态判据是**区间内有没有用量**，不是「有没有条目」：后端恒回满区间的天数，
+      // 零用量时 30 条全 0 会铺成一面空条形图——那正是「半成品感」的来源。
+      if (!list.length || total === 0) {
         box.innerHTML = '';
         $('#aid-empty').classList.remove('hidden');
         return;
@@ -3085,7 +3099,7 @@ function initAdminAI() {
         box.appendChild(node(`
           <div class="bar-row">
             <span class="dim">${esc(x.date)}</span>
-            <span class="bar-track"><span class="bar-fill" style="width:${Math.max(2, Math.round(n / max * 100))}%"></span></span>
+            <span class="bar-track"><span class="bar-fill" style="width:${n === 0 ? 0 : Math.round(n / max * 100)}%"></span></span>
             <span class="bar-num">${n}</span>
           </div>`));
       });
@@ -3311,9 +3325,23 @@ function decorateSelects(root) {
   $$('select', root || document).forEach(decorateSelect);
 }
 
+/* ---------- theme-color 跟随系统明暗（E-8）----------
+   <meta name="theme-color"> 写死 #3482FF 时，暗色下浏览器地址栏/标签仍是亮蓝，
+   与 #000 画布打架。这里按 prefers-color-scheme 同步切换（浅色用 miuix 主色，
+   暗色用画布黑）。无 matchMedia 的老浏览器跳过，不影响功能。 */
+function syncThemeColor() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta || !window.matchMedia) return;
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  const apply = () => { meta.setAttribute('content', mq.matches ? '#000000' : '#3482FF'); };
+  apply();
+  (mq.addEventListener ? mq.addEventListener('change', apply) : mq.addListener(apply));
+}
+
 /* ---------- 入口 ---------- */
 document.addEventListener('DOMContentLoaded', () => {
   drainFlash();   // 跨页提示先出（注销撤销 / 强制改密成功 / 注销已提交）
+  syncThemeColor();
   wireReauth();
   wireTabs();
   decorateSelects(document);   // W9：静态 <select> 全部换站内下拉（值载体保留）
