@@ -213,13 +213,24 @@ func TestLegacySessionsResponseShape(t *testing.T) {
 		got = append(got, k)
 	}
 	joined := strings.Join(got, ",")
-	for _, want := range []string{"id", "app", "device", "ip", "createdAt", "lastSeenAt", "current"} {
+	// 2026-11 追加 ipRegion（IP 粗略归属地）：**纯附加**字段，旧的日记客户端按
+	// ignoreUnknownKeys 解析，不构成破坏性变更，因此这里钉 8 个字段。
+	// 本用例故意用内网 IP 10.1.2.3 登录——内网地址不该被安上公网归属地，
+	// 顺带钉住「不猜」的口径：ipRegion 必须是空串。
+	for _, want := range []string{"id", "app", "device", "ip", "ipRegion", "createdAt", "lastSeenAt", "current"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("设备行缺字段 %s，得到 %s", want, joined)
 		}
 	}
-	if len(items[0]) != 7 {
-		t.Errorf("设备行应恰好 7 个字段，得到 %d（%s）", len(items[0]), joined)
+	if len(items[0]) != 8 {
+		t.Errorf("设备行应恰好 8 个字段，得到 %d（%s）", len(items[0]), joined)
+	}
+	var region string
+	if raw, ok := items[0]["ipRegion"]; ok {
+		_ = json.Unmarshal(raw, &region)
+	}
+	if region != "" {
+		t.Errorf("内网 IP 10.1.2.3 不该有归属地，得到 %q", region)
 	}
 }
 

@@ -7,6 +7,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20261028042204-6a276cc7c4f9
 	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/oauth2 v0.37.0

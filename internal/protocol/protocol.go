@@ -183,6 +183,9 @@ type SessionInfo struct {
 	App        string `json:"app"`
 	Device     string `json:"device"`
 	IP         string `json:"ip"`
+	// IPRegion 是 IP 的粗略归属地（「江苏 南京」），服务端用内嵌离线库现算；
+	// 查不到（内网/无库/IPv6）就是空串，前端据此不渲染这一段——不猜。
+	IPRegion   string `json:"ipRegion"`
 	CreatedAt  int64  `json:"createdAt"`
 	LastSeenAt int64  `json:"lastSeenAt"`
 	Current    bool   `json:"current"`

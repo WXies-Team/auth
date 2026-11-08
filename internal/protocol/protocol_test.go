@@ -69,11 +69,13 @@ func TestProtocolMatchesDiaryAuthDtos(t *testing.T) {
 }
 
 // TestSessionInfoFields 钉死 SessionInfo 的字段集与 id 形态（自钉用例，防漂移）：
-// 消费端（日记侧会话页 / 本仓控制台）按这七个字段渲染，多一列少一列都是契约变更；
+// 消费端（日记侧会话页 / 本仓控制台）按这八个字段渲染，多一列少一列都是契约变更；
 // id 必须是 **string**——63 位雪花经浏览器 JSON.parse 往返只有 53 位精度，序列化成
 // number 会被静默抹圆，前端拿抹圆的 id 踢人只会 404（见 protocol.go 的注释）。
 func TestSessionInfoFields(t *testing.T) {
-	want := []string{"id", "app", "device", "ip", "createdAt", "lastSeenAt", "current"}
+	// 2026-11 追加 ipRegion（IP 粗略归属地）：**纯附加**字段，旧消费端忽略未知字段即可，
+	// 不构成破坏性变更；日记侧会话页要用时按这个顺序同步快照。
+	want := []string{"id", "app", "device", "ip", "ipRegion", "createdAt", "lastSeenAt", "current"}
 	typ := reflect.TypeOf(SessionInfo{})
 	got := make([]string, 0, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {

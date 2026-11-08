@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WXies-Team/auth/internal/geoip"
 	"github.com/WXies-Team/auth/internal/protocol"
 )
 
@@ -143,6 +144,7 @@ func (s *Service) ListSessions(userID, currentSID int64, apps []string) ([]proto
 		}
 		it.ID = strconv.FormatInt(id, 10)
 		it.Device = shortDevice(ua)
+		it.IPRegion = geoip.Region(it.IP)
 		it.Current = id == currentSID
 		out = append(out, it)
 	}

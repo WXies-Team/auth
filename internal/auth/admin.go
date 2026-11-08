@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WXies-Team/auth/internal/geoip"
 	"github.com/WXies-Team/auth/internal/protocol"
 )
 
@@ -107,6 +108,7 @@ type AdminSession struct {
 	App         string `json:"app"`
 	Device      string `json:"device"`
 	IP          string `json:"ip"`
+	IPRegion    string `json:"ipRegion"`
 	CreatedAt   int64  `json:"createdAt"`
 	LastSeenAt  int64  `json:"lastSeenAt"`
 	Nickname    string `json:"nickname"`
@@ -441,7 +443,7 @@ func (s *Service) AdminUserDetail(uid int64) (*AdminUserDetail, error) {
 	detail.Sessions = make([]protocol.SessionInfo, 0, len(sessions))
 	for _, it := range sessions {
 		detail.Sessions = append(detail.Sessions, protocol.SessionInfo{
-			ID: it.ID, App: it.App, Device: it.Device, IP: it.IP,
+			ID: it.ID, App: it.App, Device: it.Device, IP: it.IP, IPRegion: it.IPRegion,
 			CreatedAt: it.CreatedAt, LastSeenAt: it.LastSeenAt,
 			Current: false, // 后台视角没有「本机」概念
 		})
@@ -691,6 +693,7 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query, ipFilter st
 		}
 		it.ID = strconv.FormatInt(id, 10)
 		it.Device = shortDevice(ua)
+		it.IPRegion = geoip.Region(it.IP)
 		out = append(out, it)
 	}
 	if err := rows.Err(); err != nil {
