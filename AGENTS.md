@@ -24,7 +24,7 @@ fail ⇒ auto-rollback), nginx (BT-panel vhost) terminates TLS.
 | Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` (this repo was照抄自 that family); divergences commented in place |
 | OTP / 2FA factors | `internal/auth/otp.go`, `loginflow.go`, `totp.go` + `otp_codes`/`login_states` comments in `internal/db/schema.sql` |
 | Sessions / devices | `internal/auth/session.go` (sid 63-bit snowflake ⇒ **JSON string**, JS-safe; kick = session layer only) |
-| IP 归属地 | `internal/geoip/`（ip2region v2 离线 xdb **随二进制内嵌**，11 MB，只覆盖 v4；私网/回环/IPv6 返回空串，前端不渲染那一段） |
+| IP 归属地 | `internal/geoip/`（ip2region v2 离线 xdb **随二进制内嵌**，v4 11 MB + v6 36 MB **双栈**；私网/回环/保留段返回空串，前端不渲染那一段） |
 | Account lifecycle (ban / grace-delete / invites / bulk) | `internal/auth/{gate,adminctl,pendingdelete,invite,bulk}.go` — gate order & sweeper semantics commented in place |
 | Web-app OAuth (BFF) | `internal/auth/oauth.go` + `cmd/server/oauth.go`; authorize tx & codes are **in-memory single-instance** state |
 | User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` — sole source of truth; diaries' `profiles` 三列已迁入并清理 |
@@ -158,10 +158,15 @@ the same PR**—a stale guide ships wrong integrations.
   用 `left:0; right:0; margin-inline:auto` 居中，把 transform 完全留给动画。
   `TestTabnavCenteringNeverUsesTransform` 钉住。
 - **IP 归属地是离线内嵌库，不是外部 API**：`internal/geoip` 用 ip2region v2 的
-  `ip2region_v4.xdb`（Apache-2.0/MIT，随二进制内嵌，+11 MB；v6 库 37 MB 未带）。
-  会话页每次刷新都会算归属地，调第三方 API 等于把用户 IP 持续散给外部服务。
-  更新数据 = 换 `internal/geoip/ip2region_v4.xdb` 后发版（同 favicon 的资产口径）。
-  私网/回环/IPv6 一律返回空串——「IP 192.168.1.5 · 江苏 南京」比不显示更糟。
+  `ip2region_v4.xdb` + `ip2region_v6.xdb`（Apache-2.0/MIT，随二进制内嵌，合计 +47 MB，
+  按地址族各查各的库）。会话页每次刷新都会算归属地，调第三方 API 等于把用户 IP
+  持续散给外部服务。更新数据 = 换 xdb 后发版（同 favicon 的资产口径）。
+  私网/回环/保留段一律返回空串——「IP 192.168.1.5 · 江苏 南京」比不显示更糟；
+  上游对 TEST-NET 段返回 `Reserved|Reserved` 占位，`formatRegion` 会丢弃它，
+  否则页面会出现「Reserved Reserved」。
+- **IPv6 在列表里做中段截断**（`2408:8207…1234:5678`，前 2 段 … 后 2 段，全串挂
+  title）：39 字符整串会把会话副行挤到换行。Carbon / PatternFly 对长 ID 的通行做法。
+  auth web 与两个日记 App 同一口径（App 侧 `shortIp()`）。
 - **不要再走 Kotlin/Wasm 前端路线**：2026-10-23 曾用 miuix 0.9.4 + Kotlin/Wasm 全量重建
   web 前端并上线（web/ 工程 + go:embed + /wasm 路由），实测画布渲染在本控制台场景**卡顿**，
   2026-10-28 整体回滚（git revert 309db55..fe3a9bb）。原生效果的复刻走模板前端的 CSS/JS
