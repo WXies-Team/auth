@@ -172,6 +172,14 @@ function syncQuery(pairs) {
   if (url !== location.pathname + location.search) history.replaceState(null, '', url);
 }
 
+/* IP + 归属地：服务端用内嵌离线库现算，查不到（内网/无库/IPv6）就不显示这一段——
+   「IP 192.168.1.5 · 江苏 南京」这种把内网地址配上公网归属地的显示比不显示更糟。 */
+function ipWithRegion(ip, region) {
+  const base = esc(ip || '—');
+  const r = (region || '').trim();
+  return r ? `${base} · ${esc(r)}` : base;
+}
+
 /* 封禁徽标：列表前置状态，避免「点进详情才发现被封」。悬停给出范围与解除时间。 */
 function banBadge(ban) {
   if (!ban) return '';
@@ -943,7 +951,8 @@ async function initConsole() {
     const el = $('#me-last-login');
     if (!el) return;
     el.textContent = first
-      ? `最近登录：${relTime(first.lastSeenAt)} · ${first.device || '未知设备'} · IP ${first.ip || '—'}`
+      ? `最近登录：${relTime(first.lastSeenAt)} · ${first.device || '未知设备'} · IP ${first.ip || '—'}` +
+        (first.ipRegion ? ` · ${first.ipRegion}` : '')
       : '还没有登录记录。';
   }).catch(() => {
     const el = $('#me-last-login');
@@ -1006,7 +1015,7 @@ function initSessions() {
           <span class="ico-wrap">${deviceIcon(it.device)}</span>
           <span class="grow">
             <span class="title">${esc(it.device)}</span>
-            <br><span class="meta">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))} · IP ${esc(it.ip || '—')} · 首次登录 ${esc(it.createdAt > 0 ? fmtTime(it.createdAt) : '—')}</span>
+            <br><span class="meta">${esc(appLabel(it.app))} · 最近活跃 ${esc(relTime(it.lastSeenAt))} · IP ${ipWithRegion(it.ip, it.ipRegion)} · 首次登录 ${esc(it.createdAt > 0 ? fmtTime(it.createdAt) : '—')}</span>
             ${it.current ? '<span class="badge on">本设备</span>' : ''}
           </span>
           ${it.current ? '' : '<button type="button" class="btn small danger">退出</button>'}
@@ -2292,7 +2301,7 @@ function initAdminUsers() {
       const sessions = (d.sessions || []).map(s => `
         <div class="item">
           <span class="grow"><span class="title">${esc(s.device)}</span><br>
-          <span class="meta">${esc(appLabel(s.app))} · ${esc(s.ip)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span></span>
+          <span class="meta">${esc(appLabel(s.app))} · ${ipWithRegion(s.ip, s.ipRegion)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span></span>
           <button type="button" class="btn small danger" data-kick="${esc(s.id)}">退出</button>
         </div>`).join('') || '<div class="empty">暂无活跃会话</div>';
       const passkeys = (d.passkeys || []).map(p =>
@@ -2986,7 +2995,7 @@ function initAdminSessions() {
             <span class="ico-wrap">${deviceIcon(s.device)}</span>
             <span class="grow">
               <span class="title">${esc(s.device)}</span>
-              <br><span class="meta">${esc(appLabel(s.app))} · ${esc(s.ip)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span>
+              <br><span class="meta">${esc(appLabel(s.app))} · ${ipWithRegion(s.ip, s.ipRegion)} · 最近活跃 ${esc(relTime(s.lastSeenAt))}</span>
             </span>
             <button type="button" class="btn small danger">退出</button>
           </div>`);

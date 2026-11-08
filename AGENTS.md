@@ -24,6 +24,7 @@ fail ⇒ auto-rollback), nginx (BT-panel vhost) terminates TLS.
 | Business logic reference | expense-diary `server/internal/auth/auth.go` + `otp.go` (this repo was照抄自 that family); divergences commented in place |
 | OTP / 2FA factors | `internal/auth/otp.go`, `loginflow.go`, `totp.go` + `otp_codes`/`login_states` comments in `internal/db/schema.sql` |
 | Sessions / devices | `internal/auth/session.go` (sid 63-bit snowflake ⇒ **JSON string**, JS-safe; kick = session layer only) |
+| IP 归属地 | `internal/geoip/`（ip2region v2 离线 xdb **随二进制内嵌**，11 MB，只覆盖 v4；私网/回环/IPv6 返回空串，前端不渲染那一段） |
 | Account lifecycle (ban / grace-delete / invites / bulk) | `internal/auth/{gate,adminctl,pendingdelete,invite,bulk}.go` — gate order & sweeper semantics commented in place |
 | Web-app OAuth (BFF) | `internal/auth/oauth.go` + `cmd/server/oauth.go`; authorize tx & codes are **in-memory single-instance** state |
 | User profile (nickname/avatarColor/avatarImage) | `internal/auth/profile.go` + `GET/PUT /api/profile` — sole source of truth; diaries' `profiles` 三列已迁入并清理 |
@@ -156,6 +157,11 @@ the same PR**—a stale guide ships wrong integrations.
   半边，动画结束再瞬间弹回——远端看到的就是「底栏乱飞」（实测中心 352px→195px）。
   用 `left:0; right:0; margin-inline:auto` 居中，把 transform 完全留给动画。
   `TestTabnavCenteringNeverUsesTransform` 钉住。
+- **IP 归属地是离线内嵌库，不是外部 API**：`internal/geoip` 用 ip2region v2 的
+  `ip2region_v4.xdb`（Apache-2.0/MIT，随二进制内嵌，+11 MB；v6 库 37 MB 未带）。
+  会话页每次刷新都会算归属地，调第三方 API 等于把用户 IP 持续散给外部服务。
+  更新数据 = 换 `internal/geoip/ip2region_v4.xdb` 后发版（同 favicon 的资产口径）。
+  私网/回环/IPv6 一律返回空串——「IP 192.168.1.5 · 江苏 南京」比不显示更糟。
 - **不要再走 Kotlin/Wasm 前端路线**：2026-10-23 曾用 miuix 0.9.4 + Kotlin/Wasm 全量重建
   web 前端并上线（web/ 工程 + go:embed + /wasm 路由），实测画布渲染在本控制台场景**卡顿**，
   2026-10-28 整体回滚（git revert 309db55..fe3a9bb）。原生效果的复刻走模板前端的 CSS/JS

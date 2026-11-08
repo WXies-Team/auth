@@ -173,7 +173,7 @@ func TestSessionsPageCurrentRowNeverKickable(t *testing.T) {
 	for _, want := range []string{
 		`<span class="title">${esc(it.device)}</span>`,
 		`· 最近活跃 ${esc(relTime(it.lastSeenAt))}`,
-		`IP ${esc(it.ip || '—')}`,
+		`IP ${ipWithRegion(it.ip, it.ipRegion)}`,
 		`首次登录 ${esc(it.createdAt > 0 ? fmtTime(it.createdAt) : '—')}`,
 	} {
 		if !strings.Contains(js, want) {
