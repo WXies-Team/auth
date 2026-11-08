@@ -7,7 +7,7 @@ import "testing"
 func TestRegionNeverGuesses(t *testing.T) {
 	for _, ip := range []string{
 		"", "127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.1",
-		"::1", "fe80::1", "not-an-ip", "2001:da8::1",
+		"::1", "fe80::1", "not-an-ip",   // 回环/链路本地/非法
 		// TEST-NET 保留段：上游标 Reserved，曾被渲染成「Reserved Reserved」
 		"192.0.2.1", "198.51.100.7", "203.0.113.9",
 	} {
@@ -25,6 +25,17 @@ func TestRegionPublicCN(t *testing.T) {
 	}
 	if !containsAny(got, "江苏", "南京", "中国") {
 		t.Errorf("归属地看起来不对：%q", got)
+	}
+}
+
+// IPv6 走 v6 库（与 v4 分开），能解析出省市——双栈都要有归属地。
+func TestRegionPublicV6(t *testing.T) {
+	got := Region("2400:3200::1")
+	if got == "" {
+		t.Fatal("IPv6 2400:3200::1（阿里公共 DNS）应能解析出归属地")
+	}
+	if !containsAny(got, "浙江", "杭州") {
+		t.Errorf("IPv6 归属地看起来不对：%q", got)
 	}
 }
 

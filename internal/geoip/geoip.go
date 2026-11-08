@@ -4,8 +4,8 @@
 // 随二进制内嵌——本服务不向外发任何地理查询请求：IP 属于个人数据，会话页面每次
 // 刷新都打第三方 API 既慢又把用户 IP 散给外部服务。查询走内存二分，10 微秒级。
 //
-// 只带 v4 库（11 MB）：v6 库 37 MB，收益远小于体积；IPv6 地址查不到时返回空串，
-// 页面就不显示归属地段（优雅降级，绝不猜）。
+// 双栈：v4 库 11 MB、v6 库 36 MB，都随二进制内嵌。按地址族各查各的库，
+// 不拿 v4 段去凑 v6 地址。
 //
 // 数据更新：替换本目录的 ip2region_v4.xdb 后重新发版——和 favicon/品牌图标同一套
 // 「资产随二进制走」的口径。上游：https://github.com/lionsoul2014/ip2region
@@ -21,23 +21,30 @@ import (
 )
 
 //go:embed ip2region_v4.xdb
-var dbBytes []byte
+var dbV4 []byte
+
+//go:embed ip2region_v6.xdb
+var dbV6 []byte
 
 var (
-	once     sync.Once
-	searcher *xdb.Searcher
+	once sync.Once
+	v4   *xdb.Searcher
+	v6   *xdb.Searcher
 )
 
-func initSearcher() {
-	v, err := xdb.VersionFromName("v4")
-	if err != nil {
-		return // 版本表异常：保持 nil，Region 全部返回空串
+// initSearchers 按地址族各建一个内存查询器（整库驻留，查询无磁盘 IO）。
+// 任一族建失败就保持 nil——Region 返回空串，页面不显示归属地，绝不影响会话页本身。
+func initSearchers() {
+	if v, err := xdb.VersionFromName("v4"); err == nil {
+		if s, err := xdb.NewWithBuffer(v, dbV4); err == nil {
+			v4 = s
+		}
 	}
-	s, err := xdb.NewWithBuffer(v, dbBytes)
-	if err != nil {
-		return
+	if v, err := xdb.VersionFromName("v6"); err == nil {
+		if s, err := xdb.NewWithBuffer(v, dbV6); err == nil {
+			v6 = s
+		}
 	}
-	searcher = s
 }
 
 // Region 返回「省 市」形式的归属地（如「江苏 南京」）；查不到、内网地址或
@@ -56,12 +63,11 @@ func Region(ip string) string {
 		parsed.IsUnspecified() || parsed.IsMulticast() {
 		return ""
 	}
-	// 库只覆盖 IPv4：v6 直接放空，不拿 v4 段去凑
-	if parsed.To4() == nil {
-		return ""
+	once.Do(initSearchers)
+	searcher := v6
+	if parsed.To4() != nil {
+		searcher = v4
 	}
-
-	once.Do(initSearcher)
 	if searcher == nil {
 		return ""
 	}

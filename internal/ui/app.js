@@ -174,10 +174,24 @@ function syncQuery(pairs) {
 
 /* IP + 归属地：服务端用内嵌离线库现算，查不到（内网/无库/IPv6）就不显示这一段——
    「IP 192.168.1.5 · 江苏 南京」这种把内网地址配上公网归属地的显示比不显示更糟。 */
+// IPv6 最长 39 字符，整串塞进会话行会把「最近活跃 / 首次登录」挤到换行。按
+// Carbon / PatternFly 对长 ID 的通行做法做**中段截断**（前 2 段 … 后 2 段），
+// 全串挂 title——截断必须留一条看全文的路，否则用户分不清两台设备的区别。
+function shortIP(ip) {
+  const s = String(ip || '');
+  if (s.length <= 24) return s;
+  const g = s.split(':');
+  if (g.length > 5) return g.slice(0, 2).join(':') + '…' + g.slice(-2).join(':');
+  return s.slice(0, 12) + '…' + s.slice(-8);
+}
+
 function ipWithRegion(ip, region) {
-  const base = esc(ip || '—');
+  const full = String(ip || '');
+  const shown = full ? shortIP(full) : '—';
   const r = (region || '').trim();
-  return r ? `${base} · ${esc(r)}` : base;
+  const text = r ? `${shown} · ${r}` : shown;
+  const title = r ? `IP ${full} · ${r}` : `IP ${full}`;
+  return `<span title="${esc(title)}">${esc(text)}</span>`;
 }
 
 /* 封禁徽标：列表前置状态，避免「点进详情才发现被封」。悬停给出范围与解除时间。 */
