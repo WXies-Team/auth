@@ -729,6 +729,20 @@ func queryInt64(raw string) int64 {
 // writeAuditCSV 把审计行流式输出成 CSV。字段顺序固定，时间是 RFC3339（Excel/
 // Numbers 都能直接识别），detail 展开成 k=v;k=v 单列——导出是为了对账与留档，
 // 不追求二次解析，因此不做多列展开。
+// csvCell 中和 CSV 公式注入：邮箱、UA 都是用户可控字段，以 = + - @ 制表符
+// 回车开头的单元格会在 Excel/Numbers 里被当公式执行（OWASP CSV Injection）。
+// 前置一个单引号在表格软件里显示为文本，原值不变。
+func csvCell(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
+}
+
 func writeAuditCSV(w http.ResponseWriter, rows []auth.AuditRow) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition",
@@ -755,8 +769,8 @@ func writeAuditCSV(w http.ResponseWriter, rows []auth.AuditRow) {
 			target = strconv.FormatInt(r.TargetUID, 10)
 		}
 		_ = cw.Write([]string{
-			time.UnixMilli(r.TS).Format(time.RFC3339), r.Action, r.Result,
-			actor, r.ActorEmail, target, r.IP, r.UserAgent, detail,
+			time.UnixMilli(r.TS).Format(time.RFC3339), csvCell(r.Action), csvCell(r.Result),
+			actor, csvCell(r.ActorEmail), target, csvCell(r.IP), csvCell(r.UserAgent), csvCell(detail),
 		})
 	}
 	cw.Flush()
