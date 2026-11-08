@@ -16,7 +16,8 @@
 <p class="err" id="ai-error" role="alert" hidden></p>
 
 <!-- KPI 四卡：今日总使用 / 全站余量 / 今日活跃 / 近 7 天走势 -->
-<div class="kpi-row" id="ai-kpis">
+<!-- aria-live：切换区间后 KPI 数字会变，读屏需要被告知（WCAG 4.1.3 状态消息） -->
+<div class="kpi-row" id="ai-kpis" aria-live="polite">
   <div class="card kpi" id="kpi-today"><span class="dim">今日总使用</span><strong id="kpi-today-val">—</strong><span class="hint" id="kpi-today-delta"></span></div>
   <div class="card kpi"><span class="dim">全站今日余量</span><strong id="kpi-global-val">—</strong>
     <span class="bar-track" style="margin-top:6px"><span class="bar-fill" id="kpi-global-bar" style="width:0%"></span></span>

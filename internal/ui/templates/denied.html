@@ -1,7 +1,15 @@
 {{define "content"}}
 <div class="card" style="max-width:520px;margin:48px auto;text-align:center">
   <h1>无权访问</h1>
-  <p class="dim" style="margin-top:8px">{{if .DeniedApp}}项目「{{.DeniedApp}}」不在你的管理范围内，{{end}}你只能管理已获授权的项目数据；如需调整请联系平台管理员。</p>
+  <p class="dim" style="margin-top:8px">{{if .DeniedApp}}项目「{{.DeniedApp}}」不在你的管理范围内，{{end}}你只能管理已获授权的项目数据。</p>
+  <!-- NIST 的 redress 要求：求助渠道要「容易被找到」。给出具体路径，而不是
+       「请联系管理员」这种找不到人的空话；时间戳让报障时能与服务端日志对齐。 -->
+  <p class="hint" style="margin-top:10px">
+    如需开通：在「账号」页可查看当前身份；平台管理员的邮箱在管理后台的用户页可查。
+    或回复当初的开通邀请邮件。
+  </p>
+  <p class="hint">报障请附上这个时间：<span class="mono" id="denied-at">—</span></p>
+  <script>document.getElementById('denied-at').textContent = new Date().toLocaleString('zh-CN');</script>
   <div class="row" style="justify-content:center;margin-top:16px">
     <a class="btn primary" href="/web/admin/sessions">回到会话总览</a>
     <a class="btn ghost" href="/web/console">回到概览</a>

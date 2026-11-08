@@ -1167,6 +1167,16 @@ function initPasskeys() {
       });
       toast('Passkey 已添加');
       await load();
+      // 创建后请用户起个名字（MDN：RP 应帮用户分辨「哪把、属于哪个认证器」）。
+      // 列表按 created_at DESC，首行即刚创建的这把；直接进入行内改名，可 Esc 跳过。
+      const fresh = $('#passkey-list .item');
+      if (fresh) {
+        const renameBtn = fresh.querySelector('[data-act=rename]');
+        if (renameBtn) {
+          renameBtn.click();
+          toast('给它起个名字，方便以后辨认（Esc 跳过）');
+        }
+      }
     } catch (err) {
       if (err && err.name === 'NotAllowedError') return;
       showErr('#passkey-error', (err && err.message) || '添加失败，请重试');
@@ -2573,6 +2583,11 @@ function initAdminUsers() {
     load();
     loadInvites();
   });
+  // 审计页的 uid 链接会带 ?uid= 直达用户详情（日志可顺着线索钻取）
+  (function openFromURL() {
+    const uid = Number(new URLSearchParams(location.search).get('uid') || 0);
+    if (uid > 0) openDetail(uid, '');
+  })();
   // 从 URL 回填（刷新/分享/后退还原同一份搜索与页码）
   (function restoreUsersFromURL() {
     const q = new URLSearchParams(location.search);
@@ -2853,8 +2868,25 @@ function initAdminAccess() {
         popIn(row);   // 成功行内插入：轻浮现
         toast(`已将 ${email} 加入「${name}」登录名单`);
       } catch (err) {
-        errEl.textContent = err.status === 404 ? '该邮箱不存在' : err.message;
         errEl.hidden = false;
+        if (err.status === 404) {
+          // 「人不在系统里」的正解是发出邀请，而不是留一句死胡同（Polaris 空/失败态）
+          errEl.innerHTML = `${esc(email)} 尚未注册。` +
+            `<button type="button" class="btn small" id="access-invite">发送邀请</button>`;
+          const ib = $('#access-invite');
+          if (ib) ib.addEventListener('click', async () => {
+            setBusy(ib, true);
+            try {
+              await api('/admin/users/invite', { method: 'POST', body: { email, app: p.app } });
+              errEl.textContent = `已向 ${email} 发出「${name}」的邀请，对方注册后即可登录。`;
+              input.value = '';
+            } catch (e2) {
+              errEl.textContent = e2.message;
+            } finally { setBusy(ib, false); }
+          });
+        } else {
+          errEl.textContent = err.message;
+        }
       } finally { setBusy(btn, false); }
     });
 
@@ -2881,7 +2913,8 @@ function initAdminSessions() {
       const st = pager.state;
       // 搜索走服务端 ?query=（邮箱片段或 uid，join users 过滤）：在本页 100 条会话上
       // 本地过滤会漏掉本页之外的用户，total/totalUsers 也不成立
-      const res = await api(`/admin/sessions?query=${encodeURIComponent(st.query || '')}${appFilter()}&limit=${st.limit}&offset=${st.offset}`);
+      const res = await api(`/admin/sessions?query=${encodeURIComponent(st.query || '')}` +
+        `&ip=${encodeURIComponent(st.ip || '')}${appFilter()}&limit=${st.limit}&offset=${st.offset}`);
       // 按 uid 聚合成本页的用户行
       const map = new Map();
       (res.items || []).forEach(s => {
@@ -2930,7 +2963,8 @@ function initAdminSessions() {
     panel.scrollIntoView({ block: 'nearest' });
     try {
       const LIMIT = 100;
-      const res = await api(`/admin/sessions?uid=${encodeURIComponent(String(uid))}${appFilter()}&limit=${LIMIT}`);
+      const ipq = pager.state.ip ? `&ip=${encodeURIComponent(pager.state.ip)}` : '';
+      const res = await api(`/admin/sessions?uid=${encodeURIComponent(String(uid))}${ipq}${appFilter()}&limit=${LIMIT}`);
       const items = res.items || [];
       const total = Number(res.total) || items.length;
       // 页头必须报**真实总数**：此前硬编码 limit=100 且不显示总数，>100 会话的
@@ -2978,6 +3012,7 @@ function initAdminSessions() {
   $('#sess-user-search-form').addEventListener('submit', e => {
     e.preventDefault();
     pager.state.query = $('#sess-user-query').value.trim();
+    pager.state.ip = ($('#sess-user-ip').value || '').trim();
     pager.state.offset = 0;
     loadUsers();
   });
@@ -3057,12 +3092,13 @@ function initAdminAudit() {
       res.items.forEach(it => {
         // 操作者/对象：**邮箱是人读的主信息**，uid 是技术标识放次行（此前两者挤一格，
         // 19 位雪花 + 邮箱被 break-all 劈开）。匿名 = 无邮箱也无 uid。
+        // uid 做成链接钻进用户页（日志要能顺着线索走，Cloudflare 同款）
+        const uidLink = (uid) => `<a class="mono" href="/web/admin?uid=${encodeURIComponent(String(uid))}"
+          title="在用户页打开 #${esc(uid)}">#${esc(uid)}</a>`;
         const actor = it.actorEmail
-          ? `<span class="cell-stack"><span class="t">${esc(it.actorEmail)}</span>${it.actorUid ? `<span class="s mono">#${esc(it.actorUid)}</span>` : ''}</span>`
-          : (it.actorUid ? `<span class="s mono">#${esc(it.actorUid)}</span>` : '匿名');
-        const target = it.targetUid
-          ? `<span class="mono">#${esc(it.targetUid)}</span>`
-          : '—';
+          ? `<span class="cell-stack"><span class="t">${esc(it.actorEmail)}</span>${it.actorUid ? `<span class="s">${uidLink(it.actorUid)}</span>` : ''}</span>`
+          : (it.actorUid ? `<span class="s">${uidLink(it.actorUid)}</span>` : '匿名');
+        const target = it.targetUid ? uidLink(it.targetUid) : '—';
         body.appendChild(node(`
           <tr>
             <td>${esc(fmtTime(it.ts))}</td>

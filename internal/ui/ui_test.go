@@ -399,6 +399,32 @@ func TestDangerZoneIsolatedFromSettings(t *testing.T) {
 	}
 }
 
+// 403 页要给**可实际使用的求助路径**（NIST 的 redress 要求：容易被找到）与一个
+// 报障时间戳，而不是「请联系管理员」这种找不到人的空话。
+func TestDeniedPageRedressAndTimestamp(t *testing.T) {
+	raw, err := files.ReadFile("templates/denied.html")
+	if err != nil {
+		t.Fatalf("读 denied 模板: %v", err)
+	}
+	tpl := string(raw)
+	for _, want := range []string{"管理员的邮箱在管理后台", "开通邀请邮件", `id="denied-at"`} {
+		if !strings.Contains(tpl, want) {
+			t.Errorf("403 页缺求助/报障要素 %q", want)
+		}
+	}
+	// 渲染后仍带两条出路
+	rec := httptest.NewRecorder()
+	if err := Render(rec, "denied", Data{Title: "无权访问", Minimal: true, DeniedApp: "expense-diary"}); err != nil {
+		t.Fatalf("渲染 403 页: %v", err)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"/web/admin/sessions", "/web/console", "denied-at"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("403 页渲染缺 %q", want)
+		}
+	}
+}
+
 // 授权页（B4 authorize 模板）：确认态带项目名/回跳域名/继续取消双钮（同表单
 // decision 分流），错误态是同卡片语言的变体；两态都走 Minimal 壳。
 func TestAuthorizeTemplateRendersBothVariants(t *testing.T) {
