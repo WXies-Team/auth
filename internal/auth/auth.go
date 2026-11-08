@@ -157,6 +157,11 @@ type Service struct {
 	// rootUID 是启动时解析的根 su（RootSuperEmail → uid，W7-2）：0=尚未解析成功，
 	// isRootSuper/isRootAccount 回退邮箱比对并由 resolveRootSuper 打日志。
 	rootUID atomic.Int64
+	// 暴力破解闸：密码登录按 IP/邮箱、邮箱验证码登录按 IP/邮箱分别计窗（进程内滑动窗口）。
+	loginByIP    *attemptLimiter
+	loginByEmail *attemptLimiter
+	codeByIP     *attemptLimiter
+	codeByEmail  *attemptLimiter
 }
 
 // SetEnforceApps 注入兼容开关的配置读取器（生产传 cfg.Require，测试不设即全放行）。
@@ -226,6 +231,11 @@ func NewService(pool *sql.DB, jwtSecret string, mailer Mailer, hooks *Hooks, wa 
 		mailer: mailer, hooks: hooks,
 		totpKey: totpKey, recoveryPepper: deriveRecoveryPepper(jwtSecret), wa: wa,
 		oauthStore: newOAuthStore(),
+		// 密码：同 IP 30 次/分、同邮箱 5 次/分；验证码：同 IP 30 次/分、同邮箱 10 次/分
+		loginByIP:    newAttemptLimiter(30, time.Minute),
+		loginByEmail: newAttemptLimiter(5, time.Minute),
+		codeByIP:     newAttemptLimiter(30, time.Minute),
+		codeByEmail:  newAttemptLimiter(10, time.Minute),
 	}
 	// 启动即解析根 su 的 uid（W7-2）：root 换绑邮箱不再失权；失败回退邮箱比对
 	//（resolveRootSuper 内打 Error 日志，isRootSuper 还会惰性补解析）。
@@ -664,6 +674,13 @@ func (s *Service) Login(rawEmail, password, app string, meta SessionMeta) (resp 
 	if err := validateApp(app); err != nil {
 		return nil, err
 	}
+	// 先过暴力破解闸：同一个邮箱每分钟 5 次、同一 IP 每分钟 30 次；超限不再验密码
+	// （bcrypt 本身也是可被拿来做 CPU 打点的开销）
+	now := time.Now()
+	if !s.loginByIP.allow(meta.IP, now) ||
+		!s.loginByEmail.allow(normalizeEmail(rawEmail), now) {
+		return nil, &HTTPError{429, "尝试过于频繁，请稍后再试"}
+	}
 	uid, version, err := s.checkPassword(rawEmail, password)
 	if err != nil {
 		return nil, err
@@ -920,6 +937,12 @@ func (s *Service) LoginByEmailCode(rawEmail, code, app string, meta SessionMeta)
 	}()
 	if err := validateApp(app); err != nil {
 		return nil, err
+	}
+	// 验证码同样限速：6 位码在 5 分钟有效期内可枚举，必须按 IP/邮箱计窗
+	now := time.Now()
+	if !s.codeByIP.allow(meta.IP, now) ||
+		!s.codeByEmail.allow(normalizeEmail(rawEmail), now) {
+		return nil, &HTTPError{429, "尝试过于频繁，请稍后再试"}
 	}
 	uid, _, email, err := s.checkLoginCode(rawEmail, code)
 	if err != nil {
