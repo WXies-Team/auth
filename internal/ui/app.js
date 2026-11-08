@@ -158,6 +158,37 @@ function drainFlash() {
   if (msg) toast(msg);
 }
 
+/* 筛选/分页状态 ↔ URL（可刷新、可分享、可回退）。
+   用 replaceState 而不是 pushState：每敲一次筛选不该在历史里堆一页，
+   后退键仍回上一页而不是上一个筛选组合。 */
+function syncQuery(pairs) {
+  const p = new URLSearchParams();
+  Object.keys(pairs).forEach(k => {
+    const v = pairs[k];
+    if (v !== '' && v !== null && v !== undefined) p.set(k, String(v));
+  });
+  const qs = p.toString();
+  const url = location.pathname + (qs ? '?' + qs : '');
+  if (url !== location.pathname + location.search) history.replaceState(null, '', url);
+}
+
+/* 封禁徽标：列表前置状态，避免「点进详情才发现被封」。悬停给出范围与解除时间。 */
+function banBadge(ban) {
+  if (!ban) return '';
+  const scope = ban.app === '*' ? '全站' : appLabel(ban.app);
+  const until = Number(ban.untilMs) > 0
+    ? '至 ' + fmtTime(ban.untilMs)
+    : '永久';
+  const title = [scope + '封禁', until, ban.reason].filter(Boolean).join(' · ');
+  return `<span class="badge warn" title="${esc(title)}">封禁</span>`;
+}
+
+/* 空态 = 标题（为什么空）+ 说明（下一步做什么）。此前只有一句灰字，
+   用户分不清「本来就没有」和「加载坏了」。 */
+function emptyState(title, hint) {
+  return `<div class="empty"><span class="empty-title">${esc(title)}</span>${hint ? `<span class="empty-hint">${esc(hint)}</span>` : ''}</div>`;
+}
+
 /* 表单提交按钮的忙态：这些表单此前没有 setBusy，双击会发两次请求
    （验证码/重置类第二次必然失败，还把「验证码已使用」当错误丢给用户）。
    e.submitter 是真正被点的按钮，取不到就退回表单里的第一个 submit。 */
@@ -404,28 +435,43 @@ async function api(path, opts) {
   const token = cookie('__Host-auth_web_csrf');
   if (token) headers['X-CSRF-Token'] = token;
 
-  const res = await fetch(path, {
-    method: o.method || 'GET',
-    headers,
-    credentials: 'same-origin',
-    cache: 'no-store',
-    body: o.body === undefined ? undefined : JSON.stringify(o.body),
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method: o.method || 'GET',
+      headers,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      body: o.body === undefined ? undefined : JSON.stringify(o.body),
+    });
+  } catch (_) {
+    // 断网/被拦截：fetch 直接 reject，此前会把 TypeError 原文抛给用户
+    const e = new Error('网络连接中断，请检查网络后重试');
+    e.status = 0;
+    throw e;
+  }
 
   let data = null;
   const text = await res.text();
   if (text) { try { data = JSON.parse(text); } catch (_) { /* 非 JSON（页面被拦截时）留空 */ } }
 
   if (!res.ok) {
-    const msg = (data && data.message) || `请求失败（${res.status}）`;
+    // 兜底文案给「下一步」，不要只丢一个状态码（微软错误文案规范）
+    let msg = (data && data.message)
+      || (res.status === 429 ? '操作过于频繁，请稍后再试'
+        : res.status >= 500 ? '服务暂时不可用，请稍后重试'
+          : `请求未完成（${res.status}），请稍后重试`);
     if (res.status === 401 && msg.indexOf('重新验证') >= 0 && !o.noReauth && !o._retried) {
       if (await promptReauth()) {
         return api(path, Object.assign({}, o, { _retried: true }));
       }
       const e0 = new Error('已取消重新验证'); e0.status = 401; e0.cancelled = true; throw e0;
     }
+    if (res.status === 429 && msg.indexOf('稍后') < 0) msg += '，请稍后再试';
     if (res.status === 401 && msg.indexOf('重新验证') < 0 && !location.pathname.startsWith('/web/login')) {
-      location.href = '/web/login';
+      // 带上当前页，登录后回到原处（否则后台深层链接一律掉回概览）
+      const here = location.pathname + location.search;
+      location.href = '/web/login?next=' + encodeURIComponent(here);
     }
     const err = new Error(msg);
     err.status = res.status;
@@ -528,8 +574,18 @@ function initLogin() {
   // OAuth 续跑（B4）：?tx= 在场时登录完成回授权确认页而不是控制台（tx 是服务端
   // 一次性事务号，只回站内 /oauth/resume，无开放重定向面）。
   const oauthTx = new URLSearchParams(location.search).get('tx');
+  /* 回跳地址只接受**站内绝对路径**：单个 '/' 开头，且不能是 '//host'（协议相对，
+     会跳到外站）或 '/\\host'（浏览器把它当 '//host'）。这是防开放重定向的唯一闸门，
+     登录页是公开页，next 完全由 URL 控制。 */
+  function safeNext(raw) {
+    if (!raw) return '';
+    if (!/^\/(?![\/\\])/.test(raw)) return '';
+    if (raw.indexOf('/web/login') === 0) return '';   // 防自跳循环
+    return raw;
+  }
+  const nextPath = safeNext(new URLSearchParams(location.search).get('next'));
   const loginLanding = () =>
-    oauthTx ? '/oauth/resume?tx=' + encodeURIComponent(oauthTx) : '/web/console';
+    oauthTx ? '/oauth/resume?tx=' + encodeURIComponent(oauthTx) : (nextPath || '/web/console');
   let forceOldPw = '';
   function finishLogin(res, pwd) {
     const cancelled = !!(res && res.deletePendingCancelled);
@@ -732,6 +788,38 @@ function initLogin() {
   const supportsPasskey = !!(window.PublicKeyCredential && navigator.credentials);
   $('#passkey-login').classList.toggle('hidden', !supportsPasskey);
   $('#passkey-sep').classList.toggle('hidden', !supportsPasskey);
+  // ---- 条件式 UI（web.dev 首选做法）：把 passkey 挂进邮箱框的自动填充 ----
+  // 服务端登录已是 discoverable（allowCredentials 留空），所以不需要先知道邮箱。
+  // 密码用户完全无感：只在支持条件式介质的浏览器里、且用户没在输密码时挂着。
+  let condAbort = null;
+  (async () => {
+    try {
+      if (!supportsPasskey || !window.PublicKeyCredential.isConditionalMediationAvailable) return;
+      if (!(await PublicKeyCredential.isConditionalMediationAvailable())) return;
+      const opts = await api('/webauthn/login/options', { method: 'POST', body: {}, noReauth: true });
+      condAbort = new AbortController();
+      const cred = await navigator.credentials.get({
+        publicKey: decodePKOptions(opts.publicKey),
+        mediation: 'conditional',
+        signal: condAbort.signal,
+      });
+      const done = await api('/webauthn/login/finish', {
+        method: 'POST',
+        body: { ceremonyId: opts.ceremonyId, response: assertionJSON(cred) },
+      });
+      finishLogin(done);
+    } catch (err) {
+      // 条件式是「增强」不是「必需」：任何失败都静默——AbortError 是我们主动取消，
+      // NotAllowedError 是用户改用密码，其余（不支持/网络）也不能打扰登录主路径。
+    }
+  })();
+  // 用户一旦走密码路，立即取消挂着的那次条件式请求，避免两套仪式并存
+  const abortCond = () => { if (condAbort) { condAbort.abort(); condAbort = null; } };
+  ['#pane-password', '#pane-code', '#pane-reset'].forEach(sel => {
+    const f = $(sel);
+    if (f) f.addEventListener('submit', abortCond, true);
+  });
+
   if (supportsPasskey) {
     $('#passkey-login').addEventListener('click', async () => {
       showErr('#passkey-error', '');
@@ -849,6 +937,18 @@ async function initConsole() {
     const keys = await api('/api/passkeys');
     return keys.length ? `${keys.length} 个` : '未添加';
   });
+  // 最近登录（服务端已按最近活跃倒序，首条即最近）
+  api('/api/sessions').then(r => {
+    const first = (r.sessions || [])[0];
+    const el = $('#me-last-login');
+    if (!el) return;
+    el.textContent = first
+      ? `最近登录：${relTime(first.lastSeenAt)} · ${first.device || '未知设备'} · IP ${first.ip || '—'}`
+      : '还没有登录记录。';
+  }).catch(() => {
+    const el = $('#me-last-login');
+    if (el) el.textContent = '';   // 取不到就不占位，不编造
+  });
 }
 
 /* ---------- 登录会话（扁平列表：一行=一条会话，行主标题=设备名） ---------- */
@@ -886,12 +986,16 @@ function initSessions() {
       const res = await api('/api/sessions');
       // 契约是 {sessions:[...]}
       rows = res.sessions || [];
+      // 上下文动作只在有意义时出现：没有其它会话就不该有这个按钮
+      const others = rows.filter(r => !r.current).length;
+      const revokeOthers = $('#revoke-others');
+      if (revokeOthers) revokeOthers.classList.toggle('hidden', others === 0);
     } catch (err) {
       list.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
       return;
     }
     if (!rows.length) {
-      list.innerHTML = '<div class="empty">只有当前设备处于登录状态。</div>';
+      list.innerHTML = emptyState('只有当前设备处于登录状态', '在新设备上登录后，它会出现在这里，可随时逐条退出。');
       return;
     }
     list.innerHTML = '';
@@ -977,7 +1081,7 @@ function initPasskeys() {
     try {
       const rows = await api('/api/passkeys');
       if (!rows.length) {
-        list.innerHTML = '<div class="empty">还没有 Passkey，点击右上角「添加 Passkey」创建一个。</div>';
+        list.innerHTML = emptyState('还没有 Passkey', '添加后可以用指纹或面容登录，不用再输密码。点右上角「添加 Passkey」创建。');
         return;
       }
       list.innerHTML = '';
@@ -1099,7 +1203,16 @@ function initSecurity() {
     if (was && was !== badge.textContent) popIn(badge);   // 状态翻转：徽标轻浮现
     $('#totp-off').hidden = st.enabled;
     $('#totp-on').hidden = !st.enabled;
-    if (st.enabled) $('#totp-since').textContent = '开启时间：' + fmtTime(st.createdAt);
+    if (st.enabled) {
+      $('#totp-since').textContent = '开启时间：' + fmtTime(st.createdAt);
+      // 余量来自 /api/totp 的 recoveryLeft/Total（此前这句直接写「无法查询」）
+      const rs = $('#recovery-state');
+      if (rs) {
+        rs.textContent = (typeof st.recoveryTotal === 'number' && st.recoveryTotal > 0)
+          ? `恢复码：剩余 ${st.recoveryLeft} / ${st.recoveryTotal} 枚；用尽或想换一批时可重新生成。`
+          : '恢复码：当前没有可用的恢复码，建议立即重新生成一批。';
+      }
+    }
   }
 
   function showCodes(list) {
@@ -1173,6 +1286,11 @@ function initSecurity() {
     await copyText(codes.join('\n'));
     toast('恢复码已复制到剪贴板');
   });
+  const printBtn = $('#print-codes');
+  if (printBtn) printBtn.addEventListener('click', () => {
+    // 打印面板保持在页面上（.hidden 之外），@media print 已关掉全部动画
+    window.print();
+  });
   $('#saved-codes').addEventListener('click', () => {
     $('#codes-panel').classList.add('hidden');
     codes = [];
@@ -1234,7 +1352,7 @@ function initSecurity() {
     } catch (err) { toast(err.message, true); }
   });
   $('#disable-totp').addEventListener('click', async () => {
-    const code = await askCode('关闭两步验证', '输入当前两步验证码或一个恢复码；关闭后验证器绑定与全部恢复码将全部失效，登录只需密码；其它设备保持登录状态。');
+    const code = await askCode('关闭两步验证？', '关闭后账号只剩密码一道防线，验证器绑定与全部恢复码立即失效；其它设备保持登录状态。输入当前两步验证码或一个恢复码确认。');
     if (!code) return;
     try {
       await api('/api/totp/disable', { method: 'POST', body: { code } });
@@ -1358,9 +1476,15 @@ function initAccount() {
   // ---- 注销（W2）：注册邮箱 + 邮箱验证码双确认，7 天反悔期 ----
   $('#start-delete').addEventListener('click', () => {
     $('#delete-email').value = ''; $('#delete-code').value = '';
+    $('#delete-phrase').value = '';
+    $('#delete-submit').disabled = true;      // 每次打开都回到锁定态
     showErr('#delete-error', '');
     openDialog($('#delete-dialog'));
     $('#delete-email').focus();
+  });
+  // 手输「注销」才解锁主钮（不可逆操作的有意识确认）
+  $('#delete-phrase').addEventListener('input', () => {
+    $('#delete-submit').disabled = $('#delete-phrase').value.trim() !== '注销';
   });
   $('#send-delete-code').addEventListener('click', async () => {
     showErr('#delete-error', '');
@@ -1380,6 +1504,9 @@ function initAccount() {
     const code = $('#delete-code').value.trim();
     if (!email) { showErr('#delete-error', '请先填写注册邮箱'); return; }
     if (!code) { showErr('#delete-error', '请输入邮箱验证码'); return; }
+    if ($('#delete-phrase').value.trim() !== '注销') {
+      showErr('#delete-error', '请在上方输入「注销」以确认'); return;
+    }
     const btn = $('#delete-form').querySelector('.btn.danger');
     setBusy(btn, true);
     try {
@@ -1909,7 +2036,7 @@ function initAdminUsers() {
       const list = res.invites || [];
       $('#invites-count').textContent = list.length ? `· 共 ${list.length} 条` : '';
       if (!list.length) {
-        tbody.innerHTML = `<tr><td colspan="5" class="empty">${inviteQuery ? '没有匹配的邀请' : '还没有发出过邀请'}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="empty"><span class="empty-title">${inviteQuery ? '没有匹配的邀请' : '还没有发出过邀请'}</span><span class="empty-hint">${inviteQuery ? '清空搜索看看全部邀请。' : '在下方输入邮箱即可发出第一条邀请。'}</span></td></tr>`;
         return;
       }
       tbody.innerHTML = '';
@@ -2103,10 +2230,11 @@ function initAdminUsers() {
       const res = await api(`/admin/users?query=${encodeURIComponent(st.query || '')}&limit=${st.limit}&offset=${st.offset}`);
       st.query = st.query || '';
       $('#users-total').textContent = `共 ${res.total} 个账号`;
+      syncQuery({ query: st.query || '', offset: st.offset || '' });
       pager.set(res.total, res.items.length);
       body.innerHTML = '';
       if (!res.items.length) {
-        body.innerHTML = '<tr><td colspan="7" class="empty">暂无匹配的用户</td></tr>';
+        body.innerHTML = `<tr><td colspan="7" class="empty"><span class="empty-title">暂无匹配的用户</span><span class="empty-hint">换一个关键词，或点「邀请用户」创建第一个账号。</span></td></tr>`;
         $('#users-selall').checked = false;
         return;
       }
@@ -2116,7 +2244,7 @@ function initAdminUsers() {
             <td><input type="checkbox" class="row-sel" data-uid="${esc(u.uid)}" data-email="${esc(u.email)}" aria-label="选择 ${esc(u.email)}"${selected.has(Number(u.uid)) ? ' checked' : ''}></td>
             <td class="wrap-cell">${userCell(u, 32)}</td>
             <td class="mono">${esc(u.uid)}</td>
-            <td>${u.role === 'user' ? `<span class="badge">${ROLE_LABEL.user}</span>` : `<span class="badge on">${esc(ROLE_LABEL[u.role] || u.role)}</span>`}</td>
+            <td class="row-inline">${u.role === 'user' ? `<span class="badge">${ROLE_LABEL.user}</span>` : `<span class="badge on">${esc(ROLE_LABEL[u.role] || u.role)}</span>`}${banBadge(u.ban)}</td>
             <td>${esc(scopeSummary(u))}</td>
             <td class="row-inline">${u.totpEnabled
               ? '<span class="badge on">两步验证</span>'
@@ -2433,6 +2561,9 @@ function initAdminUsers() {
   $('#ud-close').addEventListener('click', () => {
     lastDetail = { uid: 0, email: '' };
     $('#user-detail').classList.add('hidden');
+    // 焦点还给触发行（APG dialog 模式）：关闭后焦点落 body 会让键盘用户丢失位置
+    const back = $('#users-body button:focus') || $('#users-body tr:last-child button');
+    if (back) back.focus();
   });
   $('#user-search-form').addEventListener('submit', e => {
     e.preventDefault();
@@ -2442,6 +2573,16 @@ function initAdminUsers() {
     load();
     loadInvites();
   });
+  // 从 URL 回填（刷新/分享/后退还原同一份搜索与页码）
+  (function restoreUsersFromURL() {
+    const q = new URLSearchParams(location.search);
+    if (q.get('query')) {
+      $('#user-query').value = q.get('query');
+      pager.state.query = q.get('query');
+      inviteQuery = q.get('query');
+    }
+    if (q.get('offset')) pager.state.offset = Number(q.get('offset')) || 0;
+  })();
   pager.wire(load);
 
   // ---- 邀请用户（B9）：弹层提交 → 成功 toast + 顺手展开邀请区 ----
@@ -2829,7 +2970,11 @@ function initAdminSessions() {
     }
   }
 
-  $('#sd-close').addEventListener('click', () => $('#sess-detail').classList.add('hidden'));
+  $('#sd-close').addEventListener('click', () => {
+    $('#sess-detail').classList.add('hidden');
+    const back = $('#sess-body tr button, #sess-body button');   // 焦点还给触发钻取的行
+    if (back) back.focus();
+  });
   $('#sess-user-search-form').addEventListener('submit', e => {
     e.preventDefault();
     pager.state.query = $('#sess-user-query').value.trim();
@@ -2874,6 +3019,8 @@ function initAdminAudit() {
     if (actor) p.set('actor', actor);
     const target = $('#audit-target').value.trim();
     if (target) p.set('target', target);
+    const result = $('#audit-result') ? $('#audit-result').value : '';
+    if (result) p.set('result', result);
     const from = $('#audit-from').value;
     if (from) p.set('from', String(new Date(from + 'T00:00:00').getTime()));
     const to = $('#audit-to').value;
@@ -2883,6 +3030,13 @@ function initAdminAudit() {
     if (app) p.set('app', app);
     p.set('limit', String(pager.state.limit));
     p.set('offset', String(pager.state.offset));
+    // 同一份条件同步进地址栏（刷新/分享/后退都还原）
+    syncQuery({
+      action, actor, target, result,
+      from: $('#audit-from').value, to: $('#audit-to').value,
+      app: new URLSearchParams(location.search).get('app') || '',
+      offset: pager.state.offset || '',
+    });
     return p.toString();
   }
 
@@ -2894,6 +3048,7 @@ function initAdminAudit() {
       // 页头的「共 N 条」此前从未被填充（pager 的标签是另一个元素），永远空白，
       // 与用户页/会话总览页头不一致。
       $('#audit-total').textContent = `共 ${res.total} 条`;
+      const uq = new URLSearchParams(location.search);
       body.innerHTML = '';
       if (!res.items.length) {
         body.innerHTML = '<tr><td colspan="7" class="empty">暂无匹配的审计记录</td></tr>';
@@ -2925,6 +3080,18 @@ function initAdminAudit() {
     }
   }
 
+  // 从 URL 回填（刷新/分享/后退都能还原同一份筛选）
+  (function restoreFromURL() {
+    const q = new URLSearchParams(location.search);
+    if (q.get('action')) $('#audit-action').value = q.get('action');
+    if (q.get('actor')) $('#audit-actor').value = q.get('actor');
+    if (q.get('target')) $('#audit-target').value = q.get('target');
+    if (q.get('result') && $('#audit-result')) $('#audit-result').value = q.get('result');
+    if (q.get('from')) $('#audit-from').value = q.get('from');
+    if (q.get('to')) $('#audit-to').value = q.get('to');
+    if (q.get('offset')) pager.state.offset = Number(q.get('offset')) || 0;
+    if (q.get('action') || q.get('result') || q.get('from') || q.get('to')) rangeChipSync('custom');
+  })();
   $('#audit-filter-form').addEventListener('submit', e => { e.preventDefault(); pager.state.offset = 0; load(); });
   // ---- W8③ 时间范围重做：快捷档位 chips（今天 / 近 7 天 / 近 30 天 / 自定义）+
   // 两枚站内样式日期输入。档位选中即填 from/to 并查询；直接改日期输入则回落到
@@ -2959,12 +3126,22 @@ function initAdminAudit() {
     $(sel).addEventListener('change', () => rangeChipSync('custom')));
   $('#audit-reset').addEventListener('click', () => {
     $('#audit-action').value = ''; $('#audit-actor').value = ''; $('#audit-target').value = '';
+    if ($('#audit-result')) $('#audit-result').value = '';
     $('#audit-from').value = ''; $('#audit-to').value = '';
     rangeChipSync('custom');
     decorateSelect($('#audit-action'));   // 值被重置，同步下拉按钮文案
+    if ($('#audit-result')) decorateSelect($('#audit-result'));
     pager.state.offset = 0; load();
   });
   pager.wire(load);
+  // 导出：带上当前筛选，用浏览器原生下载（同源、带 cookie，无需额外鉴权头）
+  const exportBtn = $('#audit-export');
+  if (exportBtn) exportBtn.addEventListener('click', () => {
+    const p = new URLSearchParams(filters());
+    p.delete('limit'); p.delete('offset');   // 导出取全量，不分页
+    p.set('format', 'csv');
+    location.href = '/admin/audit?' + p.toString();
+  });
   document.addEventListener('appscopechange', e => {
     e.preventDefault();
     pager.state.offset = 0;
@@ -3250,7 +3427,11 @@ function initAdminAI() {
     panel.scrollIntoView({ block: 'nearest' });
     loadDetail();
   }
-  $('#aid-close').addEventListener('click', () => $('#ai-detail').classList.add('hidden'));
+  $('#aid-close').addEventListener('click', () => {
+    $('#ai-detail').classList.add('hidden');
+    const back = $('#ai-users-body tr[role=button]');            // 焦点还给触发行
+    if (back) back.focus();
+  });
   $('#aid-days').addEventListener('change', loadDetail);
 
   // ---- 编辑限额（super only，按钮在模板层由 .IsSuper 门控） ----
@@ -3292,14 +3473,27 @@ function initAdminAI() {
       if (!todo.length) { closeDialog($('#quota-dialog')); return; }
       const btn = $('#quota-ok');
       setBusy(btn, true);
+      // 逐键保存：中途失败必须说清「哪几项已生效、哪项失败、其余未保存」——
+      // 只说一句 err.message 会让管理员以为整批都没动，回头重复保存。
+      let done = 0;
       try {
         for (const [key, v] of todo) {
-          await api('/admin/config/' + encodeURIComponent(key), { method: 'PUT', body: { value: v } });
+          const f = QUOTA_FIELDS.find(x => x.key === key);
+          try {
+            await api('/admin/config/' + encodeURIComponent(key), { method: 'PUT', body: { value: v } });
+            done += 1;
+          } catch (err) {
+            const rest = todo.length - done - 1;
+            showErr('#quota-error',
+              `已保存 ${done} 项；「${f ? f.label : key}」失败：${err.message}${rest > 0 ? `；其余 ${rest} 项未保存` : ''}`);
+            await load();
+            return;
+          }
         }
         closeDialog($('#quota-dialog'));
         toast('限额已保存，≤10 秒生效');
         await load();
-      } catch (err) { showErr('#quota-error', err.message); } finally { setBusy(btn, false); }
+      } finally { setBusy(btn, false); }
     });
   }
 
@@ -3369,6 +3563,44 @@ function wireTabs() {
    openInvite/openBulk 这类后填选项的场景天然成立。
    键盘与无障碍：按钮 aria-haspopup=listbox + aria-expanded；Enter/空格/↓ 打开，
    ↑/↓ 移动高亮，Enter/空格 选中，Esc 关闭回焦；点外部关闭。 */
+/* ---------- 密码「显示/隐藏」开关（NIST SP 800-63B §3.1.1.2） ----------
+   规范原文是 SHOULD：允许用户看清自己输的密码，长密码与手机键盘下尤其必要。
+   形态复用仓内既有的「输入 + 行内按钮」（.code-line 发码钮同款），**不叠在输入框
+   右缘**——那一带是浏览器密码管理器徽章的保留区（见 AGENTS 坑位），叠上去会打架。 */
+const PW_EYE = {
+  on: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>',
+  off: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg>',
+};
+
+function decoratePasswords(root) {
+  $$('input[type=password]', root || document).forEach(inp => {
+    if (inp.__pwToggle || inp.disabled) return;
+    const row = document.createElement('span');
+    row.className = 'pw-row';
+    inp.parentNode.insertBefore(row, inp);
+    row.appendChild(inp);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn small ghost pw-toggle';
+    btn.innerHTML = PW_EYE.on;
+    btn.setAttribute('aria-label', '显示密码');
+    btn.setAttribute('aria-pressed', 'false');
+    btn.title = '显示密码';
+    btn.addEventListener('click', () => {
+      const shown = inp.type === 'text';
+      inp.type = shown ? 'password' : 'text';
+      btn.innerHTML = shown ? PW_EYE.on : PW_EYE.off;
+      const next = shown ? '显示密码' : '隐藏密码';
+      btn.setAttribute('aria-label', next);
+      btn.title = next;
+      btn.setAttribute('aria-pressed', String(!shown));
+      inp.focus({ preventScroll: true });   // 焦点留在输入框，不打断输入
+    });
+    row.appendChild(btn);
+    inp.__pwToggle = btn;
+  });
+}
+
 /* 全站只挂**一个** document 监听来关下拉：此前每装饰一个 <select> 就 document
    .addEventListener 一次且永不移除，后台用户详情反复开合会累积几十个监听，
    每次点击都要把它们全跑一遍。这里用单例登记「当前打开的那个」。 */
@@ -3489,6 +3721,7 @@ document.addEventListener('DOMContentLoaded', () => {
   wireReauth();
   wireTabs();
   decorateSelects(document);   // W9：静态 <select> 全部换站内下拉（值载体保留）
+  decoratePasswords(document); // NIST：全站密码框提供「显示密码」
   initAdminGuard();
   initAppSwitch();
   initLogin();

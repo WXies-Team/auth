@@ -7,7 +7,10 @@
 
 <section class="card" aria-labelledby="who-title">
   <h2 id="who-title">账号</h2>
-  <p><span class="dim">邮箱</span> <strong id="me-email">读取中…</strong></p>
+  <p><span class="dim">邮箱</span> <strong id="me-email"><span class="skeleton sk-line" style="width:180px;display:inline-block"></span></strong></p>
+  <!-- 最近登录：Google 安全检查页的标配信息，帮助用户发现异常活动。
+       数据取现有 /api/sessions 的首条（服务端已按 last_seen_at DESC 排序），无需新端点。 -->
+  <p class="hint" id="me-last-login"><span class="skeleton sk-line" style="width:220px;display:inline-block"></span></p>
   <p class="hint" id="me-meta">可随时在「登录会话」页退出某台设备。</p>
   <div class="row" style="margin-top:12px">
     <a class="btn" href="/web/console/sessions">{{icon "monitor-smartphone"}} 管理已登录设备</a>
@@ -20,17 +23,17 @@
   <div class="list" style="margin-top:8px">
     <div class="item">
       <span class="ico-wrap">{{icon "lock"}}</span>
-      <span class="grow"><span class="title">密码</span><br><span class="meta" id="stat-password">读取中…</span></span>
+      <span class="grow"><span class="title">密码</span><br><span class="meta" id="stat-password"><span class="skeleton sk-line" style="width:56px;display:inline-block;vertical-align:middle"></span></span></span>
       <a class="btn small" href="/web/console/account">管理</a>
     </div>
     <div class="item">
       <span class="ico-wrap">{{icon "shield-check"}}</span>
-      <span class="grow"><span class="title">两步验证</span><br><span class="meta" id="stat-totp">读取中…</span></span>
+      <span class="grow"><span class="title">两步验证</span><br><span class="meta" id="stat-totp"><span class="skeleton sk-line" style="width:56px;display:inline-block;vertical-align:middle"></span></span></span>
       <a class="btn small" href="/web/console/security">管理</a>
     </div>
     <div class="item">
       <span class="ico-wrap">{{icon "key-round"}}</span>
-      <span class="grow"><span class="title">Passkey</span><br><span class="meta" id="stat-passkey">读取中…</span></span>
+      <span class="grow"><span class="title">Passkey</span><br><span class="meta" id="stat-passkey"><span class="skeleton sk-line" style="width:56px;display:inline-block;vertical-align:middle"></span></span></span>
       <a class="btn small" href="/web/console/passkeys">管理</a>
     </div>
   </div>

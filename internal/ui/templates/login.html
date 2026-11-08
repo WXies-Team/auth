@@ -14,7 +14,9 @@
     <form id="pane-password" role="tabpanel" aria-labelledby="tab-password">
       <div id="step-password">
         <label class="field"><span>邮箱</span>
-          <input type="email" id="login-email" autocomplete="username" required>
+          <!-- autocomplete 里的 webauthn 即「条件式 UI」的挂载点：浏览器把本机的
+         passkey 直接列进邮箱框的自动填充建议里，用户零点击选中即登录。 -->
+          <input type="email" id="login-email" autocomplete="username webauthn" required>
         </label>
         <label class="field"><span>密码</span>
           <input type="password" id="login-password" autocomplete="current-password" required>
@@ -55,7 +57,7 @@
           <button type="button" class="btn" id="send-code">获取验证码</button>
         </div>
       </div>
-      <p class="hint">验证码 5 分钟内有效；没收到可查看垃圾箱，60 秒后可重新发送。</p>
+      <p class="hint">验证码 5 分钟内有效。没收到？在垃圾箱里搜索发件人「Auth」；60 秒后可重新发送。</p>
       <p class="err" id="code-error" role="alert" hidden></p>
       <button type="submit" class="btn primary" style="width:100%">登录</button>
     </form>

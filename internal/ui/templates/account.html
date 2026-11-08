@@ -130,10 +130,15 @@
       </div>
     </div>
     <p class="hint">验证码 5 分钟内有效</p>
+    <!-- 手输短语闸（GitHub 删除账号同款）：不可逆操作光靠「点两下」不够，
+         必须让用户做一次有意识的动作。输入「注销」才解锁主钮。 -->
+    <label class="field"><span>为防误操作，请在下方输入「注销」</span>
+      <input type="text" id="delete-phrase" autocomplete="off" placeholder="注销">
+    </label>
     <p class="err" id="delete-error" role="alert" hidden></p>
     <div class="row end">
       <button type="button" class="btn" id="delete-cancel">取消</button>
-      <button type="submit" class="btn danger">永久注销账号</button>
+      <button type="submit" class="btn danger" id="delete-submit" disabled>永久注销账号</button>
     </div>
   </form>
 </dialog>

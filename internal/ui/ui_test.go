@@ -415,7 +415,7 @@ func TestAuthorizeTemplateRendersBothVariants(t *testing.T) {
 		`name="decision" value="allow"`, `name="decision" value="deny"`,
 		`name="tx" value=`, `.AppName`, `.RedirectHost`, `.Email`,
 		`.ErrorTitle`, `.ErrorMessage`,
-		`登录到「`, `它将获得你的账号标识与邮箱`,
+		`登录到「`, `它将获得：`, `range .Scopes`, `拒绝并返回`,
 	} {
 		if !strings.Contains(tpl, want) {
 			t.Errorf("授权页模板缺 %q", want)
@@ -426,6 +426,7 @@ func TestAuthorizeTemplateRendersBothVariants(t *testing.T) {
 	data := Data{Title: "授权登录", Minimal: true, OAuth: &OAuthView{
 		Tx: "tx-1", App: "calorie-diary", AppName: "热量日记",
 		RedirectHost: "app.example.com", Email: "u@example.com",
+		Scopes: []string{"你的账号标识（uid）", "你的邮箱地址"},
 	}}
 	if err := Render(rec, "authorize", data); err != nil {
 		t.Fatalf("渲染确认页: %v", err)

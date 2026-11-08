@@ -16,12 +16,23 @@
   <div class="card" id="authorize-card">
     <h2>授权登录「{{.AppName}}」</h2>
     <p class="dim" style="margin-top:6px">当前账号：{{.Email}}</p>
-    <p class="hint-box" style="margin-top:12px">登录到「{{.AppName}}」后，它将获得你的账号标识与邮箱。</p>
-    <p class="hint" style="margin-top:10px">回跳地址：{{.RedirectHost}}</p>
+    <!-- 逐项列 scope（Google 同意屏口径）：一句「获得你的账号标识与邮箱」看不出
+         到底给了什么，逐条列出来才可被核对。列表来自服务端 oauthScopes，与实际
+         发票/回传的字段一一对应，前端不硬编码。 -->
+    <div class="hint-box" style="margin-top:12px">
+      <strong>登录到「{{.AppName}}」后，它将获得：</strong>
+      <ul class="scope-list">
+        {{range .Scopes}}<li>{{.}}</li>{{else}}<li>你的账号标识与邮箱地址</li>{{end}}
+      </ul>
+    </div>
+    <p class="hint" style="margin-top:10px">
+      回跳地址：<span class="mono">{{.RedirectHost}}</span>
+      · 确认后浏览器将跳转到该域名。若不是你预期的站点，请点「拒绝并返回」。
+    </p>
     <form method="post" action="/oauth/authorize/confirm" style="margin-top:16px">
       <input type="hidden" name="tx" value="{{.Tx}}">
-      <button type="submit" class="btn primary" name="decision" value="allow" style="width:100%">继续</button>
-      <button type="submit" class="btn" name="decision" value="deny" style="width:100%;margin-top:8px">取消</button>
+      <button type="submit" class="btn primary" name="decision" value="allow" style="width:100%">继续授权</button>
+      <button type="submit" class="btn" name="decision" value="deny" style="width:100%;margin-top:8px">拒绝并返回</button>
     </form>
   </div>
   {{end}}

@@ -21,7 +21,8 @@
   --outline: #D9D9D9;
   --ink: #000000;
   --dim: rgba(0, 0, 0, .6);
-  --line: #E0E0E0;
+  --line: #E0E0E0;          /* 装饰性分隔线/容器环（不承载语义，1.32:1 够用） */
+  --control-line: #8C8C8C;  /* 交互控件边框（WCAG 1.4.11 要求 ≥3:1，实测 3.36:1） */
   --section-title: #5F6785;   /* miuix #8C93B0 只有 3.04:1，加深到 5.58:1 */
   --sub-bg: #F0F0F0;
   --sub-ink: #303030;
@@ -61,6 +62,7 @@
     --ink: #E6FFFFFF;          /* #FFFFFF 90% */
     --dim: rgba(255, 255, 255, .6);
     --line: #393939;
+    --control-line: #787878;   /* 暗色下 3.52:1 */
     --section-title: #787E96;
     --sub-bg: #434343;
     --sub-ink: #E6FFFFFF;
@@ -322,6 +324,9 @@ p.hint { margin: 6px 0; }
   font-size: 14px; margin: 0;
 }
 .hint-box a { color: inherit; }
+/* 授权同意页的权限清单：逐条列出，不用逗号串成一行（可被逐项核对） */
+.scope-list { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 4px; }
+.scope-list li { font-size: 14px; }
 @media (prefers-color-scheme: dark) { .hint-box { color: var(--ink); } }
 
 /* 危险操作区（注销账号）：error 描边 + 淡底，与常规设置视觉隔离 */
@@ -359,7 +364,7 @@ input[type=datetime-local], input[type=search], select, textarea {
   width: 100%; min-height: var(--tap); padding: 9px 15px;
   border: none; border-radius: var(--radius-ctl);
   background: var(--card); background-clip: padding-box; color: var(--ink); font: inherit;
-  box-shadow: inset 0 0 0 1px var(--line);
+  box-shadow: inset 0 0 0 1px var(--control-line);
   transition: box-shadow var(--dur-1) var(--ease);
 }
 /* W6 ①：凭据/OTP 字段右侧预留徽章位（Chrome 密码管理器钥匙图标、OTP 下拉锚标
@@ -373,11 +378,20 @@ input[autocomplete="username"], input[autocomplete="one-time-code"], input[type=
    padding-box，圆角不破），内环与文本色/插入符显式回到站点令牌；超长 transition
    让 autofill 的高亮色渐变永远播不完（标准配方）。 */
 input:-webkit-autofill {
-  -webkit-box-shadow: 0 0 0 1000px var(--card) inset, inset 0 0 0 1px var(--line);
+  -webkit-box-shadow: 0 0 0 1000px var(--card) inset, inset 0 0 0 1px var(--control-line);
   -webkit-text-fill-color: var(--ink);
   caret-color: var(--ink);
   transition: background-color 99999s ease-out, box-shadow var(--dur-1) var(--ease);
 }
+/* ---- 密码行：输入框 + 「显示密码」行内按钮（NIST SP 800-63B §3.1.1.2）----
+   按钮放在输入框**外面**而不是叠在右缘：那一带是浏览器密码管理器徽章的保留区
+   （.field 的 position:relative + 输入框 44px 右内边距就是为它留的），叠上去会
+   和徽章打架。行内布局同 .code-line 的发码钮，交互观感一致。 */
+.pw-row { display: flex; align-items: center; gap: 8px; }
+.pw-row > input { flex: 1 1 auto; min-width: 0; }
+.pw-row > .pw-toggle { flex: none; width: 44px; padding: 0; }
+.pw-row > .pw-toggle .ico { width: 18px; height: 18px; }
+
 /* ---- 验证码行（W5）：输入框 + 发码按钮同一行 ----
    输入 flex 收缩（min-width:0 允许压窄），按钮 flex:none 不换行不溢出；
    按钮沿用站内次级钮（.btn 默认 sub-bg 底），倒计时态由 cooldown() 改文案。 */
@@ -398,7 +412,7 @@ input:-webkit-autofill {
   border: none; border-radius: var(--radius-ctl);
   background: var(--card); background-clip: padding-box; color: var(--ink);
   font: inherit; text-align: left; cursor: pointer;
-  box-shadow: inset 0 0 0 1px var(--line);
+  box-shadow: inset 0 0 0 1px var(--control-line);
   transition: box-shadow var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
 }
 .select-btn:active { transform: scale(.99); }
@@ -427,7 +441,7 @@ input[type=checkbox], input[type=radio] {
   appearance: none; -webkit-appearance: none; flex: none;
   width: 20px; height: 20px; margin: 0; cursor: pointer; position: relative;
   background: var(--card); background-clip: padding-box;
-  border: none; box-shadow: inset 0 0 0 1px var(--line);
+  border: none; box-shadow: inset 0 0 0 1px var(--control-line);
   transition: box-shadow var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease),
               transform var(--dur-1) var(--ease);
 }
@@ -792,7 +806,24 @@ td .user-cell .truncate { max-width: 24ch; }
 .brand-lg .name { font-size: 22px; font-weight: 500; }
 
 /* ---- 骨架与空态 ---- */
+/* 骨架屏（Material 3 Transitions：skeleton + 内容淡入，脉冲表示进行中）。
+   装载期给**形状**而不是一句「读取中…」——用户能预判内容布局，切换时不跳版。 */
+.skeleton {
+  display: block; border-radius: 8px; background: var(--sub-bg);
+  animation: sk-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sk-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+.sk-line { height: 12px; margin: 4px 0; }
+.sk-line.w40 { width: 40%; } .sk-line.w60 { width: 60%; } .sk-line.w80 { width: 80%; }
+.sk-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.sk-avatar { width: 32px; height: 32px; border-radius: 50%; flex: none; }
+.sk-grow { flex: 1 1 auto; min-width: 0; }
+
 .empty { text-align: center; color: var(--dim); padding: 28px 12px; }
+/* 空态标题+说明+主行动（Polaris：解释为什么空 + 给一个下一步）。
+   此前只有一句灰字，用户看不出「是没数据还是坏了」。 */
+.empty-title { display: block; color: var(--ink); font-size: 15px; font-weight: 500; margin-bottom: 4px; }
+.empty-hint { display: block; font-size: 13px; color: var(--dim); }
 .hidden { display: none !important; }
 
 /* ---- 账号资料卡（B5）----
@@ -931,6 +962,8 @@ tbody tr:nth-child(10) { animation-delay: 330ms; }
      （入场动画时长归零后停在终态即「可见」，无需额外兜底。） */
   .btn:active, .tab:active, .app-chip:active, .select-btn:active,
   input[type=checkbox]:active, input[type=radio]:active { transform: none; }
+  /* 骨架屏停脉冲，只留底色（仍在表达「占位」，但不闪） */
+  .skeleton { animation: none; opacity: .7; }
 }
 @media (prefers-reduced-motion: reduce) and (hover: hover) {
   /* 行的悬停只留背景变化（无位移可撤） */

@@ -68,7 +68,14 @@
   <label class="field"><span>对象 uid</span>
     <input type="text" id="audit-target" inputmode="numeric" autocomplete="off" placeholder="全部">
   </label>
- </div><!-- /toolbar-row（事件 + 两个 uid） -->
+  <label class="field"><span>结果</span>
+    <select id="audit-result">
+      <option value="">全部</option>
+      <option value="ok">成功</option>
+      <option value="fail">失败</option>
+    </select>
+  </label>
+ </div><!-- /toolbar-row（事件 + 两个 uid + 结果） -->
 
   <!-- 快捷档位：标签 + chips，独占一行不进字段网格 -->
   <div class="toolbar-inline">
@@ -105,14 +112,20 @@
       <tr><th>时间</th><th>事件</th><th>结果</th><th>操作者</th><th>对象</th><th>IP</th><th>详情</th></tr>
     </thead>
     <tbody id="audit-body">
-      <tr><td colspan="7" class="empty">读取中…</td></tr>
+      <tr><td colspan="7"><span class="skeleton sk-line w60"></span><span class="skeleton sk-line w40"></span></td></tr>
+<tr><td colspan="7"><span class="skeleton sk-line w60"></span><span class="skeleton sk-line w40"></span></td></tr>
+<tr><td colspan="7"><span class="skeleton sk-line w60"></span><span class="skeleton sk-line w40"></span></td></tr>
     </tbody>
   </table>
 </div>
 
-<div class="row" style="justify-content:flex-end;margin-top:10px">
-  <button type="button" class="btn small" id="audit-prev">上一页</button>
-  <span class="dim" id="audit-page">—</span>
-  <button type="button" class="btn small" id="audit-next">下一页</button>
+<div class="row between" style="margin-top:10px">
+  <!-- 导出走同一套筛选（format=csv，跳过分页取全量，上限 5000 行） -->
+  <button type="button" class="btn small" id="audit-export">导出 CSV</button>
+  <span class="row" style="gap:8px">
+    <button type="button" class="btn small" id="audit-prev">上一页</button>
+    <span class="dim" id="audit-page">—</span>
+    <button type="button" class="btn small" id="audit-next">下一页</button>
+  </span>
 </div>
 {{end}}
