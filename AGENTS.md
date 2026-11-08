@@ -146,6 +146,16 @@ the same PR**—a stale guide ships wrong integrations.
 
 ## Known pitfalls
 
+- **卡片不许用 `box-shadow: inset` 当描边**：inset 阴影画在**子元素背景之下**，表格行
+  hover、选中 chip、按钮一触到卡片边缘就把它盖掉——表现为「选项点黑后圆角那条线消失」。
+  miuix 的 Card 本就是纯填充无描边（`CardDefaults.CornerRadius=16.dp`，靠 surface 与
+  surfaceContainer 的色差分离），行间分隔用 `border-top`（border 画在自身背景之上，
+  盖不掉）。圆角令牌全站唯一 16，不许在断点里另起一套。`TestMiuixCardForm` 钉住。
+- **居中不许用 `transform: translateX(-50%)` 给会跑入场动画的元素**：入场关键帧
+  （`rise-in` 之类）把 `transform` 整个覆盖掉，元素在动画期间没有水平位移、偏在
+  半边，动画结束再瞬间弹回——远端看到的就是「底栏乱飞」（实测中心 352px→195px）。
+  用 `left:0; right:0; margin-inline:auto` 居中，把 transform 完全留给动画。
+  `TestTabnavCenteringNeverUsesTransform` 钉住。
 - **不要再走 Kotlin/Wasm 前端路线**：2026-10-23 曾用 miuix 0.9.4 + Kotlin/Wasm 全量重建
   web 前端并上线（web/ 工程 + go:embed + /wasm 路由），实测画布渲染在本控制台场景**卡顿**，
   2026-10-28 整体回滚（git revert 309db55..fe3a9bb）。原生效果的复刻走模板前端的 CSS/JS
