@@ -177,6 +177,7 @@ type AuditQuery struct {
 	Action string
 	Actor  int64 // 0 = 不限
 	Target int64 // 0 = 不限
+	Result string // "ok" / "fail"；空 = 不限（审计系统标配的成功/失败过滤）
 	From   int64 // 毫秒，0 = 不限
 	To     int64
 	Limit  int
@@ -225,6 +226,13 @@ func (s *Service) QueryAudit(q AuditQuery) ([]AuditRow, int, error) {
 	if q.Target > 0 {
 		cond += " AND target_uid = ?"
 		args = append(args, q.Target)
+	}
+	if q.Result != "" {
+		// 只接受两个已知取值，其余当「不限」——不用 =? 直穿，避免拼出无意义条件
+		if q.Result == "ok" || q.Result == "fail" {
+			cond += " AND result = ?"
+			args = append(args, q.Result)
+		}
 	}
 	if q.From > 0 {
 		cond += " AND ts >= ?"

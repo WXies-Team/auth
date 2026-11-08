@@ -62,6 +62,14 @@ type AdminUser struct {
 	Nickname    string `json:"nickname"`
 	AvatarColor int    `json:"avatarColor"`
 	HasAvatar   bool   `json:"hasAvatar"`
+	// Ban：列表前置状态——被封的账号不该点进详情才发现。UntilMs=0 表示永久。
+	Ban *UserBanInfo `json:"ban,omitempty"`
+}
+
+type UserBanInfo struct {
+	App     string `json:"app"`     // "*" = 全站
+	UntilMs int64  `json:"untilMs"` // 0 = 永久
+	Reason  string `json:"reason,omitempty"`
 }
 
 // AdminUserDetail 是用户详情：加凭证摘要、应用授权清单与活跃会话，够管理员判断
@@ -219,7 +227,55 @@ func (s *Service) AdminSearchUsers(query string, limit, offset int) ([]AdminUser
 	if err := s.fillUserSummaries(base); err != nil {
 		return nil, 0, err
 	}
+	if err := s.fillUserBans(base); err != nil {
+		return nil, 0, err
+	}
 	return base, total, nil
+}
+
+// fillUserBans 批量回填封禁状态：只认**仍生效**的行（until_ms=0 永久，或 > now），
+// 过期的按未封处理——与 gate.go 的惰性判定同口径，列表不会报「封禁」而登录已放行。
+// 全站封（app='*'）优先于单项目封。
+func (s *Service) fillUserBans(users []AdminUser) error {
+	if len(users) == 0 {
+		return nil
+	}
+	ids := make([]any, 0, len(users))
+	ph := make([]string, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.UID)
+		ph = append(ph, "?")
+	}
+	now := time.Now().UnixMilli()
+	rows, err := s.pool.QueryContext(context.Background(),
+		"SELECT uid, app, until_ms, reason FROM user_bans WHERE uid IN ("+strings.Join(ph, ",")+
+			") AND (until_ms = 0 OR until_ms > ?)", append(ids, now)...)
+	if err != nil {
+		return fmt.Errorf("查封禁: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	found := map[int64]UserBanInfo{}
+	for rows.Next() {
+		var uid int64
+		var b UserBanInfo
+		if err := rows.Scan(&uid, &b.App, &b.UntilMs, &b.Reason); err != nil {
+			return fmt.Errorf("读封禁: %w", err)
+		}
+		if prev, ok := found[uid]; ok && prev.App == "*" {
+			continue   // 已有全站封，项目封不覆盖
+		}
+		found[uid] = b
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("遍历封禁: %w", err)
+	}
+	for i := range users {
+		if b, ok := found[users[i].UID]; ok {
+			bb := b
+			users[i].Ban = &bb
+		}
+	}
+	return nil
 }
 
 // fillUserSummaries 给一批用户补 TOTP / passkey / 应用授权摘要。全部按 uid IN

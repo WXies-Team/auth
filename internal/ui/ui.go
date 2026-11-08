@@ -228,6 +228,7 @@ type OAuthView struct {
 	AppName      string
 	RedirectHost string
 	Email        string
+	Scopes       []string
 	ErrorTitle   string
 	ErrorMessage string
 }

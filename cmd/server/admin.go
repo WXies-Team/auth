@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"encoding/csv"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -591,14 +593,22 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			return
 		}
 		q := r.URL.Query()
+		// CSV 导出：同一套筛选、跳过分页（管理员要的是「这份筛选的全集」）。
+		// 上限 5000 行防止一次拉爆内存；超出时以总数在页脚注明。
+		exportCSV := q.Get("format") == "csv"
+		limit, offset := queryInt(q.Get("limit")), queryInt(q.Get("offset"))
+		if exportCSV {
+			limit, offset = 5000, 0
+		}
 		list, total, err := svc.QueryAudit(auth.AuditQuery{
 			Action: q.Get("action"),
+			Result: q.Get("result"),
 			Actor:  queryInt64(q.Get("actor")),
 			Target: queryInt64(q.Get("target")),
 			From:   queryInt64(q.Get("from")),
 			To:     queryInt64(q.Get("to")),
-			Limit:  queryInt(q.Get("limit")),
-			Offset: queryInt(q.Get("offset")),
+			Limit:  limit,
+			Offset: offset,
 			Apps:   apps,
 		})
 		if err != nil {
@@ -610,6 +620,10 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 			Action: auth.AuditAdminAuditView, OK: true, ActorUID: &ac.caller.UID,
 			ActorEmail: ac.caller.Email, Meta: ac.caller.Meta,
 		})
+		if exportCSV {
+			writeAuditCSV(w, list)
+			return
+		}
 		writeJSON(w, http.StatusOK, page{Items: list, Total: total})
 	}))
 
@@ -710,4 +724,40 @@ func queryInt64(raw string) int64 {
 		return 0
 	}
 	return n
+}
+
+// writeAuditCSV 把审计行流式输出成 CSV。字段顺序固定，时间是 RFC3339（Excel/
+// Numbers 都能直接识别），detail 展开成 k=v;k=v 单列——导出是为了对账与留档，
+// 不追求二次解析，因此不做多列展开。
+func writeAuditCSV(w http.ResponseWriter, rows []auth.AuditRow) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition",
+		`attachment; filename="audit-`+time.Now().Format("20060102-150405")+`.csv"`)
+	w.Header().Set("Cache-Control", "no-store")
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"时间", "事件", "结果", "操作者 uid", "操作者邮箱", "对象 uid", "IP", "UA", "详情"})
+	for _, r := range rows {
+		detail := ""
+		if len(r.Detail) > 0 {
+			kv := make([]string, 0, len(r.Detail))
+			for k, v := range r.Detail {
+				kv = append(kv, k+"="+v)
+			}
+			sort.Strings(kv)
+			detail = strings.Join(kv, ";")
+		}
+		actor := ""
+		if r.ActorUID > 0 {
+			actor = strconv.FormatInt(r.ActorUID, 10)
+		}
+		target := ""
+		if r.TargetUID > 0 {
+			target = strconv.FormatInt(r.TargetUID, 10)
+		}
+		_ = cw.Write([]string{
+			time.UnixMilli(r.TS).Format(time.RFC3339), r.Action, r.Result,
+			actor, r.ActorEmail, target, r.IP, r.UserAgent, detail,
+		})
+	}
+	cw.Flush()
 }

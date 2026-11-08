@@ -186,6 +186,7 @@ func renderOAuthConfirm(svc *auth.Service, w http.ResponseWriter, tx string, uid
 		OAuth: &ui.OAuthView{
 			Tx: view.Tx, App: view.App, AppName: view.AppName,
 			RedirectHost: view.RedirectHost, Email: view.Email,
+			Scopes: view.Scopes,
 		},
 	}); err != nil {
 		slog.Error("渲染授权页失败", "err", err)

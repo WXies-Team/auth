@@ -56,6 +56,10 @@ const (
 type TOTPStatus struct {
 	Enabled   bool  `json:"enabled"`
 	CreatedAt int64 `json:"createdAt"`
+	// 恢复码余量：一次性凭证「还剩几枚」是用户最常问、也最容易用时才发现不够的
+	// 信息（NIST §4.2.1.1 把「用户知道还剩多少」当作可用恢复的前提）。0 枚 = 已用尽。
+	RecoveryTotal int `json:"recoveryTotal,omitempty"`
+	RecoveryLeft  int `json:"recoveryLeft,omitempty"`
 }
 
 // TOTPSetup 是 setup 的回执：二维码 data URI、otpauth URI 与明文 secret 三件套
@@ -160,6 +164,17 @@ func (s *Service) TOTPStatus(uid int64) (TOTPStatus, error) {
 	st := TOTPStatus{Enabled: f.Enabled, CreatedAt: f.CreatedAt}
 	if f.Enabled && f.ConfirmedAt.Valid {
 		st.CreatedAt = f.ConfirmedAt.Int64
+	}
+	if f.Enabled {
+		// 余量取「当前这一批」：换发后旧码会被删掉或标记，这里按总量与已用数现算。
+		// 查不到不影响主流程（0 值 = 不展示余量），不让状态接口因副信息失败。
+		var total, left int
+		if err := s.pool.QueryRowContext(context.Background(),
+			// COALESCE：一行都没有时 SUM(used) 是 NULL，直接扫进 int 会报错
+			"SELECT COUNT(*), COUNT(*) - COALESCE(SUM(used), 0) FROM recovery_codes WHERE user_id = ?",
+			uid).Scan(&total, &left); err == nil {
+			st.RecoveryTotal, st.RecoveryLeft = total, left
+		}
 	}
 	return st, nil
 }

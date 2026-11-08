@@ -91,12 +91,20 @@ func (s *Service) OAuthBeginAuthorize(req OAuthAuthorizeRequest) (tx string, app
 
 // OAuthView 是授权确认页（authorize.html）的渲染上下文：App/回跳域名取自
 // 已验参数，Email 是当前登录账号。Error* 非空 = 同模板的错误页变体。
+// oauthScopes 是本服务**实际会授予**的字段清单，与 id_token/授权码里的内容一一对应。
+// 同意屏逐项列出（Google 同意屏口径），比一句「获得你的账号标识与邮箱」可信得多。
+var oauthScopes = []string{
+	"你的账号标识（uid）",
+	"你的邮箱地址",
+}
+
 type OAuthView struct {
 	Tx           string
 	App          string
 	AppName      string
 	RedirectHost string
 	Email        string
+	Scopes       []string
 	ErrorTitle   string
 	ErrorMessage string
 }
@@ -133,6 +141,7 @@ func (s *Service) OAuthAuthorizeView(tx string, uid int64) (*OAuthView, error) {
 	return &OAuthView{
 		Tx: tx, App: e.App, AppName: appName(e.App),
 		RedirectHost: host, Email: email,
+		Scopes: append([]string(nil), oauthScopes...),
 	}, nil
 }
 
