@@ -158,6 +158,16 @@ function drainFlash() {
   if (msg) toast(msg);
 }
 
+/* 表单提交按钮的忙态：这些表单此前没有 setBusy，双击会发两次请求
+   （验证码/重置类第二次必然失败，还把「验证码已使用」当错误丢给用户）。
+   e.submitter 是真正被点的按钮，取不到就退回表单里的第一个 submit。 */
+function busySubmit(e) {
+  const btn = (e && e.submitter) || (e && e.target && e.target.querySelector && e.target.querySelector('button[type=submit]'));
+  if (btn) setBusy(btn, true);
+  return btn;
+}
+function idleSubmit(btn) { if (btn) setBusy(btn, false); }
+
 function setBusy(btn, busy) {
   if (!btn) return;
   btn.setAttribute('aria-busy', busy ? 'true' : 'false');
@@ -687,18 +697,20 @@ function initLogin() {
   $('#pane-code').addEventListener('submit', async e => {
     e.preventDefault();
     showErr('#code-error', '');
+    const btn = busySubmit(e);
     try {
       const done = await api('/web/login/email-code', {
         method: 'POST',
         body: { email: $('#code-email').value.trim(), code: $('#code-code').value.trim() },
       });
       finishLogin(done);   // 验证码登录没有密码可带，强制改密时 oldPassword 传空串
-    } catch (err) { showErr('#code-error', err.message); }
+    } catch (err) { showErr('#code-error', err.message); } finally { idleSubmit(btn); }
   });
 
   $('#pane-reset').addEventListener('submit', async e => {
     e.preventDefault();
     showErr('#reset-error', '');
+    const btn = busySubmit(e);
     try {
       await api('/auth/reset-password', {
         method: 'POST',
@@ -711,7 +723,7 @@ function initLogin() {
       toast('密码已重置，请用新密码登录');
       $('#tab-password').click();
       $('#login-email').value = $('#reset-email').value.trim();
-    } catch (err) { showErr('#reset-error', err.message); }
+    } catch (err) { showErr('#reset-error', err.message); } finally { idleSubmit(btn); }
   });
 
   // ---- Passkey 登录（不支持则整个入口隐藏，不摆死按钮）----
@@ -1194,10 +1206,15 @@ function initSecurity() {
     $('#code-input').focus();
     return new Promise(resolve => { codeResolver = resolve; });
   }
-  $('#code-cancel').addEventListener('click', () => {
-    closeDialog($('#code-dialog'));
+  // 取消的**唯一收口**：点「取消」、按 Esc、浏览器关闭弹窗都走这里。
+  // 此前只绑了 click，按 Esc 时 dialog 被浏览器关掉但 resolver 永不 resolve——
+  // 调用方（重生成/关闭两步验证）的 await 永久挂起，之后再点又会覆盖 resolver。
+  const cancelCode = () => {
+    if ($('#code-dialog').open) closeDialog($('#code-dialog'));
     if (codeResolver) { codeResolver(''); codeResolver = null; }
-  });
+  };
+  $('#code-cancel').addEventListener('click', cancelCode);
+  $('#code-dialog').addEventListener('cancel', e => { e.preventDefault(); cancelCode(); });
   $('#code-form').addEventListener('submit', async e => {
     e.preventDefault();
     const value = $('#code-input').value.trim();
@@ -1263,6 +1280,7 @@ function initAccount() {
   $('#pane-pw-old').addEventListener('submit', async e => {
     e.preventDefault();
     showErr('#pw-old-error', '');
+    const btn = busySubmit(e);
     try {
       await api('/auth/change-password', {
         method: 'POST',
@@ -1270,7 +1288,7 @@ function initAccount() {
       });
       $('#pw-old').value = ''; $('#pw-new').value = '';
       toast('密码已修改');
-    } catch (err) { showErr('#pw-old-error', err.message); }
+    } catch (err) { showErr('#pw-old-error', err.message); } finally { idleSubmit(btn); }
   });
 
   $('#send-pw-code').addEventListener('click', async () => {
@@ -1285,6 +1303,7 @@ function initAccount() {
   $('#pane-pw-code').addEventListener('submit', async e => {
     e.preventDefault();
     showErr('#pw-code-error', '');
+    const btn = busySubmit(e);
     try {
       await api('/auth/change-password-code', {
         method: 'POST',
@@ -1292,7 +1311,7 @@ function initAccount() {
       });
       $('#pw-code').value = ''; $('#pw-code-new').value = '';
       toast('密码已修改');
-    } catch (err) { showErr('#pw-code-error', err.message); }
+    } catch (err) { showErr('#pw-code-error', err.message); } finally { idleSubmit(btn); }
   });
 
   $('#send-email-code').addEventListener('click', async () => {
@@ -1318,6 +1337,20 @@ function initAccount() {
         },
       });
       $('#email-code').value = ''; $('#email-password').value = '';
+      // 改完邮箱必须**当场**把三处身份显示换成新邮箱：顶栏胶囊的 title 与显示名
+      // （无昵称时显示名就是邮箱前缀）、账号页的「注册邮箱」行。否则刚做完的敏感
+      // 操作页面上还挂着旧身份，看着像没生效。
+      const newEmail = $('#email-new').value.trim();
+      if (newEmail) {
+        const pfEmail = $('#pf-email');
+        if (pfEmail) pfEmail.textContent = newEmail;
+        const top = $('#topbar-email');
+        if (top) {
+          const hasNickname = !!(profileCache && (profileCache.nickname || '').trim());
+          if (!hasNickname) top.textContent = newEmail.split('@')[0] || '';
+          top.setAttribute('title', newEmail);
+        }
+      }
       toast('邮箱已更新，新旧邮箱都收到了通知');
     } catch (err) { showErr('#email-error', err.message); }
   });
@@ -1364,6 +1397,12 @@ function initAccount() {
    PUT /api/profile 是**全量替换**语义（三字段每次都得提交完整），所以这里持一份
    本地档案副本，保存时整份提交；avatarImage 与两个日记 App 同口径：**裸 base64**
    （无 data: 前缀，标准字母表带 padding）——canvas toDataURL 产物剥掉前缀即是。 */
+/* 档案内存副本：PUT /api/profile 是**全量替换**，资料卡与登录提醒开关各发一次
+   全量 PUT 时，若其中一方用的是自己那份过期的 GET 结果，就会把对方刚改的字段
+   写回旧值（实测：改完昵称立刻切开关，昵称被写回旧值）。这里让两条路径共用
+   同一份「最后一次已知的完整档案」，谁保存成功谁更新它。 */
+let profileCache = null;
+
 function initProfile() {
   const avatarEl = $('#pf-avatar');
   if (!avatarEl) return;
@@ -1433,19 +1472,30 @@ function initProfile() {
     $('#pf-nick-view').textContent = pf.nickname || '未设置（显示邮箱前缀）';
   }
 
+  /* 色板 = 「自动」+ 7 个可选色。
+     服务端语义 avatarColor=0 表示**未设**（按 uid 派生），而色板下标 0 正好也是
+     一个真实颜色——两者撞车：未设色账号点第 1 颗时 0 !== 0 判不脏，保存钮点不动；
+     已设别的色再点第 1 颗会写回 0（变回派生色）。把 0 显式解释成「自动」，可选色
+     从下标 1 起——每颗都能点、都能存，且不需要改后端语义与两个 App（它们本地默认
+     也写 0 = 未设，静默改语义会让存量用户头像整体变色）。 */
   function renderPalette() {
     const box = $('#pf-palette');
     box.innerHTML = '';
-    PALETTE.forEach((hex, i) => {
-      const chip = node(`<button type="button" class="pf-chip${i === effectiveColor() ? ' on' : ''}"
-        style="background:${esc(hex)}" aria-pressed="${i === effectiveColor()}" aria-label="头像底色 ${i + 1}"></button>`);
+    const choices = [{ v: 0, auto: true }].concat(PALETTE.slice(1).map((hex, i) => ({ v: i + 1, hex })));
+    const current = Number(pf.avatarColor) || 0;
+    choices.forEach(c => {
+      const on = current === c.v;
+      const chip = c.auto
+        ? node(`<button type="button" class="pf-chip auto${on ? ' on' : ''}"
+            aria-pressed="${on}" aria-label="头像底色：自动（按账号派生）">自动</button>`)
+        : node(`<button type="button" class="pf-chip${on ? ' on' : ''}"
+            style="background:${esc(c.hex)}" aria-pressed="${on}" aria-label="头像底色 ${c.v + 1}"></button>`);
       chip.addEventListener('click', () => {
-        if (effectiveColor() === i) return;
-        pf.avatarColor = i;
-        $$('.pf-chip', box).forEach((c, j) => {
-          c.classList.toggle('on', j === i);
-          c.setAttribute('aria-pressed', String(j === i));
-        });
+        if (Number(pf.avatarColor) === c.v) return;
+        pf.avatarColor = c.v;
+        $$('.pf-chip', box).forEach(x => { x.classList.remove('on'); x.setAttribute('aria-pressed', 'false'); });
+        chip.classList.add('on');
+        chip.setAttribute('aria-pressed', 'true');
         renderAvatar(false);
         refreshDirty();
       });
@@ -1472,6 +1522,7 @@ function initProfile() {
       avatarImage: p.avatarImage || '',
     };
     loaded = Object.assign({}, pf);
+    profileCache = Object.assign({}, p);
     const mailEl = $('#pf-email');
     if (mailEl) mailEl.textContent = email;
     renderNick();
@@ -1589,23 +1640,35 @@ function initLoginNotify() {
   let loaded = null;
   async function load() {
     try {
-      const p = await api('/api/profile');
+      // 优先用共享缓存（资料卡刚存过就是最新的），没有才去 GET
+      const p = profileCache || (profileCache = await api('/api/profile'));
       loaded = !!p.loginNotify;
       box.checked = loaded;
-    } catch (err) { toast(err.message, true); }
+      box.disabled = false;
+    } catch (err) {
+      // 读不到时**不能停在 unchecked**：服务端默认是「开」，显示成「关」等于
+      // 对用户撒谎。置 indeterminate + 禁用，表示「状态未知」。
+      box.checked = false;
+      box.indeterminate = true;
+      box.disabled = true;
+      toast(err.message, true);
+    }
   }
   box.addEventListener('change', async () => {
     const want = box.checked;
     box.disabled = true;
     try {
-      const p = await api('/api/profile');
-      await api('/api/profile', {
+      // 用共享缓存而不是重新 GET：重新 GET 可能读到资料卡保存**之前**的状态，
+      // 整份 PUT 就会把刚改的昵称/头像写回旧值。
+      const p = profileCache || (profileCache = await api('/api/profile'));
+      const saved = await api('/api/profile', {
         method: 'PUT',
         body: {
           nickname: p.nickname || '', avatarColor: Number(p.avatarColor) || 0,
           avatarImage: p.avatarImage || '', loginNotify: want,
         },
       });
+      profileCache = Object.assign({}, p, saved || {}, { loginNotify: want });
       loaded = want;
       toast(want ? '已开启新设备登录提醒' : '已关闭新设备登录提醒');
     } catch (err) {
@@ -2725,13 +2788,23 @@ function initAdminSessions() {
     $('#sd-body').innerHTML = '<div class="empty">读取中…</div>';
     panel.scrollIntoView({ block: 'nearest' });
     try {
-      const res = await api(`/admin/sessions?uid=${encodeURIComponent(String(uid))}${appFilter()}&limit=100`);
+      const LIMIT = 100;
+      const res = await api(`/admin/sessions?uid=${encodeURIComponent(String(uid))}${appFilter()}&limit=${LIMIT}`);
       const items = res.items || [];
+      const total = Number(res.total) || items.length;
+      // 页头必须报**真实总数**：此前硬编码 limit=100 且不显示总数，>100 会话的
+      // 用户被静默截断——管理员踢完 100 条以为清干净了。
+      $('#sd-meta').textContent = `uid ${uid} · 共 ${total} 条会话 · 点击「退出」可逐条退出`;
       if (!items.length) {
         $('#sd-body').innerHTML = '<div class="empty">该用户已无活跃会话。</div>';
         return;
       }
       $('#sd-body').innerHTML = '';
+      if (total > items.length) {
+        // 截断要说出来，别让管理员以为列表是全集
+        $('#sd-body').appendChild(node(
+          `<p class="hint">共 ${total} 条会话，这里只显示最近 ${items.length} 条；要处理更早的会话，请到「会话总览」按 uid 检索。</p>`));
+      }
       items.sort((a, b) => Number(b.lastSeenAt || 0) - Number(a.lastSeenAt || 0)).forEach(s => {
         const el = node(`
           <div class="item" data-id="${esc(s.id)}">
@@ -3296,6 +3369,15 @@ function wireTabs() {
    openInvite/openBulk 这类后填选项的场景天然成立。
    键盘与无障碍：按钮 aria-haspopup=listbox + aria-expanded；Enter/空格/↓ 打开，
    ↑/↓ 移动高亮，Enter/空格 选中，Esc 关闭回焦；点外部关闭。 */
+/* 全站只挂**一个** document 监听来关下拉：此前每装饰一个 <select> 就 document
+   .addEventListener 一次且永不移除，后台用户详情反复开合会累积几十个监听，
+   每次点击都要把它们全跑一遍。这里用单例登记「当前打开的那个」。 */
+let openSelectMenu = null;
+document.addEventListener('click', e => {
+  const cur = openSelectMenu;
+  if (cur && !cur.wrap.contains(e.target)) cur.close(false);
+});
+
 function decorateSelect(sel) {
   if (!sel) return null;
   if (sel.__dropSync) { sel.__dropSync(); return sel; }   // 已装饰：只同步按钮文案
@@ -3306,7 +3388,14 @@ function decorateSelect(sel) {
   btn.className = 'select-btn';
   btn.setAttribute('aria-haspopup', 'listbox');
   btn.setAttribute('aria-expanded', 'false');
+  // 可访问名：装饰后真正可点的是这个 <button>，而字段名在 <label class="field">
+  // 的 <span> 里（<span> 不是 <label for>，本身不构成关联）。取字段名挂 aria-label，
+  // 否则读屏只念当前值「全部」，用户不知道这个下拉是筛什么。
+  const fieldSpan = sel.closest && sel.closest('.field') ? sel.closest('.field').querySelector('span') : null;
+  const fieldName = fieldSpan ? (fieldSpan.textContent || '').trim() : '';
+  if (fieldName) btn.setAttribute('aria-label', fieldName);
   const label = document.createElement('span');
+  label.setAttribute('aria-hidden', 'true');
   btn.appendChild(label);
   // 展开箭头：与站内图标同 viewBox/线宽（ico 类），旋转动效由 CSS 接管
   const chev = node('<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>');
@@ -3338,6 +3427,7 @@ function decorateSelect(sel) {
       menu.appendChild(li);
     });
     menu.hidden = false;
+    openSelectMenu = { wrap, close };   // 登记为「当前打开的那个」
     btn.setAttribute('aria-expanded', 'true');
     swapIn(menu);   // 浮层进场：fade-scale（popIn 语义的区块动效）
     mark();
@@ -3347,6 +3437,7 @@ function decorateSelect(sel) {
   }
   function close(focusBtn) {
     if (menu.hidden) return;
+    if (openSelectMenu && openSelectMenu.wrap === wrap) openSelectMenu = null;
     menu.hidden = true;
     btn.setAttribute('aria-expanded', 'false');
     if (focusBtn) btn.focus();
@@ -3368,10 +3459,6 @@ function decorateSelect(sel) {
     else if (e.key === 'ArrowUp') { e.preventDefault(); activeIdx = Math.max(0, activeIdx - 1); mark(); }
     else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(activeIdx); }
     else if (e.key === 'Escape') { e.preventDefault(); close(true); }
-  });
-  // 点外部关闭（弹层不拦 Tab：关闭后焦点仍在按钮，语义与原生一致）
-  document.addEventListener('click', e => {
-    if (!menu.hidden && !wrap.contains(e.target)) close(false);
   });
   sel.addEventListener('change', sync);
   sel.__dropSync = sync;

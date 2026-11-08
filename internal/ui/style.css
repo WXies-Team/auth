@@ -828,6 +828,12 @@ td .user-cell .truncate { max-width: 24ch; }
 }
 .pf-chip:active { transform: scale(.94); }
 .pf-chip.on { box-shadow: inset 0 0 0 2px var(--card), inset 0 0 0 4px var(--ink); }
+/* 「自动」颗：不是色块而是文字胶囊——它代表「按账号派生」这个语义，不是某个颜色 */
+.pf-chip.auto {
+  width: auto; min-width: 48px; padding: 0 12px;
+  background: var(--sub-bg); color: var(--sub-ink);
+  font-size: 12px; display: inline-flex; align-items: center; justify-content: center;
+}
 .pf-chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* ---- 详情面板（后台用户）---- */
