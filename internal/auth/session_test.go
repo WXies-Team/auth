@@ -170,7 +170,7 @@ func TestSessionDeviceLabelHealsLegacyRows(t *testing.T) {
 				it.ID, want[it.ID], it.Device)
 		}
 	}
-	admin, _, _, err := svc.AdminListSessions(uid, nil, "", 10, 0)
+	admin, _, _, err := svc.AdminListSessions(uid, nil, "", "", 10, 0)
 	if err != nil || len(admin) != 2 {
 		t.Fatalf("管理端取会话: %v（%d 行）", err, len(admin))
 	}

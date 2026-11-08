@@ -566,7 +566,7 @@ func registerAdminRoutes(mux *http.ServeMux, svc *auth.Service) {
 		}
 		q := r.URL.Query()
 		list, total, totalUsers, err := svc.AdminListSessions(queryInt64(q.Get("uid")), apps,
-			q.Get("query"), queryInt(q.Get("limit")), queryInt(q.Get("offset")))
+			q.Get("query"), q.Get("ip"), queryInt(q.Get("limit")), queryInt(q.Get("offset")))
 		if err != nil {
 			writeResult(w, nil, err)
 			return

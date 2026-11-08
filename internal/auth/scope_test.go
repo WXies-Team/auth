@@ -130,11 +130,11 @@ func TestAdminListSessionsAppsFilter(t *testing.T) {
 		t.Fatalf("expense 登录: %v", err)
 	}
 
-	all, _, _, err := svc.AdminListSessions(0, nil, "", 50, 0)
+	all, _, _, err := svc.AdminListSessions(0, nil, "", "", 50, 0)
 	if err != nil || len(all) < 3 {
 		t.Fatalf("全量应至少 3 行（注册 + 两 app），得到 %d err=%v", len(all), err)
 	}
-	cal, _, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, "", 50, 0)
+	cal, _, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, "", "", 50, 0)
 	if err != nil || len(cal) == 0 {
 		t.Fatalf("按 app 过滤应有行，得到 %d err=%v", len(cal), err)
 	}
@@ -143,7 +143,7 @@ func TestAdminListSessionsAppsFilter(t *testing.T) {
 			t.Errorf("过滤后不该出现 %s 的行: %+v", it.App, it)
 		}
 	}
-	both, _, _, err := svc.AdminListSessions(0, []string{"calorie-diary", "expense-diary"}, "", 50, 0)
+	both, _, _, err := svc.AdminListSessions(0, []string{"calorie-diary", "expense-diary"}, "", "", 50, 0)
 	if err != nil || len(both) < 2 {
 		t.Errorf("双 app 过滤应含两 app 的行，得到 %d err=%v", len(both), err)
 	}

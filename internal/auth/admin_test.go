@@ -228,12 +228,12 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 		t.Fatalf("JWT 登录: %v", err)
 	}
 
-	all, total, _, err := svc.AdminListSessions(0, nil, "", 20, 0)
+	all, total, _, err := svc.AdminListSessions(0, nil, "", "", 20, 0)
 	if err != nil || total < 2 {
 		t.Fatalf("总览应至少 2 条，得到 total=%d err=%v", total, err)
 	}
 	// 三条：注册即登录那台（newPasskeyUser）+ 本用例建的 web + JWT 各一台
-	mine, _, _, err := svc.AdminListSessions(c.UID, nil, "", 20, 0)
+	mine, _, _, err := svc.AdminListSessions(c.UID, nil, "", "", 20, 0)
 	if err != nil || len(mine) != 3 {
 		t.Fatalf("按 uid 过滤应 3 条，得到 %d err=%v", len(mine), err)
 	}
@@ -268,7 +268,7 @@ func TestAdminSessionsAndRevocation(t *testing.T) {
 	if code, _ := httpMsg(jerr); code != 401 {
 		t.Errorf("被踢用户的 JWT 应 401，得到 %d", code)
 	}
-	rest, _, _, err := svc.AdminListSessions(c.UID, nil, "", 20, 0)
+	rest, _, _, err := svc.AdminListSessions(c.UID, nil, "", "", 20, 0)
 	if err != nil || len(rest) != 0 {
 		t.Errorf("踢干净后应 0 条，得到 %d err=%v", len(rest), err)
 	}
@@ -296,7 +296,7 @@ func TestAdminListSessionsQuery(t *testing.T) {
 	}
 
 	// 邮箱片段：只回 a 的会话（注册 1 + 新建 1 = 2 条），用户数 1
-	list, total, users, err := svc.AdminListSessions(0, nil, "sessq-alpha", 100, 0)
+	list, total, users, err := svc.AdminListSessions(0, nil, "sessq-alpha", "", 100, 0)
 	if err != nil {
 		t.Fatalf("按邮箱片段查会话: %v", err)
 	}
@@ -311,26 +311,26 @@ func TestAdminListSessionsQuery(t *testing.T) {
 	}
 
 	// 纯数字 query = uid 精确匹配（与 AdminSearchUsers 同一套全串校验分流）
-	byUID, totalByUID, usersByUID, err := svc.AdminListSessions(0, nil, strconv.FormatInt(a.UID, 10), 100, 0)
+	byUID, totalByUID, usersByUID, err := svc.AdminListSessions(0, nil, strconv.FormatInt(a.UID, 10), "", 100, 0)
 	if err != nil || totalByUID != 2 || usersByUID != 1 || len(byUID) != 2 {
 		t.Errorf("按 uid 应同样回 a 的 2 条，得到 total=%d users=%d len=%d err=%v",
 			totalByUID, usersByUID, len(byUID), err)
 	}
 	// 带字母的混合串不能被按前缀解成 uid（否则会错命中 uid 恰好等于前缀的用户）
-	mixed, mixedTotal, _, err := svc.AdminListSessions(0, nil, strconv.FormatInt(a.UID, 10)+"x", 100, 0)
+	mixed, mixedTotal, _, err := svc.AdminListSessions(0, nil, strconv.FormatInt(a.UID, 10)+"x", "", 100, 0)
 	if err != nil || mixedTotal != 0 || len(mixed) != 0 {
 		t.Errorf("uid+字母的混合串应走邮箱 LIKE、查无此邮箱即 0 行，得到 total=%d len=%d err=%v",
 			mixedTotal, len(mixed), err)
 	}
 
 	// 无匹配：空回执且两个计数都为 0（页码文案不许拿旧值糊弄）
-	none, nTotal, nUsers, err := svc.AdminListSessions(0, nil, "sessq-nobody", 100, 0)
+	none, nTotal, nUsers, err := svc.AdminListSessions(0, nil, "sessq-nobody", "", 100, 0)
 	if err != nil || nTotal != 0 || nUsers != 0 || len(none) != 0 {
 		t.Errorf("查无匹配应全 0，得到 total=%d users=%d len=%d err=%v", nTotal, nUsers, len(none), err)
 	}
 
 	// 空 query = 全量口径不变：本用例至少 3 条（a 2 条 + b 1 条）、至少 2 位用户
-	all, allTotal, allUsers, err := svc.AdminListSessions(0, nil, "", 100, 0)
+	all, allTotal, allUsers, err := svc.AdminListSessions(0, nil, "", "", 100, 0)
 	if err != nil || allTotal < 3 || allUsers < 2 || len(all) != allTotal {
 		t.Errorf("空 query 应回全量，得到 total=%d users=%d len=%d err=%v",
 			allTotal, allUsers, len(all), err)
@@ -339,7 +339,7 @@ func TestAdminListSessionsQuery(t *testing.T) {
 	if _, err := svc.Login("sessq-alpha@example.com", "secret123", "calorie-diary", testMeta); err != nil {
 		t.Fatalf("calorie 登录: %v", err)
 	}
-	cal, calTotal, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, "sessq-alpha", 100, 0)
+	cal, calTotal, _, err := svc.AdminListSessions(0, []string{"calorie-diary"}, "sessq-alpha", "", 100, 0)
 	if err != nil || calTotal == 0 {
 		t.Fatalf("query + app 过滤叠加应有行，得到 total=%d err=%v", calTotal, err)
 	}

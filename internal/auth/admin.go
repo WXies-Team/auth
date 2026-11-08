@@ -434,7 +434,7 @@ func (s *Service) AdminUserDetail(uid int64) (*AdminUserDetail, error) {
 	detail.Scopes = scopes
 
 	// 用户详情是 super 的全量视角（详情页含跨 app 的会话与凭证），不传 app 过滤
-	sessions, _, _, err := s.AdminListSessions(uid, nil, "", adminMaxPage, 0)
+	sessions, _, _, err := s.AdminListSessions(uid, nil, "", "", adminMaxPage, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +627,7 @@ func (s *Service) resolveRootSuper() {
 // LIKE，与 AdminSearchUsers 同一套分流——在前端拿到的本页数据上本地过滤会漏掉
 // 本页之外的用户。total 是同条件下的会话条数（分页按会话 offset 走），totalUsers
 // 是同条件下去重后的用户数（会话总览的表格一行一位用户，页码文案按用户数说）。
-func (s *Service) AdminListSessions(uid int64, apps []string, query string, limit, offset int) ([]AdminSession, int, int, error) {
+func (s *Service) AdminListSessions(uid int64, apps []string, query, ipFilter string, limit, offset int) ([]AdminSession, int, int, error) {
 	limit, offset = clampPage(limit, offset)
 	cond := " WHERE s.revoked_at IS NULL"
 	args := []any{}
@@ -640,6 +640,11 @@ func (s *Service) AdminListSessions(uid int64, apps []string, query string, limi
 		for _, a := range apps {
 			args = append(args, a)
 		}
+	}
+	// IP 过滤：前缀匹配（IPv4/IPv6 都可能只记得一段），参数走占位符，无注入面
+	if ip := strings.TrimSpace(ipFilter); ip != "" {
+		cond += " AND s.ip LIKE ?"
+		args = append(args, "%"+ip+"%")
 	}
 	if q := strings.TrimSpace(query); q != "" {
 		// 与 AdminSearchUsers 同款全串校验：带字母的片段回落邮箱 LIKE，
